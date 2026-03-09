@@ -1,0 +1,1057 @@
+"""
+FastAPI Server for Mental Health Wellness - Agent Version
+Single ReAct Agent with 8 tools handles all conversations
+"""
+
+import os
+import time
+from datetime import datetime
+from typing import Optional, List, Dict
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# Import the new agent
+from src.mental_health_wellness.agent import chat_with_agent, get_agent, check_agent_health
+from src.mental_health_wellness.db.client import get_prisma_client, close_prisma_client
+
+
+# ============================================
+# PYDANTIC MODELS
+# ============================================
+
+class ChatRequest(BaseModel):
+    user_id: str
+    message: str
+    session_id: Optional[str] = None
+
+
+class ChatResponse(BaseModel):
+    response: str
+    session_id: Optional[str] = None
+    emotion: Optional[str] = None
+    crisis_detected: bool = False
+    tools_used: List[str] = []
+    technique_reasoning: Optional[str] = None
+    recommended_techniques_by_category: Dict[str, dict] = {}
+    timestamp: str
+
+
+class PipelineRequest(BaseModel):
+    user_id: Optional[str] = None
+    message: str
+    session_id: Optional[str] = None
+
+
+class UserCreateRequest(BaseModel):
+    email: str
+    name: str
+
+
+class UserCreateResponse(BaseModel):
+    user_id: str
+    email: str
+    name: str
+    created: bool
+
+
+class HealthResponse(BaseModel):
+    status: str
+    version: str
+    agent_ready: bool
+    database_connected: bool
+    timestamp: str
+
+
+class WellnessTip(BaseModel):
+    id: str
+    title: str
+    description: str
+    category: str
+
+
+class TechniqueRatingRequest(BaseModel):
+    user_id: str
+    technique_id: str
+    rating: int  # 1-5
+    feedback: Optional[str] = None
+    completed: bool = False
+
+
+class TechniqueRatingResponse(BaseModel):
+    status: str
+    message: str
+    technique_id: str
+
+
+class SessionRenameRequest(BaseModel):
+    title: str
+
+# ============================================
+# LIFESPAN MANAGEMENT
+# ============================================
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage startup and shutdown events"""
+    print("\n" + "="*60)
+    print("[SERVER] 🚀 Starting SentiMind Mental Health API")
+    print("="*60)
+    
+    try:
+        await get_prisma_client()
+        print("[SERVER] ✅ Database connected")
+    except Exception as e:
+        print(f"[SERVER] ❌ Database failed: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    try:
+        # Preload ML models on startup to avoid slow first request
+        print("[SERVER] 🔄 Loading ML models...")
+        from src.mental_health_wellness.memory import preload_embeddings
+        from src.mental_health_wellness.tools.mood_tools import preload_emotion_model
+        
+        print("[SERVER]   • Embeddings (all-MiniLM-L6-v2)")
+        preload_embeddings()
+        
+        print("[SERVER]   • Emotion detector (DistilBERT)")
+        preload_emotion_model()
+        
+        print("[SERVER] ✅ All models loaded")
+    except Exception as e:
+        print(f"[SERVER] ❌ Model loading failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+    
+    try:
+        agent = get_agent()
+        print("[SERVER] ✅ Agent initialized")
+    except Exception as e:
+        print(f"[SERVER] ❌ Agent failed: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    print("[SERVER] 🎯 Ready for requests\n")
+    
+    yield
+    
+    print("\n[SERVER] 🛑 Shutting down...")
+    await close_prisma_client()
+    print("[SERVER] ✅ Cleanup complete\n")
+
+
+# ============================================
+# FASTAPI APP
+# ============================================
+
+app = FastAPI(
+    title="Mental Health Wellness API",
+    description="AI mental health support using LangGraph ReAct Agent",
+    version="3.0.0",
+    lifespan=lifespan
+)
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ============================================
+# ENDPOINTS
+# ============================================
+
+@app.get("/", response_model=dict)
+async def root():
+    """Health check endpoint"""
+    return {
+        "message": "Mental Health Wellness API - Agent Version",
+        "status": "healthy",
+        "version": "3.0.0"
+    }
+
+
+@app.get("/health", response_model=HealthResponse)
+async def health_check():
+    """Detailed health check"""
+    db_connected = False
+    agent_ready = False
+    
+    try:
+        prisma = await get_prisma_client()
+        await prisma.user.count()
+        db_connected = True
+    except Exception as e:
+        print(f"[HEALTH] DB check failed: {e}")
+    
+    try:
+        health = check_agent_health()
+        agent_ready = health.get("agent_ready", False)
+    except Exception as e:
+        print(f"[HEALTH] Agent check failed: {e}")
+    
+    return HealthResponse(
+        status="healthy" if db_connected and agent_ready else "degraded",
+        version="3.0.0",
+        agent_ready=agent_ready,
+        database_connected=db_connected,
+        timestamp=datetime.now().isoformat()
+    )
+
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    """
+    Main chat endpoint using the ReAct Agent.
+    The agent decides which tools to use based on the message.
+    """
+    try:
+        result = await chat_with_agent(
+            user_id=request.user_id,
+            message=request.message,
+            session_id=request.session_id
+        )
+        
+        return ChatResponse(
+            response=result.get("response", "I'm here to listen."),
+            session_id=result.get("session_id"),
+            emotion=result.get("emotion"),
+            crisis_detected=result.get("crisis_detected", False),
+            tools_used=result.get("tools_used", []),
+            technique_reasoning=result.get("technique_reasoning"),
+            recommended_techniques_by_category=result.get("recommended_techniques_by_category", {}),
+            timestamp=datetime.now().isoformat()
+        )
+        
+    except Exception as e:
+        print(f"[ERROR] Chat failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Chat processing failed: {str(e)}"
+        )
+
+
+@app.post("/api/pipeline/complete")
+async def pipeline_complete(request: PipelineRequest):
+    """
+    Complete pipeline endpoint (frontend compatibility).
+    Uses the same agent as /chat but with frontend-expected response format.
+    """
+    start_time = time.time()
+    
+    try:
+        user_id = request.user_id or "anonymous"
+        
+        result = await chat_with_agent(
+            user_id=user_id,
+            message=request.message,
+            session_id=request.session_id
+        )
+        
+        end_time = time.time()
+        total_ms = int((end_time - start_time) * 1000)
+        
+        return {
+            "status": "success",
+            "mood_analysis": {
+                "sentiment": result.get("sentiment", "neutral"),
+                "emotion": result.get("emotion", "neutral"),
+                "intensity": result.get("intensity", 0.5),
+                "confidence": result.get("confidence", 0.8)
+            },
+            "response": result.get("response", "I'm here to listen."),
+            "crisis_detected": result.get("crisis_detected", False),
+            "session_id": result.get("session_id"),
+            "tools_used": result.get("tools_used", []),
+            "techniques": result.get("techniques", []),
+            "performance": {
+                "total_ms": total_ms
+            }
+        }
+        
+    except Exception as e:
+        print(f"[ERROR] Pipeline failed: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        return {
+            "status": "success",
+            "mood_analysis": {
+                "sentiment": "neutral",
+                "emotion": "neutral",
+                "intensity": 0.5,
+                "confidence": 0.5
+            },
+            "response": "I appreciate you sharing. How are you feeling right now?",
+            "crisis_detected": False,
+            "tools_used": [],
+            "performance": {"total_ms": 0}
+        }
+
+
+@app.post("/api/user/create", response_model=UserCreateResponse)
+async def create_user(request: UserCreateRequest):
+    """Create a new user"""
+    try:
+        prisma = await get_prisma_client()
+        
+        existing = await prisma.user.find_unique(where={"email": request.email})
+        if existing:
+            return UserCreateResponse(
+                user_id=existing.id,
+                email=existing.email,
+                name=existing.name,
+                created=False
+            )
+        
+        user = await prisma.user.create(
+            data={"email": request.email, "name": request.name}
+        )
+        
+        await prisma.userpreference.create(data={"userId": user.id})
+        await prisma.userstatistics.create(data={"userId": user.id})
+        
+        return UserCreateResponse(
+            user_id=user.id,
+            email=user.email,
+            name=user.name,
+            created=True
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/user/ensure")
+async def ensure_user(request: ChatRequest):
+    """Ensure user exists in database, creating anonymous user if needed"""
+    try:
+        prisma = await get_prisma_client()
+        user_id = request.user_id or "anonymous"
+        
+        # Try to find existing user by ID
+        existing_user = await prisma.user.find_unique(where={"id": user_id})
+        
+        if existing_user:
+            return {
+                "status": "success",
+                "user_id": existing_user.id,
+                "email": existing_user.email,
+                "name": existing_user.name,
+                "created": False
+            }
+        
+        # Create new anonymous user with placeholder email
+        email = f"{user_id}@sentimind.local"
+        user = await prisma.user.create(
+            data={
+                "id": user_id,
+                "email": email,
+                "name": "Anonymous User" if user_id == "anonymous" else user_id
+            }
+        )
+        
+        # Create associated records
+        await prisma.userpreference.create(data={"userId": user.id})
+        await prisma.userstatistics.create(data={"userId": user.id})
+        
+        return {
+            "status": "success",
+            "user_id": user.id,
+            "email": user.email,
+            "name": user.name,
+            "created": True
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/wellness/tips", response_model=List[WellnessTip])
+async def get_wellness_tips():
+    """Get wellness tips"""
+    return [
+        WellnessTip(id="1", title="Practice Gratitude", description="Note three things you're grateful for each day.", category="mindfulness"),
+        WellnessTip(id="2", title="Deep Breathing", description="Try 4-7-8 breathing when stressed.", category="breathing"),
+        WellnessTip(id="3", title="Stay Connected", description="Reach out to someone today.", category="social"),
+        WellnessTip(id="4", title="Move Your Body", description="Even a 10-minute walk helps.", category="physical"),
+        WellnessTip(id="5", title="Limit News", description="Set specific times for news/social media.", category="boundaries")
+    ]
+
+
+@app.get("/api/user/{user_id}/sessions")
+async def get_user_sessions(user_id: str, limit: int = 10):
+    """Get user's recent sessions with all their messages"""
+    try:
+        prisma = await get_prisma_client()
+        
+        # Fetch sessions with ALL their messages
+        # Note: prisma-client-py uses 'order' instead of 'order_by'
+        sessions = await prisma.session.find_many(
+            where={"userId": user_id},
+            order={"startedAt": "desc"},
+            take=limit,
+            include={
+                "messages": {"include": {"technique": True}}
+            }
+        )
+        
+        result_sessions = []
+        for s in sessions:
+            # Sort messages by createdAt in application code
+            sorted_messages = sorted(s.messages, key=lambda m: m.createdAt) if s.messages else []
+            
+            result_sessions.append({
+                "id": s.id,
+                "title": s.title,
+                "status": str(s.status),
+                "mood_summary": str(s.moodSummary) if s.moodSummary else None,
+                "started_at": s.startedAt.isoformat() if s.startedAt else None,
+                "ended_at": s.endedAt.isoformat() if s.endedAt else None,
+                "preview": sorted_messages[0].content[:100] if sorted_messages else None,
+                "message_count": len(sorted_messages),
+                "messages": [
+                    {
+                        "id": m.id,
+                        "role": str(m.role),
+                        "content": m.content,
+                        "emotion": str(m.emotion) if m.emotion else None,
+                        "sentiment": str(m.sentiment) if m.sentiment else None,
+                        "createdAt": m.createdAt.isoformat() if m.createdAt else None,
+                        "technique": ({
+                            "id": m.technique.id,
+                            "name": m.technique.name,
+                            "brief": m.technique.brief,
+                            "description": m.technique.description,
+                            "steps": m.technique.steps,
+                            "duration_minutes": m.technique.durationMinutes,
+                            "difficulty": str(m.technique.difficulty),
+                            "category": m.technique.category.name if m.technique.category else "General",
+                            "why_it_works": m.technique.whyItWorks,
+                            "avg_rating": m.technique.avgRating,
+                            "effectiveness": m.technique.effectiveness
+                        } if getattr(m, 'technique', None) else None)
+                    }
+                    for m in sorted_messages
+                ]
+            })
+        
+        return {
+            "status": "success",
+            "sessions": result_sessions
+        }
+        
+    except Exception as e:
+        print(f"[API] Error fetching user sessions: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/session/{session_id}/messages")
+async def get_session_messages(session_id: str):
+    """Get all messages from a specific session"""
+    try:
+        prisma = await get_prisma_client()
+        
+        messages = await prisma.message.find_many(
+            where={"sessionId": session_id},
+            order={"createdAt": "asc"},
+            include={"technique": True}
+        )
+        
+        return {
+            "status": "success",
+            "session_id": session_id,
+            "messages": [
+                {
+                    "id": m.id,
+                    "role": str(m.role),
+                    "content": m.content,
+                    "emotion": str(m.emotion) if m.emotion else None,
+                    "sentiment": str(m.sentiment) if m.sentiment else None,
+                    "createdAt": m.createdAt.isoformat() if m.createdAt else None,
+                    "technique": ({
+                        "id": m.technique.id,
+                        "name": m.technique.name,
+                        "brief": m.technique.brief,
+                        "description": m.technique.description,
+                        "steps": m.technique.steps,
+                        "duration_minutes": m.technique.durationMinutes,
+                        "difficulty": str(m.technique.difficulty),
+                        "category": m.technique.category.name if m.technique and m.technique.category else "General",
+                        "why_it_works": m.technique.whyItWorks,
+                        "avg_rating": m.technique.avgRating,
+                        "effectiveness": m.technique.effectiveness
+                    } if getattr(m, 'technique', None) else None)
+                }
+                for m in messages
+            ]
+        }
+        
+    except Exception as e:
+        print(f"[API] Error fetching session messages: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.patch("/api/session/{session_id}/rename")
+async def rename_session(session_id: str, request: SessionRenameRequest):
+    """Rename a chat session"""
+    try:
+        prisma = await get_prisma_client()
+        
+        # Check if session exists
+        session = await prisma.session.find_unique(where={"id": session_id})
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        # Update the title
+        updated_session = await prisma.session.update(
+            where={"id": session_id},
+            data={"title": request.title}
+        )
+        
+        return {
+            "status": "success",
+            "session_id": session_id,
+            "title": updated_session.title
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[API] Error renaming session: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/user/{user_id}/stats")
+async def get_user_stats(user_id: str):
+    """Get user statistics"""
+    try:
+        prisma = await get_prisma_client()
+        
+        stats = await prisma.userstatistics.find_unique(where={"userId": user_id})
+        
+        if not stats:
+            return {"message": "No statistics found"}
+        
+        return {
+            "total_sessions": stats.totalSessions,
+            "total_messages": stats.totalMessages,
+            "current_streak": stats.currentCheckInStreak,
+            "longest_streak": stats.longestCheckInStreak,
+            "average_mood": stats.averageMoodRating,
+            "techniques_used": stats.totalTechniquesUsed
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/techniques")
+async def get_techniques(emotion: Optional[str] = None, category: Optional[str] = None):
+    """Get available techniques"""
+    try:
+        prisma = await get_prisma_client()
+        
+        where_conditions = {"isActive": True}
+        
+        # For array filtering in Prisma, we need to use 'hasSome' instead of 'has'
+        if emotion:
+            emotion_upper = emotion.upper()
+            # Map common emotion names to schema enums
+            emotion_map = {
+                "fear": "ANXIETY", 
+                "anxiety": "ANXIETY",
+                "sadness": "SADNESS", 
+                "anger": "ANGER",
+                "joy": "JOY", 
+                "neutral": "NEUTRAL",
+                "disgust": "ANGER",
+                "surprise": "JOY"
+            }
+            target_emotion = emotion_map.get(emotion.lower(), emotion.upper())
+            where_conditions["targetEmotions"] = {"hasSome": [target_emotion]}
+        
+        techniques = await prisma.technique.find_many(
+            where=where_conditions,
+            include={"category": True},
+            order={"avgRating": "desc"}
+        )
+        
+        return {
+            "status": "success",
+            "techniques": [
+                {
+                    "id": t.id,
+                    "name": t.name,
+                    "brief": t.brief,
+                    "description": t.description,
+                    "category": t.category.name if t.category else "General",
+                    "duration_minutes": t.durationMinutes,
+                    "difficulty": str(t.difficulty),
+                    "steps": t.steps,
+                    "why_it_works": t.whyItWorks,
+                    "avg_rating": t.avgRating,
+                    "total_ratings": t.totalRatings,
+                    "effectiveness": t.effectiveness
+                }
+                for t in techniques
+            ]
+        }
+        
+    except Exception as e:
+        print(f"[API] Error fetching techniques: {e}")
+        raise HTTPException(status_code=500, detail=f"Error fetching techniques: {str(e)}")
+
+
+@app.post("/api/technique/rate", response_model=TechniqueRatingResponse)
+async def rate_technique(request: TechniqueRatingRequest):
+    """Submit rating and feedback for a technique"""
+    try:
+        # Validate rating is between 1-5
+        if not (1 <= request.rating <= 5):
+            raise HTTPException(status_code=400, detail="Rating must be between 1 and 5")
+        
+        prisma = await get_prisma_client()
+        
+        # Create the user technique rating
+        rating = await prisma.usertechniquerating.create(
+            data={
+                "userId": request.user_id,
+                "techniqueId": request.technique_id,
+                "rating": request.rating,
+                "feedback": request.feedback,
+                "completed": request.completed
+            }
+        )
+        
+        # Update technique average rating and total ratings count
+        technique = await prisma.technique.find_unique(
+            where={"id": request.technique_id},
+            include={"userRatings": True}
+        )
+        
+        if technique:
+            # Recalculate average rating
+            all_ratings = technique.userRatings
+            if all_ratings:
+                avg_rating = sum(r.rating for r in all_ratings) / len(all_ratings)
+                total_ratings = len(all_ratings)
+                
+                await prisma.technique.update(
+                    where={"id": request.technique_id},
+                    data={
+                        "avgRating": round(avg_rating, 2),
+                        "totalRatings": total_ratings
+                    }
+                )
+        
+        return {
+            "status": "success",
+            "message": "Thank you for your feedback!",
+            "technique_id": request.technique_id
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[API] Error rating technique: {e}")
+        raise HTTPException(status_code=500, detail=f"Error saving rating: {str(e)}")
+
+
+# ============================================
+# CONSENT & GDPR ENDPOINTS
+# ============================================
+
+@app.post("/api/user/{user_id}/consent")
+async def record_consent(user_id: str):
+    """Record user's consent for data processing (GDPR compliance)"""
+    try:
+        prisma = await get_prisma_client()
+        
+        user = await prisma.user.find_unique(where={"id": user_id})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        updated = await prisma.user.update(
+            where={"id": user_id},
+            data={
+                "consentGiven": True,
+                "consentDate": datetime.now()
+            }
+        )
+        
+        return {
+            "status": "success",
+            "consent_given": True,
+            "consent_date": updated.consentDate.isoformat() if updated.consentDate else None
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/user/{user_id}/data-export")
+async def export_user_data(user_id: str):
+    """Export all user data (GDPR Article 15 - Right of Access)"""
+    try:
+        prisma = await get_prisma_client()
+        
+        user = await prisma.user.find_unique(
+            where={"id": user_id},
+            include={
+                "sessions": {"include": {"messages": True}},
+                "moodLogs": True,
+                "techniqueRatings": True,
+                "crisisLogs": True,
+                "preference": True,
+                "statistics": True
+            }
+        )
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Format data for export (no internal IDs)
+        export = {
+            "user": {
+                "name": user.name,
+                "email": user.email,
+                "created_at": user.createdAt.isoformat() if user.createdAt else None,
+                "consent_given": user.consentGiven,
+                "consent_date": user.consentDate.isoformat() if user.consentDate else None
+            },
+            "sessions": [
+                {
+                    "title": s.title,
+                    "started_at": s.startedAt.isoformat() if s.startedAt else None,
+                    "messages": [
+                        {"role": str(m.role), "content": m.content, "emotion": str(m.emotion) if m.emotion else None}
+                        for m in (s.messages or [])
+                    ]
+                }
+                for s in (user.sessions or [])
+            ],
+            "mood_logs": [
+                {
+                    "emotion": str(ml.emotion) if ml.emotion else None,
+                    "intensity": ml.intensity,
+                    "logged_at": ml.loggedAt.isoformat() if ml.loggedAt else None
+                }
+                for ml in (user.moodLogs or [])
+            ],
+            "technique_ratings": [
+                {"rating": tr.rating, "feedback": tr.feedback, "completed": tr.completed}
+                for tr in (user.techniqueRatings or [])
+            ],
+            "preferences": {
+                "communication_style": user.preference.communicationStyle if user.preference else None,
+                "detail_level": user.preference.detailLevel if user.preference else None,
+                "tone": user.preference.tone if user.preference else None
+            } if user.preference else None,
+            "exported_at": datetime.now().isoformat()
+        }
+        
+        return {"status": "success", "data": export}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/user/{user_id}/data")
+async def delete_user_data(user_id: str):
+    """Delete all user data (GDPR Article 17 - Right to Erasure)"""
+    try:
+        prisma = await get_prisma_client()
+        
+        user = await prisma.user.find_unique(where={"id": user_id})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Cascade delete handles related records (sessions, messages, etc.)
+        await prisma.user.delete(where={"id": user_id})
+        
+        return {
+            "status": "success",
+            "message": "All user data has been permanently deleted",
+            "user_id": user_id
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================
+# VOICE CHAT ENDPOINT
+# ============================================
+
+
+# ============================================
+# VOICE PROCESSING HELPER
+# ============================================
+
+def try_decode_webm_to_wav(webm_bytes: bytes, output_path: str) -> bool:
+    """
+    Decode WebM to WAV. Since ffmpeg might not be available,
+    we use librosa which can fall back to scipy or other methods.
+    """
+    import tempfile
+    import os as _os
+    
+    # Save WebM to temp file
+    with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp:
+        tmp.write(webm_bytes)
+        tmp_webm = tmp.name
+    
+    success = False
+    try:
+        # Try with librosa first (supports many formats)
+        try:
+            import librosa
+            import soundfile as sf
+            
+            print("[VOICE] 🔄 Decoding WebM with librosa...")
+            y, sr = librosa.load(tmp_webm, sr=16000, mono=True)
+            sf.write(output_path, y, 16000)
+            print("[VOICE] ✅ WebM decoded with librosa")
+            success = True
+            
+        except Exception as e:
+            print(f"[VOICE] ⚠️ librosa failed: {e}")
+            
+            # Try scipy as fallback
+            if not success:
+                try:
+                    import scipy.io.wavfile as wavfile
+                    import numpy as np
+                    
+                    print("[VOICE] 🔄 Trying scipy.io.wavfile...")
+                    sr, data = wavfile.read(tmp_webm)
+                    
+                    # Resample to 16kHz if needed
+                    if sr != 16000:
+                        ratio = 16000 / sr
+                        new_length = int(len(data) * ratio)
+                        data = np.interp(
+                            np.linspace(0, len(data)-1, new_length),
+                            np.arange(len(data)),
+                            data
+                        )
+                    
+                    wavfile.write(output_path, 16000, data.astype(np.int16))
+                    print("[VOICE] ✅ WebM decoded with scipy")
+                    success = True
+                except Exception as scipy_err:
+                    print(f"[VOICE] ⚠️ scipy failed: {scipy_err}")
+                    
+    finally:
+        # Clean up temp file
+        if _os.path.exists(tmp_webm):
+            try:
+                _os.unlink(tmp_webm)
+            except Exception:
+                pass
+    
+    return success
+
+
+@app.post("/api/chat/voice")
+async def chat_voice(
+    audio: UploadFile = File(...),
+    user_id: str = Form("anonymous"),
+    message: str = Form(""),
+    session_id: Optional[str] = Form(None)
+):
+    """
+    Voice-enabled chat endpoint. Routes through Voice Pre-Processing Node first.
+    
+    ARCHITECTURE FLOW:
+    1. Convert audio blob to standardized WAV file
+    2. Route to voice_preprocessing_node (Step 1: Save Audio, Step 2: Transcribe, Step 3: Extract Features)
+    3. Run through main pipeline (Intake → Agent → Router → Response/Crisis → Saver)
+    4. Return response with voice analysis included
+    
+    Audio format: WAV, MP3, WebM, or other common audio formats (16kHz+ recommended)
+    """
+    import tempfile
+    import os as _os
+    
+    try:
+        print(f"\n[API: VOICE] 🎤 Voice endpoint called - user: {user_id}, session: {session_id}")
+        
+        # ============================================
+        # RECEIVE AND SAVE AUDIO
+        # ============================================
+        
+        audio_bytes = await audio.read()
+        print(f"[API: VOICE] 📥 Received {len(audio_bytes)} bytes of audio")
+        
+        # Detect audio format
+        audio_format = _detect_audio_format(audio_bytes)
+        print(f"[API: VOICE] 🔍 Detected audio format: {audio_format}")
+        
+        # Save to temporary file
+        with tempfile.NamedTemporaryFile(suffix=f".{audio_format}", delete=False) as tmp:
+            tmp.write(audio_bytes)
+            temp_audio_path = tmp.name
+        
+        print(f"[API: VOICE] 💾 Saved audio to: {temp_audio_path}")
+        
+        # ============================================
+        # ROUTE TO VOICE PRE-PROCESSING NODE
+        # ============================================
+        
+        from src.mental_health_wellness.nodes.voice_preprocessing import voice_preprocessing_node
+        
+        # Create state for voice preprocessing
+        voice_state = {
+            "audio_file_path": temp_audio_path,
+            "message": message
+        }
+        
+        # Run voice preprocessing
+        voice_result = await voice_preprocessing_node(voice_state)
+        
+        voice_processed = voice_result.get("voice_processed", False)
+        voice_features = voice_result.get("voice_features", {})
+        transcription = voice_result.get("transcription", "")
+        final_message = voice_result.get("final_message", message)
+        temp_audio_path = voice_result.get("temp_audio_path")  # Update in case it changed
+        
+        # Debug: Log what we got from voice preprocessing
+        print(f"[API: VOICE] 🔍 DEBUG - voice_result keys: {list(voice_result.keys())}")
+        print(f"[API: VOICE] 🔍 DEBUG - transcription from result: '{transcription}'")
+        print(f"[API: VOICE] 🔍 DEBUG - final_message from result: '{final_message}'")
+        print(f"[API: VOICE] 🔍 DEBUG - original message param: '{message}'")
+        
+        print(f"[API: VOICE] ✅ Voice preprocessing complete: voice_processed={voice_processed}")
+        
+        if voice_processed and voice_features:
+            print(f"[API: VOICE] 🎯 Voice emotion: {voice_features.get('emotion')} "
+                  f"(confidence: {voice_features.get('confidence', 0):.2f})")
+        
+        # ============================================
+        # INJECT VOICE CONTEXT INTO MESSAGE
+        # ============================================
+        
+        voice_confidence = voice_features.get("confidence", 0.0) if voice_features else 0.0
+        voice_emotion = voice_features.get("emotion", "neutral") if voice_features else "neutral"
+        
+        # If voice was processed with high confidence, inject context
+        if voice_processed and voice_confidence > 0.3:
+            voice_context = (
+                f"\n[Voice Analysis: The user's voice indicates they sound {voice_emotion} "
+                f"(confidence: {voice_confidence:.0%}, arousal: {voice_features.get('arousal', 0.5):.1f}, "
+                f"valence: {voice_features.get('valence', 0.5):.1f})]"
+            )
+            text_message_with_context = final_message + voice_context
+            print(f"[API: VOICE] 🎯 Injecting voice context into message")
+        else:
+            text_message_with_context = final_message
+        
+        # ============================================
+        # RUN THROUGH MAIN PIPELINE
+        # ============================================
+        
+        print(f"[API: VOICE] ✅ Final message: '{final_message[:100]}...'")
+        print(f"[API: VOICE] ✅ With context: '{text_message_with_context[:100]}...'")
+        print(f"[API: VOICE] 🚀 Routing to chat_with_agent...")
+        
+        result = await chat_with_agent(
+            user_id=user_id,
+            message=text_message_with_context,
+            session_id=session_id,
+            audio_file_path=temp_audio_path if voice_processed else None
+        )
+        
+        # ============================================
+        # CLEANUP TEMP AUDIO FILE
+        # ============================================
+        
+        if temp_audio_path and _os.path.exists(temp_audio_path):
+            try:
+                _os.unlink(temp_audio_path)
+                print(f"[API: VOICE] 🧹 Cleaned up temp audio file")
+            except Exception as e:
+                print(f"[API: VOICE] ⚠️ Could not delete temp file: {e}")
+        
+        # ============================================
+        # RETURN RESPONSE WITH VOICE DATA
+        # ============================================
+        
+        return {
+            "response": result.get("response", "I'm here to listen."),
+            "session_id": result.get("session_id"),
+            "emotion": result.get("emotion", "neutral"),
+            "voice_emotion": voice_emotion if voice_processed else None,
+            "voice_confidence": voice_confidence if voice_processed else 0.0,
+            "transcription": transcription if voice_processed else None,
+            "acoustic_features": voice_features.get("acoustic_features", {}) if voice_features else {},
+            "crisis_detected": result.get("crisis_detected", False),
+            "tools_used": result.get("tools_used", []),
+            "has_voice": voice_processed,
+            "recommended_technique": result.get("recommended_technique"),
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        print(f"[API: VOICE] ❌ Voice chat failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Voice processing failed: {str(e)}")
+
+
+def _detect_audio_format(audio_bytes: bytes) -> str:
+    """
+    Detect audio format from file signature (magic bytes).
+    """
+    if len(audio_bytes) < 4:
+        return "wav"  # default
+    
+    if audio_bytes[:4] == b'RIFF':
+        return "wav"
+    elif audio_bytes[:4] == b'\xff\xfb' or audio_bytes[:2] == b'\xff\xfa':
+        return "mp3"
+    elif audio_bytes[4:8] == b'ftyp':
+        return "mp4"
+    elif audio_bytes[:4] == b'OggS':
+        return "ogg"
+    elif b'\x1a\x45\xdf\xa3' in audio_bytes[:100]:
+        return "webm"
+    else:
+        return "webm"  # default
+
+
+# ============================================
+# MAIN
+# ============================================
+
+if __name__ == "__main__":
+    import uvicorn
+    
+    port = int(os.getenv("PORT", 8000))
+    
+    # Run without reload=True to avoid potential subprocess/Prisma conflicts on Windows
+    # The "All connection attempts failed" error is caused by uvicorn's reloader interfering with Prisma binaries
+    uvicorn.run(
+        "api_server:app",
+        host="0.0.0.0",
+        port=port,
+        reload=False  # CHANGED: Disabled reload to fix DB connection reliability
+    )

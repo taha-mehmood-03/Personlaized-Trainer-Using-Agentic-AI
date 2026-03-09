@@ -1,0 +1,168 @@
+"""
+Crisis Handler Node - Immediate safety intervention
+HIGHEST PRIORITY - Handles all crisis situations
+"""
+
+from ..agent.state import MentalHealthState
+from ..agent.prompts import PROMPTS
+
+
+async def crisis_handler_node(state: MentalHealthState) -> dict:
+    """
+    Handle crisis situations with immediate safety response.
+    
+    Purpose:
+        - Detect crisis severity level
+        - Provide immediate crisis resources (hotlines)
+        - Generate compassionate crisis response
+        - Log for safety tracking
+    
+    CRITICAL: This node ALWAYS provides crisis resources.
+    It sets final_response directly to ensure immediate help.
+    
+    Input State:
+        - messages: Conversation history
+        - user_id: For logging
+    
+    Output State:
+        - crisis_level: "low", "medium", "high"
+        - crisis_detected: True
+        - crisis_resources: Hotline information
+        - final_response: Set directly (skips normal response generation)
+        - tools_used: Updated with crisis tools
+    
+    Risk Levels:
+        - HIGH: Immediate danger (suicide, self-harm intent)
+        - MEDIUM: Warning signs (hopelessness, giving up)
+        - LOW: General distress
+    """
+    messages = state.get("messages", [])
+    user_id = state.get("user_id", "unknown")
+    
+    last_message = messages[-1].content if messages else ""
+    
+    print(f"\n[NODE: CRISIS_HANDLER] 🚨 CRISIS RESPONSE ACTIVATED")
+    print(f"[NODE: CRISIS_HANDLER] User: {user_id}")
+    print(f"[NODE: CRISIS_HANDLER] Message: \"{last_message[:80]}...\"")
+    
+    try:
+        # ============================================
+        # CRISIS CHECK: RELY ON AGENT JUDGMENT
+        # ============================================
+        
+        # 1. Check if Agent set a crisis level
+        agent_crisis_level = state.get("crisis_level", "low")
+        
+        # 2. Check if Agent called crisis tools explicitly
+        tools_used = state.get("tools_used", [])
+        agent_called_crisis_tools = "handle_crisis" in tools_used
+        
+        print(f"[NODE: CRISIS_HANDLER] 🔍 Agent Crisis Level: {agent_crisis_level.upper()}")
+        print(f"[NODE: CRISIS_HANDLER] 🛠️ Agent Tools: {tools_used}")
+        
+        # Determine final crisis status
+        final_crisis_level = "low"
+        crisis_pre_screened = state.get("crisis_pre_screened", False)
+        
+        if crisis_pre_screened:
+            final_crisis_level = state.get("crisis_level", "medium")
+            print(f"[NODE: CRISIS_HANDLER] 🛡️ Pre-screener trusted — using level: {final_crisis_level.upper()}")
+        elif agent_called_crisis_tools:
+            final_crisis_level = "high"
+            print(f"[NODE: CRISIS_HANDLER] 🤖 Agent explicitly called crisis tools - ESCALATING TO HIGH RISK")
+        elif agent_crisis_level in ["medium", "high"]:
+            final_crisis_level = agent_crisis_level
+            print(f"[NODE: CRISIS_HANDLER] ⚠️ Agent set risk level to {agent_crisis_level.upper()}")
+            
+        
+        # Only treat as crisis if risk level is medium or high
+        if final_crisis_level in ["medium", "high"]:
+            # Build crisis resources dict (since we removed crisis_resources tool)
+            resources = {
+                "primary_hotline": {
+                    "name": "988 Suicide & Crisis Lifeline",
+                    "number": "988",
+                    "available": "24/7"
+                },
+                "text_line": {
+                    "name": "Crisis Text Line",
+                    "action": "Text HOME to 741741",
+                    "available": "24/7"
+                }
+            }
+            
+            print(f"[NODE: CRISIS_HANDLER] 📞 Resources: {resources['primary_hotline']['name']}")
+            
+            # Generate crisis response
+            if final_crisis_level == "high":
+                response = _generate_high_risk_response(resources)
+            else:
+                response = _generate_medium_risk_response(resources)
+            
+            print(f"[NODE: CRISIS_HANDLER] ✅ Crisis response generated")
+            
+            return {
+                "crisis_level": final_crisis_level,
+                "crisis_detected": True,
+                "crisis_resources": resources,
+                "final_response": response,
+                "tools_used": ["handle_crisis"]
+            }
+        else:
+            # Not a crisis - pass through to normal response generation
+            print(f"[NODE: CRISIS_HANDLER] ✅ No crisis detected (low risk) - continuing to response generation")
+            return {
+                "crisis_level": final_crisis_level,
+                "crisis_detected": False,
+                # Do NOT add crisis_check — no crisis was detected
+            }
+        
+    except Exception as e:
+        print(f"[NODE: CRISIS_HANDLER] ❌ Error: {e}")
+        
+        # Fallback crisis response - ALWAYS provide resources
+        fallback_response = """I hear you, and I'm concerned about what you've shared. Please know that you matter.
+
+🆘 **Please reach out now:**
+- **988 Suicide & Crisis Lifeline**: Call or text **988** (24/7)
+- **Crisis Text Line**: Text **HOME** to **741741**
+
+You don't have to face this alone. These are real people ready to help right now. 💙"""
+        
+        return {
+            "crisis_level": "medium",
+            "crisis_detected": True,
+            "crisis_resources": {},
+            "final_response": fallback_response,
+            "tools_used": state.get("tools_used", []) + ["crisis_fallback"]
+        }
+
+
+def _generate_high_risk_response(resources: dict) -> str:
+    """Generate response for high-risk crisis situations"""
+    hotline = resources.get("primary_hotline", {})
+    text_line = resources.get("text_line", {})
+    
+    return f"""I hear you, and I'm really glad you reached out to me right now. What you're feeling is serious, and you deserve immediate support from someone trained to help.
+
+🆘 **Please reach out right now:**
+- **{hotline.get('name', '988 Suicide & Crisis Lifeline')}**: Call or text **{hotline.get('number', '988')}** (available 24/7)
+- **{text_line.get('name', 'Crisis Text Line')}**: {text_line.get('action', 'Text HOME to 741741')}
+
+These are real people who genuinely care and are ready to listen right now. You're not alone, and there is help available.
+
+I'm here with you too. Would you like to stay and talk while you consider reaching out to them? 💙"""
+
+
+def _generate_medium_risk_response(resources: dict) -> str:
+    """Generate response for medium-risk situations"""
+    hotline = resources.get("primary_hotline", {})
+    text_line = resources.get("text_line", {})
+    
+    return f"""I can hear that you're going through something really difficult right now. Thank you for trusting me with this.
+
+If you're having thoughts of hurting yourself, please know that support is available:
+- **{hotline.get('name', '988 Suicide & Crisis Lifeline')}**: Call or text **{hotline.get('number', '988')}**
+- **{text_line.get('name', 'Crisis Text Line')}**: {text_line.get('action', 'Text HOME to 741741')}
+
+I'm here to listen and support you. What's been weighing on you the most? 💙"""

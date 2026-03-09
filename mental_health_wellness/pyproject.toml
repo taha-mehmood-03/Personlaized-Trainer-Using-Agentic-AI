@@ -1,0 +1,24 @@
+[project]
+name = "mental_health_wellness"
+version = "2.0.0"
+description = "AI Mental Health Support using LangGraph"
+authors = [{ name = "Your Name", email = "you@example.com" }]
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    "langgraph>=0.2.0",
+    "langchain>=0.3.0",
+    "langchain-groq>=0.2.0",
+    "transformers>=4.36.0",
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "python-dotenv>=1.0.0",
+    "prisma>=0.15.0",
+    "pydantic>=2.5.0",
+]
+
+[project.scripts]
+start = "uvicorn api_server:app --reload"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

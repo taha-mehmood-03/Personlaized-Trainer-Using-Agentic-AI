@@ -1,0 +1,514 @@
+// Prisma schema for Mental Health Wellness - LangGraph Version
+// Database: PostgreSQL with Supabase
+// Optimized: 12 models with proper normalization
+
+generator client {
+  provider             = "prisma-client-py"
+  recursive_type_depth = 5
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ============================================
+// ENUMS - Type Safety
+// ============================================
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+enum Emotion {
+  ANGER
+  DISGUST
+  FEAR
+  JOY
+  NEUTRAL
+  SADNESS
+  SURPRISE
+  ANXIETY
+}
+
+enum Sentiment {
+  POSITIVE
+  NEGATIVE
+  NEUTRAL
+}
+
+enum CrisisRiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum SessionStatus {
+  ACTIVE
+  COMPLETED
+  ABANDONED
+}
+
+enum ConversationPhase {
+  VENTING
+  REFLECTION
+  SOLUTION
+  RECOVERY
+}
+
+enum AgentRole {
+  FRIEND
+  COACH
+  TRAINER
+  CRISIS_SUPPORT
+}
+
+enum Difficulty {
+  EASY
+  MODERATE
+  HARD
+}
+
+enum SleepQuality {
+  POOR
+  FAIR
+  GOOD
+  GREAT
+}
+
+enum EnergyLevel {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+// ============================================
+// CORE MODELS
+// ============================================
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  consentGiven Boolean  @default(false)
+  consentDate  DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // Relationships
+  sessions          Session[]
+  moodLogs          MoodLog[]
+  techniqueRatings  UserTechniqueRating[]
+  crisisLogs        CrisisLog[]
+  safetyPlans       SafetyPlan[]
+  dailyCheckIns     DailyCheckIn[]
+  preference        UserPreference?
+  statistics        UserStatistics?
+  behaviorProfile   BehaviorProfile?
+
+  // v3: New intelligent subsystems
+  psychProfile           PsychProfile?
+  proactiveNotifications ProactiveNotification[]
+
+  @@index([email])
+}
+
+// ============================================
+// CONVERSATION MODELS
+// ============================================
+
+model Session {
+  id          String        @id @default(cuid())
+  userId      String
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  title       String        @default("New Conversation")
+  status      SessionStatus @default(ACTIVE)
+  moodSummary Sentiment?
+  phase       ConversationPhase @default(VENTING)
+  
+  // Agent behavior personalization (NEW - NODE 4.5)
+  agentRole   AgentRole     @default(COACH)  // friend | coach | trainer | crisis_support
+  
+  // LangGraph checkpoint data (for memory)
+  checkpointData String?    @db.Text
+  
+  startedAt   DateTime      @default(now())
+  endedAt     DateTime?
+  
+  // Relationships
+  messages          Message[]
+  moodLog           MoodLog?
+  summaries         SessionSummary[]
+  techniqueOutcomes TechniqueOutcome[]
+
+  // v3: Emotion trajectory snapshots
+  emotionSnapshots  EmotionSnapshot[]
+
+  @@index([userId])
+  @@index([startedAt])
+  @@index([status])
+  @@index([agentRole])
+}
+
+model Message {
+  id          String      @id @default(cuid())
+  sessionId   String
+  session     Session     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  
+  role        MessageRole
+  content     String      @db.Text
+  
+  // Mood analysis (for USER messages)
+  emotion     Emotion?
+  intensity   Float?
+  sentiment   Sentiment?
+  confidence  Float?
+  
+  // Technique recommended (for ASSISTANT messages)
+  techniqueId String?
+  technique   Technique?  @relation(fields: [techniqueId], references: [id])
+  
+  // Voice analysis (optional - only when voice input used)
+  voiceEmotion    String?
+  voiceArousal    Float?
+  voiceValence    Float?
+  voiceConfidence Float?
+  
+  createdAt   DateTime    @default(now())
+
+  @@index([sessionId])
+  @@index([createdAt])
+  @@index([emotion])
+}
+
+// ============================================
+// MOOD TRACKING
+// ============================================
+
+model MoodLog {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Optional link to session (mood detected during chat)
+  sessionId String?   @unique
+  session   Session?  @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  
+  emotion   Emotion
+  intensity Float
+  sentiment Sentiment
+  
+  // Context
+  context   String?
+  notes     String?
+  
+  // Analysis metadata
+  method    String    @default("distilroberta")
+  
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([createdAt])
+  @@index([emotion])
+}
+
+model DailyCheckIn {
+  id           String       @id @default(cuid())
+  userId       String
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  moodRating   Int
+  sleepQuality SleepQuality
+  energyLevel  EnergyLevel
+  
+  highlight    String?
+  challenge    String?
+  
+  checkInDate  DateTime     @default(now()) @db.Date
+
+  @@unique([userId, checkInDate])
+  @@index([userId])
+  @@index([checkInDate])
+}
+
+// ============================================
+// TECHNIQUE MODELS
+// ============================================
+
+model TechniqueCategory {
+  id          String      @id @default(cuid())
+  name        String      @unique
+  description String
+  icon        String?
+  
+  techniques  Technique[]
+}
+
+model Technique {
+  id              String            @id @default(cuid())
+  categoryId      String
+  category        TechniqueCategory @relation(fields: [categoryId], references: [id])
+  
+  name            String
+  description     String
+  brief           String
+  steps           String[]
+  
+  durationMinutes Int
+  difficulty      Difficulty
+  
+  targetEmotions  Emotion[]
+  
+  whyItWorks      String?
+  
+  avgRating       Float             @default(0)
+  totalRatings    Int               @default(0)
+  effectiveness   Float             @default(0.5)
+  
+  isActive        Boolean           @default(true)
+  createdAt       DateTime          @default(now())
+  
+  userRatings     UserTechniqueRating[]
+  recommendedIn   Message[]
+  outcomes        TechniqueOutcome[]
+
+  @@index([categoryId])
+  @@index([isActive])
+}
+
+model UserTechniqueRating {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  techniqueId String
+  technique   Technique @relation(fields: [techniqueId], references: [id], onDelete: Cascade)
+  
+  rating      Int
+  feedback    String?
+  completed   Boolean   @default(false)
+  
+  usedAt      DateTime  @default(now())
+
+  @@index([userId])
+  @@index([techniqueId])
+  @@index([rating])
+}
+
+// ============================================
+// CRISIS & SAFETY MODELS
+// ============================================
+
+model CrisisLog {
+  id                    String          @id @default(cuid())
+  userId                String
+  user                  User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  riskLevel             CrisisRiskLevel
+  triggeredKeywords     String[]
+  messageContent        String          @db.Text
+  
+  actionTaken           String
+  resourcesProvided     Boolean         @default(false)
+  humanHandoffRequested Boolean         @default(false)
+  
+  createdAt             DateTime        @default(now())
+
+  @@index([userId])
+  @@index([riskLevel])
+  @@index([createdAt])
+}
+
+model SafetyPlan {
+  id                   String   @id @default(cuid())
+  userId               String
+  user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  warningSigns         String[]
+  copingStrategies     String[]
+  socialDistractions   String[]
+  supportContacts      String[]
+  professionalContacts String[]
+  safetyActions        String?
+  
+  reasonsToLive        String[]
+  
+  isActive             Boolean  @default(true)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  @@index([userId])
+  @@index([isActive])
+}
+
+// ============================================
+// USER SETTINGS & ANALYTICS
+// ============================================
+
+model UserPreference {
+  id                   String   @id @default(cuid())
+  userId               String   @unique
+  user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  communicationStyle   String   @default("empathetic")
+  detailLevel          String   @default("moderate")
+  tone                 String   @default("warm")
+  language             String   @default("en-US")
+  timezone             String   @default("UTC")
+  
+  dailyCheckInEnabled  Boolean  @default(true)
+  dailyCheckInTime     String   @default("09:00")
+  moodRemindersEnabled Boolean  @default(true)
+  
+  preferredCategories  String[] @default([])
+  
+  theme                String   @default("light")
+  
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+}
+
+model UserStatistics {
+  id                  String    @id @default(cuid())
+  userId              String    @unique
+  user                User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  currentCheckInStreak Int      @default(0)
+  longestCheckInStreak Int      @default(0)
+  
+  totalSessions        Int      @default(0)
+  totalMessages        Int      @default(0)
+  totalCheckIns        Int      @default(0)
+  totalTechniquesUsed  Int      @default(0)
+  
+  averageMoodRating    Float    @default(5.0)
+  mostCommonEmotion    Emotion  @default(NEUTRAL)
+  
+  mostUsedTechniqueId  String?
+  avgTechniqueRating   Float    @default(0)
+  
+  lastSessionAt        DateTime?
+  lastCheckInAt        DateTime?
+  
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+}
+
+// ============================================
+// WORLD-CLASS INTELLIGENCE MODELS
+// ============================================
+
+model SessionSummary {
+  id         String   @id @default(cuid())
+  sessionId  String
+  session    Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  summary    String   @db.Text
+  keyThemes  String[]
+  createdAt  DateTime @default(now())
+
+  @@index([sessionId])
+}
+
+model TechniqueOutcome {
+  id              String    @id @default(cuid())
+  sessionId       String
+  session         Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  techniqueId     String
+  technique       Technique @relation(fields: [techniqueId], references: [id])
+  emotionBefore   Emotion
+  emotionAfter    Emotion?
+  intensityBefore Float
+  intensityAfter  Float?
+  effectiveness   Float?
+  createdAt       DateTime  @default(now())
+
+  @@index([sessionId])
+  @@index([techniqueId])
+}
+
+model BehaviorProfile {
+  id                     String   @id @default(cuid())
+  userId                 String   @unique
+  user                   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  prefersAdvice          Boolean  @default(true)
+  prefersListening       Boolean  @default(false)
+  prefersShortResponse   Boolean  @default(false)
+  avgTechniqueAcceptance Float    @default(0.5)
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  @@index([userId])
+}
+
+// ============================================
+// v3: INTELLIGENT SUBSYSTEM MODELS
+// ============================================
+
+model PsychProfile {
+  id                String   @id @default(cuid())
+  userId            String   @unique
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Coping architecture
+  copingStyle       String   @default("avoidant")   // avoidant | proactive | mixed
+  techniqueAccRate  Float    @default(0.5)           // ratio of techniques accepted
+  reflectionDepth   Float    @default(0.5)           // 0=venting only, 1=deeply reflective
+
+  // Emotional landscape
+  anxietyBaseline   Float    @default(0.5)           // EMA of recent anxiety intensity
+  resilienceScore   Float    @default(0.5)           // improves with positive trajectories
+  dominantEmotion   String   @default("neutral")     // most common emotion
+  emotionalTriggers String[]                         // e.g. ["work", "family", "social"]
+
+  // Social & motivational
+  motivationType    String   @default("external")   // external | internal | mixed
+  socialDependency  Float    @default(0.5)           // social keyword frequency score
+
+  // Distortion history
+  topDistortions    String[]                         // e.g. ["catastrophizing", "mind_reading"]
+  distortionCount   Int      @default(0)             // lifetime detected distortions
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model EmotionSnapshot {
+  id        String   @id @default(cuid())
+  sessionId String
+  session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  userId    String
+
+  turn           Int
+  emotion        Emotion
+  intensity      Float
+  sentiment      Sentiment
+  distortionType String?
+  phase          ConversationPhase?
+
+  createdAt DateTime @default(now())
+
+  @@index([sessionId])
+  @@index([userId])
+}
+
+model ProactiveNotification {
+  id       String @id @default(cuid())
+  userId   String
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  alertType String   // gradual_mood_decline | repeated_anxiety_spikes | disengagement_risk | ...
+  isRead    Boolean  @default(false)
+  payload   String?  @db.Text  // JSON hint for response generator
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([isRead])
+  @@index([alertType])
+}

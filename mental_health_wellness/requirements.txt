@@ -1,0 +1,59 @@
+# LangGraph Mental Health Wellness - Dependencies
+# Updated for LangGraph migration
+
+# ============================================
+# Core LangGraph & LangChain (compatible versions)
+# ============================================
+langgraph>=0.2.0
+langchain>=0.3.0
+langchain-groq>=0.2.0
+langchain-openai>=0.2.0
+# Let pip resolve langchain-core automatically
+
+# ============================================
+# Database
+# ============================================
+prisma>=0.15.0
+
+# ============================================
+# API Server
+# ============================================
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-dotenv>=1.0.0
+pydantic>=2.5.0
+python-multipart>=0.0.6
+
+# ============================================
+# ML / Emotion Analysis
+# ============================================
+transformers>=4.36.0
+
+# ============================================
+# Voice Emotion Detection
+# ============================================
+opensmile>=2.5.0
+librosa>=0.10.0
+soundfile>=0.12.0
+torch>=2.0.0
+torchaudio>=2.0.0
+
+# ============================================
+# Embedding Memory (ChromaDB + HuggingFace)
+# ============================================
+chromadb>=0.4.0
+sentence-transformers>=2.2.0
+langchain-huggingface>=0.1.0
+langchain-chroma>=0.1.0
+
+# ============================================
+# Checkpointer (PostgreSQL)
+# ============================================
+psycopg2-binary>=2.9.9
+langgraph-checkpoint-postgres>=1.0.0
+
+# ============================================
+# Utilities
+# ============================================
+httpx>=0.26.0
+numpy>=1.24.0

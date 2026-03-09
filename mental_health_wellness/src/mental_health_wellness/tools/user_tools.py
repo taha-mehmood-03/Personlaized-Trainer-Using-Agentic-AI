@@ -1,0 +1,194 @@
+"""
+User Tools - User history and session management
+"""
+
+from datetime import datetime
+from langchain_core.tools import tool
+
+
+@tool
+async def get_user_history(user_id: str) -> dict:
+    """
+    Get the user's conversation history and mood patterns.
+    Use this for personalization and context.
+    
+    Args:
+        user_id: The user's unique identifier
+        
+    Returns:
+        Dictionary with session count, mood patterns, and recent topics
+    """
+    try:
+        from ..db.client import get_prisma_client
+        prisma = await get_prisma_client()
+        
+        user = await prisma.user.find_unique(
+            where={"id": user_id},
+            include={
+                "statistics": True,
+                "moodLogs": {"take": 10, "order_by": {"createdAt": "desc"}}
+            }
+        )
+        
+        if not user:
+            return {"total_sessions": 0, "mood_patterns": {}, "is_new_user": True}
+        
+        stats = user.statistics
+        moods = user.moodLogs or []
+        
+        emotion_counts = {}
+        for log in moods:
+            emotion = str(log.emotion) if log.emotion else "NEUTRAL"
+            emotion_counts[emotion] = emotion_counts.get(emotion, 0) + 1
+        
+        most_common = max(emotion_counts, key=emotion_counts.get) if emotion_counts else "NEUTRAL"
+        
+        return {
+            "total_sessions": stats.totalSessions if stats else 0,
+            "current_streak": stats.currentCheckInStreak if stats else 0,
+            "most_common_emotion": most_common.lower(),
+            "mood_patterns": emotion_counts,
+            "is_new_user": (stats.totalSessions if stats else 0) < 3
+        }
+    except Exception as e:
+        print(f"[TOOL ERROR] get_user_history: {e}")
+        return {"total_sessions": 0, "mood_patterns": {}, "is_new_user": True}
+
+
+@tool
+async def save_session(
+    user_id: str,
+    user_message: str,
+    assistant_response: str,
+    emotion: str = "neutral",
+    crisis_level: str = "low",
+    session_id: str = "",
+    technique: dict | None = None
+) -> dict:
+    """
+    Save the conversation to the database.
+    Call this at the end of each conversation turn.
+    
+    Args:
+        user_id: The user's unique identifier
+        user_message: What the user said
+        assistant_response: What the assistant replied
+        emotion: Detected emotion
+        crisis_level: Crisis risk level
+        session_id: Optional existing session ID to continue
+        
+    Returns:
+        Confirmation with session ID
+    """
+    try:
+        from ..db.client import get_prisma_client
+        prisma = await get_prisma_client()
+        
+        # Map emotion to sentiment for moodSummary
+        emotion_to_sentiment = {
+            "joy": "POSITIVE",
+            "surprise": "POSITIVE",
+            "neutral": "NEUTRAL",
+            "anger": "NEGATIVE",
+            "disgust": "NEGATIVE",
+            "fear": "NEGATIVE",
+            "sadness": "NEGATIVE",
+            "anxiety": "NEGATIVE"
+        }
+        
+        # Ensure emotion is valid before mapping
+        emotion_lower = emotion.lower().strip() if emotion else "neutral"
+        sentiment = emotion_to_sentiment.get(emotion_lower, "NEUTRAL")
+        
+        print(f"[TOOL] save_session: Emotion='{emotion}' → Lowercase='{emotion_lower}' → Sentiment='{sentiment}'")
+        
+        # Try to find existing session or create new one
+        session = None
+        
+        # Session ID should now always be a valid database session ID
+        if session_id:
+            existing_session = await prisma.session.find_unique(
+                where={"id": session_id}
+            )
+            if existing_session and existing_session.userId == user_id:
+                session = existing_session
+                print(f"[TOOL] save_session: Using session {session.id}")
+        
+        # Fallback: Create new session if none found (shouldn't happen with new logic)
+        if not session:
+            session = await prisma.session.create(
+                data={
+                    "userId": user_id,
+                    "title": f"Session - {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                    "status": "ACTIVE",
+                    "moodSummary": sentiment
+                }
+            )
+            print(f"[TOOL] save_session: Created fallback session {session.id}")
+
+        
+        # Map emotion string to valid Emotion enum
+        valid_emotions = ["ANGER", "DISGUST", "FEAR", "JOY", "NEUTRAL", "SADNESS", "SURPRISE", "ANXIETY"]
+        emotion_upper = (emotion or "neutral").upper().strip()
+        db_emotion = emotion_upper if emotion_upper in valid_emotions else "NEUTRAL"
+        
+        # Update session's moodSummary with current sentiment (POSITIVE/NEGATIVE/NEUTRAL)
+        await prisma.session.update(
+            where={"id": session.id},
+            data={"moodSummary": sentiment}  # sentiment is already POSITIVE/NEGATIVE/NEUTRAL
+        )
+        print(f"[TOOL] save_session: Updated session moodSummary to {sentiment}")
+        
+        await prisma.message.create(
+            data={
+                "sessionId": session.id,
+                "role": "USER",
+                "content": user_message,
+                "emotion": db_emotion
+            }
+        )
+        
+        assistant_message_data = {
+            "sessionId": session.id,
+            "role": "ASSISTANT",
+            "content": assistant_response
+        }
+
+        # If a structured technique was provided, persist its id as a relation
+        if technique and isinstance(technique, dict):
+            tech_id = technique.get("id") or technique.get("technique_id") or technique.get("techniqueId")
+            if tech_id:
+                assistant_message_data["techniqueId"] = tech_id
+
+        await prisma.message.create(data=assistant_message_data)
+        
+        if crisis_level in ["medium", "high"]:
+            await prisma.crisislog.create(
+                data={
+                    "userId": user_id,
+                    "riskLevel": crisis_level.upper(),
+                    "messageContent": user_message,
+                    "actionTaken": "agent_response",
+                    "resourcesProvided": True
+                }
+            )
+        
+        # MoodLog creation handled by session_saver_node — do NOT duplicate here
+        
+        # Update UserStatistics (totalMessages, etc.)
+        try:
+            await prisma.userstatistics.update(
+                where={"userId": user_id},
+                data={
+                    "totalMessages": {"increment": 2}  # user + assistant
+                }
+            )
+            print(f"[TOOL] save_session: Updated UserStatistics")
+        except Exception as stats_err:
+            print(f"[TOOL] save_session: UserStatistics update failed (non-critical): {stats_err}")
+        
+        return {"saved": True, "session_id": session.id}
+        
+    except Exception as e:
+        print(f"[TOOL ERROR] save_session: {e}")
+        return {"saved": False, "error": str(e)}

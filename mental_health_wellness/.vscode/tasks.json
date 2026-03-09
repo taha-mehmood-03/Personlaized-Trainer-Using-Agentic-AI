@@ -1,0 +1,15 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "API Server",
+			"type": "shell",
+			"command": "python",
+			"args": [
+				"api_server.py"
+			],
+			"isBackground": true,
+			"group": "build"
+		}
+	]
+}

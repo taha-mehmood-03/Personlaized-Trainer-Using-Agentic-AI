@@ -1,0 +1,19 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run Frontend (Vite Dev Server)",
+			"type": "shell",
+			"command": "cd e:\\FYP\\frontend && npm run dev",
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "Run API Server (FastAPI)",
+			"type": "shell",
+			"command": "cd e:\\FYP\\mental_health_wellness && python api_server.py",
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}
