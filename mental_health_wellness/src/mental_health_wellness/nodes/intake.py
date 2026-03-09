@@ -192,7 +192,11 @@ async def intake_node(state: MentalHealthState) -> dict:
         "intake_errors": intake_errors,  # Track any errors during intake
         # CRITICAL: Don't clear messages - LangGraph reducer needs this
         "messages": messages if messages else [],
-        "audio_file_path": state.get("audio_file_path")  # Pass through audio file path
+        "audio_file_path": state.get("audio_file_path"),  # Pass through audio file path
+        # RESET per-turn fields so stale data from previous turns never bleeds through
+        "recommended_techniques_by_category": {},
+        "recommended_technique": {},
+        "final_response": "",
     }
 
 

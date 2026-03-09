@@ -116,20 +116,38 @@ async def crisis_handler_node(state: MentalHealthState) -> dict:
             emotion = state.get("fused_emotion", state.get("emotion", "anxiety"))
             print(f"[NODE: CRISIS_HANDLER] 💙 High-distress (non-crisis) detected — generating supportive response (emotion: {emotion})")
 
+            # Read the actual techniques selected by technique_selector so the response
+            # text references the exact same names shown in the UI cards.
+            techniques_by_category = state.get("recommended_techniques_by_category", {})
+            technique_names = []
+            for cat, tech in techniques_by_category.items():
+                name = tech.get("name") if isinstance(tech, dict) else None
+                if name:
+                    technique_names.append(name)
+
+            if technique_names:
+                tech_list = " and ".join(f"**{n}**" for n in technique_names[:2])
+                technique_mention = f"I've also pulled up {tech_list} for you below — they're great for moments like this."
+            else:
+                technique_mention = "I've pulled up some grounding exercises below that can really help in moments like this."
+
             if "anxiety" in emotion or "fear" in emotion:
                 supportive_response = (
                     "I can feel how intense this is for you right now. Panic attacks are terrifying in the moment, but they are temporary and they will pass. 💙\n\n"
-                    "Let's try something right now — breathe in slowly through your nose for 4 counts, hold for 4, and breathe out for 6. Focus only on that breath.\n\n"
+                    f"{technique_mention}\n\n"
+                    "For right now — breathe in slowly through your nose for 4 counts, hold for 4, and breathe out for 6. Focus only on that breath.\n\n"
                     "You're safe. I'm right here with you. Tell me how you're feeling right now."
                 )
             elif "anger" in emotion:
                 supportive_response = (
                     "I can sense you're in a really overwhelming place right now. It's okay to feel this way. 💙\n\n"
-                    "Let's take a moment — try breathing deeply a few times and give yourself permission to step back from whatever is triggering this. I'm here."
+                    f"{technique_mention}\n\n"
+                    "Let's take a moment — try breathing deeply a few times and give yourself permission to step back. I'm here with you."
                 )
             else:
                 supportive_response = (
                     "I can see you're going through something really intense right now. I'm here with you. 💙\n\n"
+                    f"{technique_mention}\n\n"
                     "Take a slow, deep breath with me. You don't have to face this alone. What's happening for you right now?"
                 )
 

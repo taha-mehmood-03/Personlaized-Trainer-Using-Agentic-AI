@@ -101,6 +101,7 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
             "technique_readiness": 0.0,
             "crisis_detected": False,  # EXPLICIT CLEAR
             "session_message_count": user_msg_count,
+            "recommended_techniques_by_category": {},  # CLEAR stale techniques from previous turn
         }
 
     if emotion == "neutral" and intensity < _NEUTRAL_INTENSITY_THRESHOLD:
@@ -111,6 +112,7 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
             "technique_readiness": 0.0,
             "crisis_detected": False,  # EXPLICIT CLEAR
             "session_message_count": user_msg_count,
+            "recommended_techniques_by_category": {},  # CLEAR stale techniques from previous turn
         }
 
     # ============================================

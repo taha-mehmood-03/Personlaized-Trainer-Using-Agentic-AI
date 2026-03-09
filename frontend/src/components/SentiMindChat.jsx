@@ -793,8 +793,11 @@ export default function SentiMindChat() {
               <React.Fragment key={index}>
                 <MessageBubble message={message} index={index} />
 
-                {/* Render category technique display with the message */}
-                {message.role === 'assistant' && message.recommendedTechniquesByCategory &&
+                {/* Render technique card below the specific message it belongs to.
+                    The backend (intake_node) now clears techniques at the start of each
+                    turn, so only turns where technique_selector ran will have data here. */}
+                {message.role === 'assistant' &&
+                  message.recommendedTechniquesByCategory &&
                   Object.keys(message.recommendedTechniquesByCategory).length > 0 && (
                     <CategoryTechniqueDisplay
                       techniquesByCategory={message.recommendedTechniquesByCategory}

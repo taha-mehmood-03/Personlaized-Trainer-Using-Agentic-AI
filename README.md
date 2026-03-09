@@ -19,9 +19,11 @@ This repository structure and architecture guarantee a safer, cheaper, faster, a
 ## � Key Features
 
 *   **Hybrid Intelligence:** Combines the strict safety of deterministic Python functions with the conversational empathy of Llama 3.1.
-*   **Zero-Hallucination Crisis Detection:** Hard-coded keyword pre-screening and DistilBERT emotion classification prevent the LLM from misinterpreting severe distress (e.g., self-harm).
+*   **Zero-Hallucination Crisis Detection (Two-Layer):** Hard-coded keyword pre-screening and DistilBERT/ELECTRA emotion classification intercept severe distress (e.g., self-harm). Now features a latency-saving gate that bypasses the 70B LLM check if the local model is extremely confident in user safety.
+*   **Chitchat Fast-Path (Sub-Second Latency):** A conditional router bypasses the entire therapeutic pipeline (cognitive distortion checks, technique DB lookups) if the initial nodes detect casual chitchat, vastly improving response times for non-clinical messages.
 *   **Sub-Second NLP:** Uses local HuggingFace `distilroberta-base` for sub-second 7-dimensional emotion tracking without wasting paid API tokens.
 *   **Semantic Memory Retrieval:** Utilizes ChromaDB to recall specific past user discussions to inform the current context (RAG).
+*   **Determinc Crisis Routing:** Router validates both high emotional intensity (>= 0.8) *and* negative valence (sadness, fear, anger) to prevent false-positive crisis alerts for high-intensity joy.
 *   **Clinical Technique Database:** Uses PostgreSQL to recommend DB-curated coping strategies (e.g., Box Breathing, CBT re-framing) matched dynamically to user mood.
 *   **Voice-Emotion Ready:** Built-in hooks for merging acoustic voice analysis (arousal/valence) with text sentiment.
 *   **GDPR Compliant:** Comprehensive data pipelines mapped for explicit consent, Right to Access (data export), and Right to Erasure (cascade deletion).
@@ -114,13 +116,13 @@ sequenceDiagram
 
 ### 🧠 The Node-by-Node Breakdown (LangGraph Pipeline)
 
-1. **`crisis_pre_screener_node` (Safety Net):** Runs **before** everything. Uses hard-coded keywords to catch explicit self-harm language. Bypasses the LLM completely if triggered.
+1. **`crisis_pre_screener_node` (Safety Net):** Runs **before** everything. Uses hard-coded keywords (Layer 1) and a specialist ELECTRA model (Layer 2) to catch self-harm language. Bypasses the 70B LLM if ELECTRA confidence of safety is very high to save 3-5 seconds of latency.
 2. **`intake_node`:** Loads user context, history, session data (from PostgreSQL), and relevant past memories via ChromaDB semantic search.
 3. **`mood_analyzer_node`:** Local DistilBERT emotion detection pipeline. *Does not use the LLM.* Classifies emotion across 7 dimensions + sentiment and intensity.
 4. **`emotion_fusion_node`:** Merges text-based emotion with voice emotion to produce a fused, holistic emotional profile.
 5. **`cognitive_distortion_node`:** *[v3 NEW]* Pure Python logic detecting CBT (Cognitive Behavioral Therapy) distortion patterns.
 6. **`trend_analyzer_node`:** Analyzes past interactions via SQL to plot an emotional trajectory (improving, worsening, stable).
-7. **`conversation_planner_node`:** The strategic decision-maker. Determines the core intervention strategy without wasting LLM tokens.
+7. **`conversation_planner_node`:** The strategic decision-maker. Determines the core intervention strategy. Evaluates intent using an 8B LLM. Also incorporates a "Chitchat Bypass Gate" to skip therapeutic steps if the message is purely casual.
 8. **`behavioral_activation_node`:** *[v3 NEW]* Proposes real-world micro-actions based on current emotional status.
 9. **`technique_selector_node`:** Queries PostgreSQL via Prisma to select a coping technique based on mood and past success ratings.
 10. **`role_selector_node`:** Sets the "Persona" (Friend, Coach, Trainer) based on emotional intensity trends.
