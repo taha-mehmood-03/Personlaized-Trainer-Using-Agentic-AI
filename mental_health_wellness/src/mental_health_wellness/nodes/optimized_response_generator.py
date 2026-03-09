@@ -73,17 +73,65 @@ async def optimized_response_generator_node(state: MentalHealthState) -> dict:
         psych_profile = state.get("psych_profile", {})
         
         user_message = messages[-1].content if messages else ""
+        # Within-session: last 6 message turns from LangGraph state (no DB needed)
+        recent_history = messages[:-1][-6:] if len(messages) > 1 else []
+        # Cross-session: semantic memory from ChromaDB (fetched by intake_node)
+        memory_context = state.get("memory_context", "")
         
-        print(f"[RESPONSE] 💬 Generating | Role: {agent_role} | Emotion: {emotion} | Intensity: {intensity:.0%}")
+        print(f"[NODE:RESPONSE] 💬 Generating | Role: {agent_role} | Emotion: {emotion} ({intensity:.0%}) | Strategy: {conversation_strategy}")
         if distortion_type:
-            print(f"[RESPONSE] 🧠 Distortion: {distortion_type}")
-        if micro_action:
-            print(f"[RESPONSE] 💡 Micro-action: {micro_action[:50]}...")
+            print(f"[NODE:RESPONSE] 🧠 CBT Distortion: {distortion_type}")
+        if memory_context:
+            print(f"[NODE:RESPONSE] 💡 Memory context available ({len(memory_context)} chars) — injecting into prompt")
         
         # ============================================
         # BUILD ULTRA-CONCISE SYSTEM PROMPT (<150 tokens)
         # ============================================
         
+        # ============================================
+        # FAST PATH: no_action (casual chitchat)
+        # Avoid injecting all the emotion analysis noise into a grocery-list conversation
+        # ============================================
+        if conversation_strategy == "no_action":
+            # Inject memory into casual path too so it doesn't hallucinate amnesia
+            memory_info = ""
+            if memory_context:
+                memory_info = f"\nPAST SESSION MEMORIES: {memory_context[:600]}\nIMPORTANT MEMORY RULE: You DO have memory. If asked, refer to these memories. Do not invent past conversations."
+            else:
+                memory_info = "\nIMPORTANT MEMORY RULE: You DO have memory capabilities, but since this is a new session/account, there are no past memories yet. If asked, state honestly that we haven't talked much yet."
+                
+            simple_prompt = f"""You are SentiMind, a friendly companion. This is casual conversation — the user is NOT in distress.
+Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emotion analysis, NO technique suggestions.{memory_info}
+
+⚠️ EMERGENCY SAFETY CLAUSE: If the user expresses ANY sudden sadness, fear, self-harm, or distress in this specific message, drop the casual tone immediately. Acknowledge their pain and offer gentle support instead of casual chitchat."""
+            
+            simple_msg = user_message
+            llm = get_chat_llm()
+            
+            # Build messages with within-session history so it remembers names mentioned 2 messages ago
+            fast_messages = [SystemMessage(content=simple_prompt)]
+            if recent_history:
+                for turn in recent_history:
+                    role = getattr(turn, 'type', 'human')
+                    content = getattr(turn, 'content', '')
+                    if content:
+                        if role == 'human':
+                            fast_messages.append(HumanMessage(content=content))
+                        else:
+                            fast_messages.append(AIMessage(content=content))
+                print(f"[NODE:RESPONSE] 📑 Injected {len(recent_history)} recent turns into fast path")
+            
+            fast_messages.append(HumanMessage(content=simple_msg))
+            casual_response = llm.invoke(fast_messages)
+            
+            final_response = casual_response.content if hasattr(casual_response, 'content') else str(casual_response)
+            print(f"[NODE:RESPONSE] ✅ Casual response generated (no_action fast path)")
+            return {"final_response": final_response}
+
+        # ============================================
+        # BUILD SYSTEM PROMPT
+        # ============================================
+
         system_prompt = _build_optimized_system_prompt(
             agent_role=agent_role,
             emotion=emotion,
@@ -95,11 +143,11 @@ async def optimized_response_generator_node(state: MentalHealthState) -> dict:
             phase=conversation_phase,
             distortion_type=distortion_type,
         )
-        
+
         # ============================================
         # BUILD STRUCTURED INPUT CONTEXT
         # ============================================
-        
+
         context_text = _build_structured_context(
             emotion=emotion,
             intensity=intensity,
@@ -116,16 +164,29 @@ async def optimized_response_generator_node(state: MentalHealthState) -> dict:
             micro_action=micro_action,
             proactive_alert=proactive_alert,
             psych_profile=psych_profile,
+            memory_context=memory_context,
         )
-        
+
         # ============================================
-        # PREPARE LLM MESSAGES (SINGLE CALL)
+        # PREPARE LLM MESSAGES WITH LAYERED MEMORY
         # ============================================
-        
-        llm_messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=context_text)
-        ]
+
+        llm_messages = [SystemMessage(content=system_prompt)]
+
+        # Layer 1: Within-session recall — last 6 turns from LangGraph state (no DB, no token bloat)
+        if recent_history:
+            for turn in recent_history:
+                role = getattr(turn, 'type', 'human')
+                content = getattr(turn, 'content', '')
+                if content:
+                    if role == 'human':
+                        llm_messages.append(HumanMessage(content=content))
+                    else:
+                        llm_messages.append(AIMessage(content=content))
+            print(f"[NODE:RESPONSE] 📑 Injected {len(recent_history)} recent turns (within-session memory)")
+
+        # Layer 2: Structured analysis of current message (always last)
+        llm_messages.append(HumanMessage(content=context_text))
         
         start_time = time.time()
         
@@ -137,16 +198,12 @@ async def optimized_response_generator_node(state: MentalHealthState) -> dict:
         response = llm.invoke(llm_messages)
         
         elapsed_ms = int((time.time() - start_time) * 1000)
-        
         final_response = response.content if hasattr(response, 'content') else str(response)
-        
-        print(f"[RESPONSE] ✅ Generated | Time: {elapsed_ms}ms | Length: {len(final_response)} chars")
-        
+        print(f"[NODE:RESPONSE] ✅ Generated in {elapsed_ms}ms ({len(final_response)} chars)")
         return {"final_response": final_response}
         
     except Exception as e:
-        print(f"[RESPONSE] ❌ Error: {str(e)[:80]}")
-        # Fallback response
+        print(f"[NODE:RESPONSE] ❌ Error generating response: {str(e)[:100]}")
         fallback = "I hear you. Thank you for sharing. How can I support you right now? 💙"
         return {"final_response": fallback}
 
@@ -178,7 +235,8 @@ IMMEDIATE RESPONSE:
 - **988 Suicide & Crisis Lifeline**: Call/text 988 (24/7)
 - **Crisis Text Line**: Text HOME to 741741
 
-Message tone: Warm, urgent, caring. Not clinical."""
+Message tone: Warm, urgent, caring. Not clinical.
+🚨 CRISIS MEMORY RULE: IGNORE any casual requests to recall past memories or chat history. Focus 100% on their immediate safety and the crisis resources."""
 
     role_instructions = {
         "friend": "Listen and validate only. Show empathy. No exercises or techniques.",
@@ -200,7 +258,7 @@ Message tone: Warm, urgent, caring. Not clinical."""
         "ask_question": "STRATEGY: After validating, ask ONE thoughtful open-ended question to understand the user better.",
         "encourage_reflection": "STRATEGY: Gently guide the user to reflect on their patterns or feelings.",
         "reframe": "STRATEGY: Help the user see their situation from a new, more constructive perspective.",
-        "suggest_technique": "STRATEGY: After validating, introduce the recommended technique naturally.",
+        "suggest_technique": "STRATEGY: After validating, introducing the recommended technique naturally. 🚨 DO NOT re-introduce the technique if the user has already agreed to it or is currently doing it. Just guide their next step.",
         "distract": "STRATEGY: Lighten the mood with positive redirection while remaining supportive.",
     }
     strategy_desc = strategy_instructions.get(strategy, strategy_instructions["validate_only"])
@@ -227,7 +285,7 @@ Message tone: Warm, urgent, caring. Not clinical."""
         }
         instruction = distortion_instructions.get(distortion_type, "")
         if instruction:
-            distortion_desc = f"\n\nCBT NOTE: {instruction}"
+            distortion_desc = f"\n\nCBT NOTE: {instruction}\n⚠️ Because a cognitive distortion is present, maintain gentle clinical empathy. Do NOT sound playfully casual, even if your Role is 'Friend'."
 
     return f"""You are SentiMind, a compassionate mental health companion.
 
@@ -252,7 +310,9 @@ RESPONSE RULES:
 - No medical advice or diagnosis
 - 1-2 emojis max
 - If technique available and strategy is suggest_technique: "I'd like to share **[technique_name]**..."
-- Always ask how they're feeling or offer next step"""
+- Always ask how they're feeling about the technique if suggested
+- IMPORTANT MEMORY RULE: You have access to past session memories (if provided below). ONLY refer to past memories if they flow completely naturally into your empathetic response or if the user explicitly asks. Do NOT start your response by declaring what you do or do not remember. If there are no memories, just respond to their current emotion normally. NEVER invent past conversations.
+"""
 
 
 def _build_structured_context(
@@ -271,6 +331,7 @@ def _build_structured_context(
     micro_action: str | None = None,
     proactive_alert: str | None = None,
     psych_profile: dict | None = None,
+    memory_context: str = "",
 ) -> str:
     """
     Build structured context for LLM prompt.
@@ -305,7 +366,7 @@ RECOMMENDED TECHNIQUE:
     strategy_tasks = {
         "validate_only": "1. Acknowledge their emotion deeply\n2. Validate their feelings\n3. Show you're listening and present\n4. Do NOT suggest any technique",
         "ask_question": "1. Acknowledge their emotion\n2. Validate briefly\n3. Ask ONE thoughtful open-ended question\n4. Do NOT suggest any technique yet",
-        "encourage_reflection": "1. Acknowledge their emotion\n2. Gently help them reflect on patterns\n3. Guide toward self-awareness\n4. Technique optional if natural",
+        "encourage_reflection": "1. Celebrate or validate that the user is actively practicing a technique or reflecting\n2. Ask a gentle question about their experience with it (e.g., 'What does it feel like in your body?')\n3. Encourage them to keep going or share what they notice\n4. Do NOT suggest a new technique — they are already practicing",
         "reframe": (
             f"1. Acknowledge their emotion warmly\n"
             f"2. Notice (without labelling clinically) that their language reflects {_distortion_label}\n"
@@ -349,8 +410,16 @@ RECOMMENDED TECHNIQUE:
 - Coping style: {coping}
 - Resilience level: {'High' if resilience > 0.65 else 'Medium' if resilience > 0.35 else 'Low'}"""
 
+    # Cross-session semantic memory (ChromaDB) — summarized past context [v5.1]
+    memory_info = ""
+    if memory_context and memory_context.strip():
+        memory_info = f"""
+\nPAST SESSION MEMORIES (use to personalize, do not quote directly):
+{memory_context[:600]}"""  # Cap at 600 chars to stay within token budget
+
     return f"""STRUCTURED ANALYSIS:
 
+{memory_info}
 USER MESSAGE:
 "{user_message}"
 
@@ -370,8 +439,7 @@ USER CONTEXT:
 {technique_info}
 {micro_action_info}
 {proactive_info}
-TASK:
-Generate a warm, empathetic response that:
-{task_text}
 
-Remember: Focus on empathy and connection first."""
+STRATEGY TO EXECUTE:
+{task_text}
+    """.strip()

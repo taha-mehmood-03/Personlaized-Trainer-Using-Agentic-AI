@@ -86,6 +86,11 @@ def _apply_hedge_multiplier(message: str, intensity: float) -> float:
     Detects hedges and applies a 50% intensity reduction.
     """
     msg_lower = message.lower()
+
+    # Exception for positive progress: "a bit better" is a standard confirmation, not a hedge that means low arousal.
+    if "better" in msg_lower and any(h in msg_lower for h in ["a bit", "a little"]):
+         return intensity
+
     for hedge in _HEDGE_WORDS:
         if hedge in msg_lower:
             reduced = round(intensity * _HEDGE_MULTIPLIER, 3)

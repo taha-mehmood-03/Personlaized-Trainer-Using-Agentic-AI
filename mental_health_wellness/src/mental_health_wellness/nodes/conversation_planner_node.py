@@ -30,6 +30,7 @@ TECHNIQUE READINESS SCORE:
 """
 
 from ..agent.state import MentalHealthState
+from ..llm.llm_classifier import llm_intent_check
 
 
 # Reflection signal words in user messages
@@ -52,7 +53,7 @@ _TECHNIQUE_REQUEST_SIGNALS = {
 }
 
 
-def conversation_planner_node(state: MentalHealthState) -> dict:
+async def conversation_planner_node(state: MentalHealthState) -> dict:
     """
     CONVERSATION PLANNER NODE - Strategic therapeutic decision-maker.
 
@@ -86,24 +87,9 @@ def conversation_planner_node(state: MentalHealthState) -> dict:
           f"Intensity: {intensity:.0%} | Trend: {trend} | Messages: {user_msg_count}")
 
     # ============================================
-    # FIX 2: DIRECT TECHNIQUE REQUEST
-    # If the user explicitly asks for an exercise, bypass normal readiness
-    # logic and immediately grant it.
-    # ============================================
-    if any(signal in current_message for signal in _TECHNIQUE_REQUEST_SIGNALS):
-        print(f"[NODE: PLANNER] 🎯 Direct technique request detected → suggest_technique")
-        return {
-            "conversation_strategy": "suggest_technique",
-            "conversation_phase": state.get("conversation_phase", "venting"),
-            "technique_readiness": 1.0,
-            "session_message_count": user_msg_count,
-        }
-
-    # ============================================
     # FIX 3: CHITCHAT BYPASS GATE
-    # If INTENT_CLASSIFIER flagged this as chitchat/skip_intervention,
-    # or if emotion is neutral with intensity below threshold —
-    # return no_action immediately. Never venting-phase a grocery list.
+    # Runs BEFORE the LLM intent check to save 2-3 seconds of latency
+    # If emotion is neutral with low intensity — return no_action immediately.
     # ============================================
     _NEUTRAL_INTENSITY_THRESHOLD = 0.25  # below this + neutral = definitely not therapeutic
 
@@ -113,17 +99,53 @@ def conversation_planner_node(state: MentalHealthState) -> dict:
             "conversation_strategy": "no_action",
             "conversation_phase": "neutral",
             "technique_readiness": 0.0,
+            "crisis_detected": False,  # EXPLICIT CLEAR
             "session_message_count": user_msg_count,
         }
 
     if emotion == "neutral" and intensity < _NEUTRAL_INTENSITY_THRESHOLD:
-        print(f"[NODE: PLANNER] ⏭️  Neutral + low intensity ({intensity:.0%}) — returning no_action")
+        print(f"[NODE: PLANNER] ⏭️  Neutral + low intensity ({intensity:.0%}) — skipping LLM intent check, returning no_action")
         return {
             "conversation_strategy": "no_action",
             "conversation_phase": "neutral",
             "technique_readiness": 0.0,
+            "crisis_detected": False,  # EXPLICIT CLEAR
             "session_message_count": user_msg_count,
         }
+
+    # ============================================
+    # LLM INTENT CLASSIFIER (replaces brittle keyword sets)
+    # Only runs if the message was NOT caught by the chitchat bypass
+    # ============================================
+    print(f"[NODE: PLANNER] 🤖 Running LLM intent classifier...")
+    intent_result = await llm_intent_check(current_message)
+    intent = intent_result.get("intent", "venting")
+    intent_confidence = intent_result.get("confidence", 0.0)
+
+    # High-confidence technique request → bypass normal readiness logic
+    if intent == "technique_request" and intent_confidence >= 0.65:
+        print(f"[NODE: PLANNER] 🎯 LLM detected technique request ({intent_confidence:.0%}) → suggest_technique")
+        return {
+            "conversation_strategy": "suggest_technique",
+            "conversation_phase": state.get("conversation_phase", "venting"),
+            "technique_readiness": 1.0,
+            "crisis_detected": False,  # EXPLICIT CLEAR
+            "session_message_count": user_msg_count,
+        }
+
+    # High-confidence crisis signal from intent → flag for router
+    if intent == "crisis_signal" and intent_confidence >= 0.65:
+        print(f"[NODE: PLANNER] 🚨 LLM detected crisis signal in planner ({intent_confidence:.0%})")
+        return {
+            "conversation_strategy": "suggest_technique",
+            "conversation_phase": state.get("conversation_phase", "venting"),
+            "technique_readiness": 1.0,
+            "crisis_detected": True,
+            "session_message_count": user_msg_count,
+        }
+
+    # Use LLM intent as reflection hint for phase detection
+    llm_detected_reflection = (intent == "reflection" and intent_confidence >= 0.65)
 
     # ============================================
     # STEP 1: DETERMINE CONVERSATION PHASE
@@ -136,6 +158,7 @@ def conversation_planner_node(state: MentalHealthState) -> dict:
         user_msg_count=user_msg_count,
         current_message=current_message,
         current_phase=state.get("conversation_phase", "venting"),
+        llm_reflection_hint=llm_detected_reflection,
     )
 
     # ============================================
@@ -157,6 +180,13 @@ def conversation_planner_node(state: MentalHealthState) -> dict:
     if crisis_detected:
         strategy = "suggest_technique"
         print(f"[NODE: PLANNER] 🚨 Crisis override → suggest_technique")
+
+    # Reflection override — user is reporting back on a technique they tried
+    # This is explicitly a follow-up to a technique, so guide them further through it.
+    elif llm_detected_reflection and intent_confidence >= 0.7:
+        strategy = "encourage_reflection"
+        print(f"[NODE: PLANNER] 🔄 Reflection override ({intent_confidence:.0%}) → encourage_reflection (user is practicing/reporting a technique)")
+
     else:
         strategy = _select_strategy(
             emotion=emotion,
@@ -175,6 +205,7 @@ def conversation_planner_node(state: MentalHealthState) -> dict:
         "conversation_strategy": strategy,
         "conversation_phase": phase,
         "technique_readiness": readiness,
+        "crisis_detected": crisis_detected, # Pass through existing state or overrides
         "session_message_count": user_msg_count,
     }
 
@@ -186,6 +217,7 @@ def _determine_phase(
     user_msg_count: int,
     current_message: str,
     current_phase: str,
+    llm_reflection_hint: bool = False,
 ) -> str:
     """
     Detect conversation phase using emotional signals and message patterns.
@@ -208,8 +240,11 @@ def _determine_phase(
         else:
             return "venting"  # Intensity spike → back to venting
 
-    # Reflection: user shows reflective language
-    has_reflection = any(signal in current_message for signal in _REFLECTION_SIGNALS)
+    # Reflection: user shows reflective language (keyword OR LLM hint)
+    has_reflection = (
+        any(signal in current_message for signal in _REFLECTION_SIGNALS)
+        or llm_reflection_hint
+    )
     if has_reflection and user_msg_count >= 2:
         return "reflection"
 

@@ -138,24 +138,23 @@ async def intake_node(state: MentalHealthState) -> dict:
         })
     
     # ============================================
-    # STEP 2: SEMANTIC MEMORY REPLACES CHAT HISTORY
+    # STEP 2: MEMORY ARCHITECTURE (Two-Layer)
     # ============================================
-    
-    print("[NODE: INTAKE] 📝 Step 2: Skipping Prisma chat history (using semantic memory instead)")
-    
-    # Chat history is now handled via semantic memory from ChromaDB
-    # This reduces database queries and prioritizes semantically relevant context
-    chat_history = []  # Empty - semantic memory provides context
-    print(f"[NODE: INTAKE] ✅ Chat history disabled (semantic memory active)")
+    # Layer 1 (Within-session): LangGraph `state["messages"]` accumulates all turns
+    #   via the add_messages reducer — the response generator reads these directly.
+    #   No DB query needed, no token bloat risk.
+    # Layer 2 (Cross-session): ChromaDB semantic memory (fetched in STEP 3 below)
+    #   provides relevant summaries from past sessions.
+    chat_history = []  # Not used — see response generator for two-layer memory implementation
+    print(f"[NODE:INTAKE] 📝 Step 2: Memory handled via LangGraph state + ChromaDB (no DB history load)")
     
     # ============================================
     # STEP 3: RETRIEVE SEMANTIC MEMORIES
     # ============================================
     
-    print("[NODE: INTAKE] 🧠 Step 3: Retrieving semantic memories")
-    
+    print("[NODE:INTAKE] 🧠 Step 3: Retrieving semantic memories from ChromaDB")
     memory_context = await _retrieve_semantic_memories(user_id, current_message, session_id)
-    print(f"[NODE: INTAKE] ✅ Retrieved {len(memory_context)} chars of memory context")
+    print(f"[NODE:INTAKE] ✅ Retrieved {len(memory_context)} chars of cross-session memory")
     
     # ============================================
     # STEP 4: BUILD FULL CONTEXT

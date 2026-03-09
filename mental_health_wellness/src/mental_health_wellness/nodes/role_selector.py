@@ -66,41 +66,32 @@ def role_selector_node(state: MentalHealthState) -> dict:
         emotion = state.get("fused_emotion", state.get("emotion", "neutral"))
         crisis_level = state.get("crisis_level", "low")
         trend = state.get("emotional_trend", "stable")
-        
-        # ============================================
-        # ROLE SELECTION LOGIC (trend-aware)
-        # ============================================
-        
+        phase = state.get("conversation_phase", "venting")
+
         if crisis_detected:
             agent_role = "crisis_support"
-            print(f"[NODE: ROLE_SELECTOR] 🚨 Role: CRISIS_SUPPORT (crisis_detected={crisis_detected}, level={crisis_level})")
-        elif trend == "worsening" and intensity >= 0.6:
-            # Trend escalation: user is getting worse → trainer for active support
+            print(f"[NODE:ROLE] 🚨 crisis_support (crisis_detected=True, level={crisis_level})")
+        elif trend == "worsening" and intensity >= 0.6 and phase != "reflection":
+            # Worsening + high intensity BUT not in reflection — user needs active support
             agent_role = "trainer"
-            print(f"[NODE: ROLE_SELECTOR] 📉 Role: TRAINER (worsening trend + intensity={intensity:.0%})")
+            print(f"[NODE:ROLE] 📉 trainer (worsening trend + intensity={intensity:.0%}, phase={phase})")
+        elif phase == "reflection":
+            # User is actively reflecting — coach is appropriate, trainer would interrupt
+            agent_role = "coach" if intensity >= 0.4 else "friend"
+            print(f"[NODE:ROLE] 🤔 {agent_role} (reflection phase — listening mode, intensity={intensity:.0%})")
         elif intensity < 0.4:
             agent_role = "friend"
-            print(f"[NODE: ROLE_SELECTOR] 🤝 Role: FRIEND (intensity={intensity:.0%} < 0.4)")
+            print(f"[NODE:ROLE] 🤝 friend (intensity={intensity:.0%} < 0.4, low distress)")
         elif intensity < 0.7:
             agent_role = "coach"
-            print(f"[NODE: ROLE_SELECTOR] 👨‍🏫 Role: COACH (0.4 ≤ intensity={intensity:.0%} < 0.7)")
+            print(f"[NODE:ROLE] 👨‍🏫 coach (0.4 ≤ intensity={intensity:.0%} < 0.7)")
         else:
             agent_role = "trainer"
-            print(f"[NODE: ROLE_SELECTOR] 💪 Role: TRAINER (intensity={intensity:.0%} ≥ 0.7)")
-        
-        print(f"[NODE: ROLE_SELECTOR] 📊 Emotion: {emotion}, Trend: {trend}, Crisis: {crisis_detected}")
-        
-        # ============================================
-        # RETURN UPDATED STATE
-        # ============================================
-        
-        return {
-            "agent_role": agent_role
-        }
+            print(f"[NODE:ROLE] 💪 trainer (intensity={intensity:.0%} ≥ 0.7, high distress)")
+
+        print(f"[NODE:ROLE] 📊 Final: {agent_role.upper()} | Emotion: {emotion} | Phase: {phase} | Trend: {trend}")
+        return {"agent_role": agent_role}
     
     except Exception as e:
-        print(f"[NODE: ROLE_SELECTOR] ❌ Error: {str(e)}")
-        # Default to coach role on error - safe middle ground
-        return {
-            "agent_role": "coach"
-        }
+        print(f"[NODE:ROLE] ❌ Error: {str(e)}")
+        return {"agent_role": "coach"}

@@ -75,8 +75,14 @@ const MessageBubble = React.memo(({ message, index }) => {
         ? 'bg-white text-gray-800 border-2 border-gray-200 shadow-sm'
         : 'bg-gradient-to-br from-purple-500 to-teal-500 text-white shadow-md'
         }`}>
-        <p className="text-sm leading-relaxed">{message.content}</p>
-        {isAssistant && message.emotion && (
+        <p className="text-sm leading-relaxed whitespace-pre-wrap">
+          {message.content}
+          {/* Blinking cursor while streaming */}
+          {message._streaming && (
+            <span className="inline-block w-0.5 h-4 bg-purple-500 ml-0.5 animate-pulse align-middle" />
+          )}
+        </p>
+        {isAssistant && message.emotion && !message._streaming && (
           <div className="mt-2 text-xs text-gray-500 flex items-center gap-2">
             <span>💭 Detected: {message.emotion}</span>
           </div>
@@ -93,19 +99,35 @@ const MessageBubble = React.memo(({ message, index }) => {
 
 export default function SentiMindChat() {
   // States
-  const [messages, setMessages] = useState([
-    {
-      role: 'assistant',
-      content: "👋 Hello! I'm SentiMind, your AI wellness companion. I'm here to listen, understand, and help you feel better. You can chat with me or use voice messages. How are you feeling today?",
-    }
-  ])
+  // ── Restore persisted messages from localStorage (survives page refresh) ──
+  const _restoredMessages = (() => {
+    try {
+      const saved = localStorage.getItem('sentimind_messages')
+      if (saved) {
+        const parsed = JSON.parse(saved)
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed
+      }
+    } catch { /* ignore corrupt storage */ }
+    return null
+  })()
+
+  const [messages, setMessages] = useState(
+    _restoredMessages ?? [
+      {
+        role: 'assistant',
+        content: "👋 Hello! I'm SentiMind, your AI wellness companion. I'm here to listen, understand, and help you feel better. You can chat with me or use voice messages. How are you feeling today?",
+      }
+    ]
+  )
   const [input, setInput] = useState('')
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [isLoading, setIsLoading] = useState(false)
   const [moodData, setMoodData] = useState(null)
   const [chatHistory, setChatHistory] = useState([])
   const [userId, setUserId] = useState(null)
-  const [currentSessionId, setCurrentSessionId] = useState(null)
+  const [currentSessionId, setCurrentSessionId] = useState(
+    localStorage.getItem('sentimind_session_id') || null
+  )
   const [isRecording, setIsRecording] = useState(false)
   const [voiceEmotion, setVoiceEmotion] = useState(null)
   const [voiceConfidence, setVoiceConfidence] = useState(0)
@@ -120,6 +142,21 @@ export default function SentiMindChat() {
   const streamRef = useRef(null)
   const onStopHandlerRef = useRef(null)
   const recorderMimeTypeRef = useRef('audio/webm')
+
+  // Persist chat messages + session to localStorage on every change
+  useEffect(() => {
+    try {
+      // Only save non-streaming (finalized) messages to avoid saving incomplete bubbles
+      const toSave = messages.filter(m => !m._streaming)
+      localStorage.setItem('sentimind_messages', JSON.stringify(toSave))
+    } catch { /* storage full or unavailable */ }
+  }, [messages])
+
+  useEffect(() => {
+    if (currentSessionId) {
+      localStorage.setItem('sentimind_session_id', currentSessionId)
+    }
+  }, [currentSessionId])
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -253,7 +290,12 @@ export default function SentiMindChat() {
     const initializeApp = async () => {
       const userIdToUse = await initializeUser()
       if (userIdToUse) {
-        loadChatHistory(userIdToUse)
+        // If we restored from localStorage, skip remote history load to avoid
+        // overwriting the rich technique-card data we already have.
+        const hasRestoredSession = Boolean(_restoredMessages)
+        if (!hasRestoredSession) {
+          loadChatHistory(userIdToUse)
+        }
         loadAllSessions(userIdToUse)
       }
     }
@@ -457,7 +499,7 @@ export default function SentiMindChat() {
     }
   }, [chatHistory])
 
-  // Handle send message
+  // Handle send message — uses streaming endpoint for instant word-by-word response
   const handleSend = useCallback(async () => {
     if (!input.trim() || isLoading || !userId) return
 
@@ -466,8 +508,17 @@ export default function SentiMindChat() {
     setMessages(prev => [...prev, { role: 'user', content: userMessage }])
     setIsLoading(true)
 
+    // Placeholder message that we'll update token-by-token
+    const streamingId = Date.now()
+    setMessages(prev => [...prev, {
+      role: 'assistant',
+      content: '',
+      _streamingId: streamingId,
+      _streaming: true
+    }])
+
     try {
-      const response = await fetch(`${API_URL}/chat`, {
+      const response = await fetch(`${API_URL}/chat/stream`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -477,54 +528,82 @@ export default function SentiMindChat() {
         })
       })
 
-      if (response.ok) {
-        const data = await response.json()
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
 
-        console.log('[DEBUG] Chat response:', data)
-        console.log('[DEBUG] Recommended techniques by category:', data.recommended_techniques_by_category)
-        console.log('[DEBUG] Type of techniques:', typeof data.recommended_techniques_by_category)
-        console.log('[DEBUG] Keys in techniques:', Object.keys(data.recommended_techniques_by_category || {}))
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
 
-        const assistantMessage = {
-          role: 'assistant',
-          content: data.response || "I'm here to listen.",
-          emotion: data.emotion,
-          sentiment: data.sentiment,
-          recommendedTechniquesByCategory: data.recommended_techniques_by_category || {},
-          crisis_detected: data.crisis_detected,
-          tools_used: data.tools_used
-        }
+      // Clear the "Thinking..." spinner as soon as we start streaming
+      setIsLoading(false)
 
-        setMessages(prev => [...prev, assistantMessage])
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
 
-        if (data.recommended_techniques_by_category && Object.keys(data.recommended_techniques_by_category).length > 0) {
-          console.log('[DEBUG] Recommended techniques attached to message')
-        }
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() // keep incomplete line in buffer
 
-        if (data.voice_emotion) {
-          setVoiceEmotion(data.voice_emotion)
-          setVoiceConfidence(data.voice_confidence || 0)
-          setAcousticFeatures(data.acoustic_features || null)
-        }
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          const jsonStr = line.slice(6).trim()
+          if (!jsonStr) continue
 
-        setMoodData({
-          emotion: data.emotion,
-          confidence: data.confidence || 0.8,
-          sentiment: data.sentiment,
-          textEmotion: data.emotion,
-          voiceEmotion: data.voice_emotion
-        })
+          try {
+            const event = JSON.parse(jsonStr)
 
-        if (!currentSessionId && data.session_id) {
-          setCurrentSessionId(data.session_id)
+            if (event.type === 'token') {
+              // Append token to the streaming message bubble
+              setMessages(prev => prev.map(msg =>
+                msg._streamingId === streamingId
+                  ? { ...msg, content: msg.content + event.content }
+                  : msg
+              ))
+            } else if (event.type === 'done') {
+              // Finalize the message with metadata
+              setMessages(prev => prev.map(msg =>
+                msg._streamingId === streamingId
+                  ? {
+                    ...msg,
+                    _streaming: false,
+                    emotion: event.emotion,
+                    sentiment: event.sentiment,
+                    crisis_detected: event.crisis_detected,
+                    recommendedTechniquesByCategory: event.recommended_techniques_by_category || {},
+                    tools_used: event.tools_used || []
+                  }
+                  : msg
+              ))
+
+              setMoodData({
+                emotion: event.emotion,
+                sentiment: event.sentiment,
+                textEmotion: event.emotion
+              })
+
+              if (!currentSessionId && event.session_id) {
+                setCurrentSessionId(event.session_id)
+              }
+            } else if (event.type === 'error') {
+              setMessages(prev => prev.map(msg =>
+                msg._streamingId === streamingId
+                  ? { ...msg, content: event.content, _streaming: false }
+                  : msg
+              ))
+            }
+          } catch (parseError) {
+            // Ignore malformed SSE lines
+          }
         }
       }
     } catch (error) {
-      console.error('Error sending message:', error)
-      setMessages(prev => [...prev, {
-        role: 'assistant',
-        content: "Sorry, I encountered an error. Please try again."
-      }])
+      console.error('Streaming error:', error)
+      setMessages(prev => prev.map(msg =>
+        msg._streamingId === streamingId
+          ? { ...msg, content: "Sorry, I encountered an error. Please try again.", _streaming: false }
+          : msg
+      ))
     } finally {
       setIsLoading(false)
     }
@@ -589,13 +668,14 @@ export default function SentiMindChat() {
     }
   }, [])
 
-  // Handle new session
+  // Handle new session — clear localStorage so old exercises don't bleed in
   const handleNewSession = useCallback(() => {
+    localStorage.removeItem('sentimind_messages')
+    localStorage.removeItem('sentimind_session_id')
     setMessages([{
       role: 'assistant',
       content: "👋 Hello! I'm SentiMind. How are you feeling today?"
     }])
-    setCurrentSessionId(null)
     setCurrentSessionId(null)
     setVoiceEmotion(null)
   }, [])
@@ -714,13 +794,13 @@ export default function SentiMindChat() {
                 <MessageBubble message={message} index={index} />
 
                 {/* Render category technique display with the message */}
-                {message.role === 'assistant' && message.recommendedTechniquesByCategory && 
+                {message.role === 'assistant' && message.recommendedTechniquesByCategory &&
                   Object.keys(message.recommendedTechniquesByCategory).length > 0 && (
-                  <CategoryTechniqueDisplay
-                    techniquesByCategory={message.recommendedTechniquesByCategory}
-                    userId={userId}
-                  />
-                )}
+                    <CategoryTechniqueDisplay
+                      techniquesByCategory={message.recommendedTechniquesByCategory}
+                      userId={userId}
+                    />
+                  )}
               </React.Fragment>
             ))}
 

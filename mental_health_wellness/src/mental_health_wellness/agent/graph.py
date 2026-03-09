@@ -51,6 +51,7 @@ from ..nodes.behavioral_activation_node import behavioral_activation_node
 from ..nodes.psych_profile_updater import psych_profile_updater_node
 from ..nodes.outcome_tracker_node import outcome_tracker_node
 from ..db.client import ensure_user_exists, create_new_session
+from ..llm.llm_classifier import llm_crisis_check
 
 
 # ============================================
@@ -61,63 +62,115 @@ from ..db.client import ensure_user_exists, create_new_session
 # This deterministic layer is the mandatory safety net.
 
 _CRISIS_KEYWORDS_HIGH = {
+    # Self-harm / suicide - explicit
     "kill myself", "killing myself", "end my life", "ending my life",
     "end it all tonight", "going to kill myself", "i want to die",
     "take my life", "taking my life", "i will kill myself",
-    "i'm going to kill", "commit suicide", "committing suicide",
+    "im going to kill", "i'm going to kill", "commit suicide", "committing suicide",
     "take my own life", "end my own life", "hang myself",
     "shoot myself", "overdose on", "slit my wrists",
     "thinking about ending", "planning to end my life",
+    # Not wanting to live — HIGH risk variants (with and without apostrophe)
+    "dont want to live", "don't want to live",
+    "do not want to live",
+    "i dont want to live", "i don't want to live",
+    "dont want to be alive", "don't want to be alive",
+    "i dont want to be here", "i don't want to be here",
+    "i want to disappear", "want to stop existing",
+    "wish i was never born", "wish i were never born",
+    "rather be dead", "rather not exist",
+    "tired of living", "tired of being alive",
 }
 _CRISIS_KEYWORDS_MEDIUM = {
-    "not wake up", "sleep forever", "don't want to live",
+    "not wake up", "sleep forever",
     "wish i was dead", "wish i were dead", "no reason to live",
     "better off dead", "better off without me", "disappear forever",
-    "can't go on", "no point in living", "end the pain",
+    "cant go on", "can't go on", "no point in living", "end the pain",
+    "no point anymore", "life isnt worth", "life isn't worth",
+    "cant do this anymore", "can't do this anymore",
+    "giving up on life", "nothing to live for",
 }
 
 
-def crisis_pre_screener_node(state: MentalHealthState) -> dict:
+async def crisis_pre_screener_node(state: MentalHealthState) -> dict:
     """
-    FIX 1: DETERMINISTIC CRISIS PRE-SCREENER
-    
-    Runs BEFORE the LLM and emotion model.
-    Matches explicit suicidal/self-harm phrases and short-circuits the pipeline
-    by setting crisis_detected=True and crisis_level directly in state.
-    
-    This is the mandatory safety net — no LLM or emotion model is reliable
-    enough to be the sole crisis detector.
+    ENHANCED CRISIS PRE-SCREENER (v5.1 — Two-Layer Detection)
+
+    Layer 1 (Instant, < 10ms): Hard-coded keyword matching for explicit phrases.
+    Layer 2 (Semantic, ~350ms): sentinet/suicidality ELECTRA specialist model
+                                 + Groq llama-3.3-70b-versatile LLM validator.
+
+    Called BEFORE the main pipeline. Short-circuits directly to crisis_handler
+    if crisis is detected, bypassing the LLM generation layer entirely.
     """
     messages = state.get("messages", [])
-    msg = messages[-1].content.lower() if messages else ""
-    
+    msg_raw = messages[-1].content.lower() if messages else ""
+    msg = msg_raw.replace("'", "").replace("\u2019", "")
+    user_id = state.get("user_id", "anonymous")
+
+    # ---- Visual separator per request for clean terminal logs ----
+    separator = '\u2550' * 60
+    print(f"\n{separator}")
+    print(f"[PIPELINE] 🚀 New message | User: {user_id}")
+    print(f"[PIPELINE] 💬 Message: \"{(messages[-1].content if messages else '')[:80]}...\"")
+    print(separator)
+    print(f"[NODE:CRISIS_SCREENER] Running crisis pre-screen...")
+
+    # ---- LAYER 1: Hard-coded keyword gate (instant, zero-cost) ----
     for phrase in _CRISIS_KEYWORDS_HIGH:
         if phrase in msg:
-            print(f"[CRISIS_SCREENER] HIGH RISK keyword match: '{phrase}'")
+            print(f"[CRISIS_SCREENER] 🚨 HIGH keyword match: '{phrase}'")
             return {
                 "crisis_detected": True,
                 "crisis_level": "high",
                 "crisis_pre_screened": True,
             }
-    
+
     for phrase in _CRISIS_KEYWORDS_MEDIUM:
         if phrase in msg:
-            print(f"[CRISIS_SCREENER] MEDIUM RISK keyword match: '{phrase}'")
+            print(f"[CRISIS_SCREENER] ⚠️  MEDIUM keyword match: '{phrase}'")
             return {
                 "crisis_detected": True,
                 "crisis_level": "medium",
                 "crisis_pre_screened": True,
             }
-    
-    print("[CRISIS_SCREENER] No crisis keywords detected — continuing normal pipeline")
-    return {"crisis_pre_screened": False}
+
+    # ---- LAYER 2: Specialist ELECTRA + Groq 70b semantic check ----
+    print("[CRISIS_SCREENER] No keyword match — escalating to ELECTRA + LLM classifier...")
+    original_message = messages[-1].content if messages else ""
+    llm_result = await llm_crisis_check(original_message)
+
+    if llm_result.get("crisis_detected", False):
+        crisis_level = llm_result.get("crisis_level", "medium")
+        source = llm_result.get("source", "llm")
+        print(f"[CRISIS_SCREENER] 🚨 LLM/ELECTRA detected crisis ({crisis_level}) via {source}")
+        return {
+            "crisis_detected": True,
+            "crisis_level": crisis_level,
+            "crisis_pre_screened": True,
+        }
+
+    print("[CRISIS_SCREENER] ✅ No crisis detected (keywords + ELECTRA + LLM all clear)")
+    return {
+        "crisis_detected": False,
+        "crisis_level": "none",
+        "crisis_pre_screened": False
+    }
 
 
 def _route_after_crisis_screener(state: MentalHealthState) -> str:
-    """If pre-screener flagged crisis, skip LLM entirely and go to crisis handler."""
-    if state.get("crisis_pre_screened") and state.get("crisis_detected", False):
-        print("[CRISIS_SCREENER] Routing directly to crisis_handler (skipping LLM pipeline)")
+    """Route to crisis_handler only for medium/high crisis. Low risk = normal pipeline."""
+    crisis_level = state.get("crisis_level", "low")
+    crisis_detected = state.get("crisis_detected", False)
+    crisis_pre_screened = state.get("crisis_pre_screened", False)
+
+    if crisis_pre_screened and crisis_detected and crisis_level in ("high", "medium"):
+        print(f"[CRISIS_SCREENER] Routing to crisis_handler (level={crisis_level})")
         return "crisis_direct"
+
+    if crisis_pre_screened and crisis_detected and crisis_level == "low":
+        print(f"[CRISIS_SCREENER] Low-level distress — routing to normal pipeline (not a crisis)")
+
     return "normal"
 
 
@@ -134,21 +187,36 @@ def _route_after_technique_selection(state: MentalHealthState) -> str:
     
     Decision Logic:
       IF crisis_detected = True → Route to "crisis_handler" 
-      ELIF intensity >= 0.8 (high distress) → Route to "crisis_handler" 
+      ELIF intensity >= 0.8 AND emotion in (sadness, fear, anger) → Route to "crisis_handler" 
       ELSE → Route to "role_selector"
     """
     intensity = state.get("fused_intensity", state.get("intensity", 0.5))
+    emotion = state.get("fused_emotion", state.get("emotion", "neutral"))
     crisis_detected = state.get("crisis_detected", False)
     
     if crisis_detected:
         print(f"[ROUTER] Crisis detected — routing to crisis_handler")
         return "crisis"
-    elif intensity >= 0.8:
-        print(f"[ROUTER] High intensity route (intensity: {intensity:.0%})")
+    elif intensity >= 0.8 and emotion in ["sadness", "fear", "anger"]:
+        print(f"[ROUTER] High intensity distress route (emotion: {emotion}, intensity: {intensity:.0%})")
         return "crisis"
     else:
-        print(f"[ROUTER] Normal route (intensity: {intensity:.0%})")
+        print(f"[ROUTER] Normal route (emotion: {emotion}, intensity: {intensity:.0%})")
         return "role"
+
+
+def _route_after_planner(state: MentalHealthState) -> str:
+    """
+    Fast-Path Router for Casual Chitchat.
+    If the planner determines this is just casual conversation (no_action),
+    skip all the therapeutic nodes and go straight to response generation.
+    """
+    strategy = state.get("conversation_strategy", "ask_question")
+    if strategy == "no_action":
+        print(f"⚡ [ROUTER] Casual chitchat fast-path triggered. Skipping therapeutic pipeline.")
+        return "fast_chitchat_path"
+    
+    return "normal_therapeutic_path"
 
 
 def build_graph() -> StateGraph:
@@ -231,8 +299,15 @@ def build_graph() -> StateGraph:
     # trend_analyzer → conversation_planner (uses distortion_type + trend)
     graph.add_edge("trend_analyzer", "conversation_planner")
     
-    # conversation_planner → behavioral_activation [v3 NEW]
-    graph.add_edge("conversation_planner", "behavioral_activation")
+    # conversation_planner → CONDITIONAL: normal therapy OR skip to role_selector (chitchat)
+    graph.add_conditional_edges(
+        "conversation_planner",
+        _route_after_planner,
+        {
+            "fast_chitchat_path": "role_selector",
+            "normal_therapeutic_path": "behavioral_activation"
+        }
+    )
     
     # behavioral_activation → technique_selector
     graph.add_edge("behavioral_activation", "technique_selector")

@@ -27,6 +27,7 @@ OUTPUT STATE FIELDS:
 """
 
 from ..agent.state import MentalHealthState
+from ..llm.llm_classifier import llm_distortion_check
 
 
 # ============================================
@@ -106,7 +107,7 @@ DISTORTION_EXPLANATIONS: dict[str, str] = {
 # MAIN NODE FUNCTION
 # ============================================
 
-def cognitive_distortion_node(state: MentalHealthState) -> dict:
+async def cognitive_distortion_node(state: MentalHealthState) -> dict:
     """
     COGNITIVE DISTORTION DETECTOR — Pure deterministic pattern analysis.
 
@@ -128,6 +129,15 @@ def cognitive_distortion_node(state: MentalHealthState) -> dict:
     if len(user_message.split()) < 4:
         return _no_distortion_result()
 
+    emotion = state.get("fused_emotion", state.get("emotion", "neutral"))
+    intensity = state.get("fused_intensity", state.get("intensity", 0.5))
+    
+    # CHITCHAT/POSITIVE BYPASS: If the local model detects neutral or positive emotion
+    # with low intensity, skip the 2-second LLM API call entirely.
+    if emotion in ["neutral", "joy", "surprise"] and intensity < 0.3:
+        print(f"[NODE: DISTORTION] ⏩ Skipping LLM check (positive/neutral mood detected: {emotion} {intensity:.0%})")
+        return _no_distortion_result()
+
     print(f"\n[NODE: DISTORTION] 🧠 Scanning for cognitive distortions...")
 
     # ============================================
@@ -145,13 +155,36 @@ def cognitive_distortion_node(state: MentalHealthState) -> dict:
             distortion_scores[distortion_type] = min(1.0, raw_score * 3.0)  # scale up for readability
 
     if not distortion_scores:
-        print(f"[NODE: DISTORTION] ✅ No distortions detected")
+        print(f"[NODE: DISTORTION] 🔁 No keyword match — escalating to LLM classifier...")
+        llm_result = await llm_distortion_check(user_message)
+        if llm_result.get("distortion_type"):
+            print(f"[NODE: DISTORTION] 🤖 LLM found: {llm_result['distortion_type']} ({llm_result.get('confidence', 0):.0%})")
+            return {
+                "distortion_type":        llm_result.get("distortion_type"),
+                "distortion_confidence":  llm_result.get("confidence", 0.5),
+                "distortion_explanation": llm_result.get("explanation", ""),
+                "all_distortions":        llm_result.get("all_distortions", []),
+            }
+        print(f"[NODE: DISTORTION] ✅ LLM also found no distortions")
         return _no_distortion_result()
 
     # Sort by score descending
     sorted_distortions = sorted(distortion_scores.items(), key=lambda x: x[1], reverse=True)
     primary_type, primary_confidence = sorted_distortions[0]
     all_distortions = [d[0] for d in sorted_distortions if d[1] > 0.1]
+
+    # If keyword confidence is low (ambiguous signal), validate with LLM
+    if primary_confidence < 0.4:
+        print(f"[NODE: DISTORTION] ⚠️  Low keyword confidence ({primary_confidence:.0%}) — escalating to LLM...")
+        llm_result = await llm_distortion_check(user_message)
+        if llm_result.get("distortion_type") and llm_result.get("confidence", 0) >= 0.4:
+            print(f"[NODE: DISTORTION] 🤖 LLM override: {llm_result['distortion_type']} ({llm_result.get('confidence', 0):.0%})")
+            return {
+                "distortion_type":        llm_result.get("distortion_type"),
+                "distortion_confidence":  llm_result.get("confidence", 0.5),
+                "distortion_explanation": llm_result.get("explanation", ""),
+                "all_distortions":        llm_result.get("all_distortions", []),
+            }
 
     print(f"[NODE: DISTORTION] ⚠️  Primary: {primary_type.upper()} (conf: {primary_confidence:.0%})")
     if len(all_distortions) > 1:
