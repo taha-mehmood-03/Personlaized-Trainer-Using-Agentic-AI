@@ -154,43 +154,7 @@ async def session_saver_node(state: MentalHealthState) -> dict:
             print(f"[NODE: SESSION_SAVER] Details: {str(e)[:150]}")
             save_errors.append(f"Critical DB error: {str(e)[:100]}")
         
-        # ============================================
-        # STEP 2: SAVE TO CHROMADB VECTOR STORE
-        # ============================================
-        
-        print("[NODE: SESSION_SAVER] 🧠 Step 2: Saving to ChromaDB vector store...")
-        
-        try:
-            from ..memory import store_conversation_memory
-            
-            try:
-                memory_stored = await store_conversation_memory(
-                    user_id=user_id,
-                    user_message=user_message,
-                    assistant_response=final_response,
-                    emotion=emotion,
-                    session_id=session_id
-                )
-                
-                if memory_stored:
-                    print(f"[NODE: SESSION_SAVER] ✅ Vector memory stored")
-                else:
-                    print(f"[NODE: SESSION_SAVER] ⚠️ Vector memory store returned false")
-                    save_errors.append("Vector memory store returned false")
-                    
-            except Exception as mem_err:
-                print(f"[NODE: SESSION_SAVER] ❌ Vector memory error: {type(mem_err).__name__}")
-                print(f"[NODE: SESSION_SAVER] Details: {str(mem_err)[:150]}")
-                save_errors.append(f"Vector memory: {str(mem_err)[:100]}")
-                
-        except ImportError as ie:
-            print(f"[NODE: SESSION_SAVER] ⚠️ Memory module import error: {str(ie)[:100]}")
-            save_errors.append("Memory module not available")
-        except Exception as e:
-            print(f"[NODE: SESSION_SAVER] ❌ CRITICAL memory error: {type(e).__name__}")
-            print(f"[NODE: SESSION_SAVER] Details: {str(e)[:150]}")
-            save_errors.append(f"Critical memory error: {str(e)[:100]}")
-        
+
         # ============================================
         # STEP 3: UPDATE USER STATISTICS
         # ============================================
@@ -330,23 +294,29 @@ async def session_saver_node(state: MentalHealthState) -> dict:
                     print(f"[NODE: SESSION_SAVER] ⏭️  Phase update suppressed "
                           f"(confidence={intent_confidence:.2f} < {_PHASE_CONFIDENCE_THRESHOLD}, phase={conversation_phase})")
             
-            # Generate session summary every 5 messages
+            # Trigger LLM-powered session summary every 5 messages (background task)
             msg_count = state.get("session_message_count", 0)
             if session_id and msg_count > 0 and msg_count % 5 == 0:
                 try:
-                    summary_text, key_themes = _generate_rule_based_summary(state)
-                    
-                    await prisma.sessionsummary.create(
-                        data={
-                            "sessionId": session_id,
-                            "summary": summary_text,
-                            "keyThemes": key_themes,
-                        }
-                    )
-                    print(f"[NODE: SESSION_SAVER] ✅ Session summary saved (msg #{msg_count})")
+                    import asyncio
+                    from ..memory.session_summarizer import summarize_session
+
+                    technique = state.get("recommended_technique", {})
+                    technique_name = technique.get("name", "") if technique else ""
+                    tech_list = [technique_name] if technique_name else []
+
+                    asyncio.create_task(summarize_session(
+                        user_id=user_id,
+                        session_id=session_id,
+                        messages=messages,
+                        emotion=emotion,
+                        techniques=tech_list,
+                        outcome="neutral"
+                    ))
+                    print(f"[NODE: SESSION_SAVER] ✅ LLM session summary scheduled (msg #{msg_count})")
                 except Exception as sum_err:
-                    print(f"[NODE: SESSION_SAVER] ⚠️ Summary save failed: {str(sum_err)[:80]}")
-                    save_errors.append(f"Summary: {str(sum_err)[:80]}")
+                    print(f"[NODE: SESSION_SAVER] ⚠️ Summary task scheduling failed: {str(sum_err)[:80]}")
+                    save_errors.append(f"Summary scheduling: {str(sum_err)[:80]}")
         
         except ImportError as ie:
             print(f"[NODE: SESSION_SAVER] ⚠️ DB module import error: {str(ie)[:100]}")

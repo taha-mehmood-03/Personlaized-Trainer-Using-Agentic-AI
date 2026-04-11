@@ -83,6 +83,9 @@ async def optimized_response_generator_node(state: MentalHealthState) -> dict:
             print(f"[NODE:RESPONSE] 🧠 CBT Distortion: {distortion_type}")
         if memory_context:
             print(f"[NODE:RESPONSE] 💡 Memory context available ({len(memory_context)} chars) — injecting into prompt")
+
+        # Fetch LLM instance once — reused on both fast and therapeutic paths
+        llm = get_chat_llm()
         
         # ============================================
         # BUILD ULTRA-CONCISE SYSTEM PROMPT (<150 tokens)
@@ -106,8 +109,7 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
 ⚠️ EMERGENCY SAFETY CLAUSE: If the user expresses ANY sudden sadness, fear, self-harm, or distress in this specific message, drop the casual tone immediately. Acknowledge their pain and offer gentle support instead of casual chitchat."""
             
             simple_msg = user_message
-            llm = get_chat_llm()
-            
+
             # Build messages with within-session history so it remembers names mentioned 2 messages ago
             fast_messages = [SystemMessage(content=simple_prompt)]
             if recent_history:
@@ -122,7 +124,8 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
                 print(f"[NODE:RESPONSE] 📑 Injected {len(recent_history)} recent turns into fast path")
             
             fast_messages.append(HumanMessage(content=simple_msg))
-            casual_response = llm.invoke(fast_messages)
+            # v5.3 FIX: use ainvoke (non-blocking) instead of invoke (blocks event loop ~1-3s)
+            casual_response = await llm.ainvoke(fast_messages)
             
             final_response = casual_response.content if hasattr(casual_response, 'content') else str(casual_response)
             print(f"[NODE:RESPONSE] ✅ Casual response generated (no_action fast path)")
@@ -194,8 +197,9 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
         # SINGLE LLM CALL
         # ============================================
         
-        llm = get_chat_llm()
-        response = llm.invoke(llm_messages)
+        # v5.3 FIX: use ainvoke (non-blocking) — was sync llm.invoke() which blocked
+        # the event loop for the entire 1-3s Groq HTTP round-trip on every message.
+        response = await llm.ainvoke(llm_messages)
         
         elapsed_ms = int((time.time() - start_time) * 1000)
         final_response = response.content if hasattr(response, 'content') else str(response)

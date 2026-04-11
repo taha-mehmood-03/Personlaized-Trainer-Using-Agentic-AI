@@ -38,6 +38,7 @@ class ChatResponse(BaseModel):
     emotion: Optional[str] = None
     crisis_detected: bool = False
     tools_used: List[str] = []
+    node_trace: List[str] = []
     technique_reasoning: Optional[str] = None
     recommended_techniques_by_category: Dict[str, dict] = {}
     timestamp: str
@@ -59,6 +60,19 @@ class UserCreateResponse(BaseModel):
     email: str
     name: str
     created: bool
+
+
+class UserLoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class AuthResponse(BaseModel):
+    status: str
+    user_id: Optional[str] = None
+    email: Optional[str] = None
+    name: Optional[str] = None
+    message: Optional[str] = None
 
 
 class HealthResponse(BaseModel):
@@ -113,23 +127,26 @@ async def lifespan(app: FastAPI):
         traceback.print_exc()
     
     try:
-        # Preload ML models on startup to avoid slow first request
+        # Preload ALL ML models on startup to avoid slow first request
         print("[SERVER] 🔄 Loading ML models...")
-        from src.mental_health_wellness.memory import preload_embeddings
         from src.mental_health_wellness.tools.mood_tools import preload_emotion_model
+        from src.mental_health_wellness.llm.llm_classifier import _get_crisis_classifier
+        from src.mental_health_wellness.llm.groq_llm import get_llm_manager
         
-        print("[SERVER]   • Embeddings (all-MiniLM-L6-v2)")
-        preload_embeddings()
-        
-        print("[SERVER]   • Emotion detector (DistilBERT)")
+        print("[SERVER]   • Emotion detector (RoBERTa/GoEmotions)")
         preload_emotion_model()
+        
+        print("[SERVER]   • Crisis specialist (ELECTRA sentinet/suicidality)")
+        _get_crisis_classifier()
+        
+        print("[SERVER]   • Groq LLM Manager (API key validation)")
+        get_llm_manager()
         
         print("[SERVER] ✅ All models loaded")
     except Exception as e:
         print(f"[SERVER] ❌ Model loading failed: {e}")
         import traceback
         traceback.print_exc()
-        raise
     
     try:
         agent = get_agent()
@@ -230,6 +247,7 @@ async def chat(request: ChatRequest):
             emotion=result.get("emotion"),
             crisis_detected=result.get("crisis_detected", False),
             tools_used=result.get("tools_used", []),
+            node_trace=result.get("node_trace", []),
             technique_reasoning=result.get("technique_reasoning"),
             recommended_techniques_by_category=result.get("recommended_techniques_by_category", {}),
             timestamp=datetime.now().isoformat()
@@ -348,6 +366,7 @@ async def pipeline_complete(request: PipelineRequest):
             "crisis_detected": result.get("crisis_detected", False),
             "session_id": result.get("session_id"),
             "tools_used": result.get("tools_used", []),
+            "node_trace": result.get("node_trace", []),
             "techniques": result.get("techniques", []),
             "performance": {
                 "total_ms": total_ms
@@ -405,6 +424,92 @@ async def create_user(request: UserCreateRequest):
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/auth/signup")
+async def auth_signup(request: UserLoginRequest):
+    """Sign up a new user with an email and password"""
+    import bcrypt
+    try:
+        prisma = await get_prisma_client()
+        
+        existing = await prisma.user.find_unique(where={"email": request.email})
+        if existing:
+            if existing.passwordHash:
+                raise HTTPException(status_code=400, detail="Email already strictly configured with a password.")
+            else:
+                # Update anonymous user with real password
+                salt = bcrypt.gensalt()
+                hashed = bcrypt.hashpw(request.password.encode('utf-8'), salt)
+                
+                updated_user = await prisma.user.update(
+                    where={"id": existing.id},
+                    data={"passwordHash": hashed.decode('utf-8')}
+                )
+                
+                return AuthResponse(
+                    status="success",
+                    user_id=updated_user.id,
+                    email=updated_user.email,
+                    name=updated_user.name
+                )
+        
+        # Completely new user
+        name = request.email.split('@')[0]
+        salt = bcrypt.gensalt()
+        hashed = bcrypt.hashpw(request.password.encode('utf-8'), salt)
+        
+        user = await prisma.user.create(
+            data={
+                "email": request.email, 
+                "name": name,
+                "passwordHash": hashed.decode('utf-8')
+            }
+        )
+        
+        await prisma.userpreference.create(data={"userId": user.id})
+        await prisma.userstatistics.create(data={"userId": user.id})
+        
+        return AuthResponse(
+            status="success",
+            user_id=user.id,
+            email=user.email,
+            name=user.name
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[AUTH ERROR] Signup failed: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.post("/api/auth/login")
+async def auth_login(request: UserLoginRequest):
+    """Log in an existing user using email and password"""
+    import bcrypt
+    try:
+        prisma = await get_prisma_client()
+        
+        user = await prisma.user.find_unique(where={"email": request.email})
+        if not user or not user.passwordHash:
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+            
+        if not bcrypt.checkpw(request.password.encode('utf-8'), user.passwordHash.encode('utf-8')):
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+            
+        return AuthResponse(
+            status="success",
+            user_id=user.id,
+            email=user.email,
+            name=user.name
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[AUTH ERROR] Login failed: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.post("/api/user/ensure")

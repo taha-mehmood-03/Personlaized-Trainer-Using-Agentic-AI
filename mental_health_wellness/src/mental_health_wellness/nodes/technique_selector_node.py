@@ -15,100 +15,86 @@ import time
 async def technique_selector_node(state: MentalHealthState) -> dict:
     """
     TECHNIQUE SELECTOR NODE - Deterministic technique selection.
-    
+
     Process:
     1. Check planner strategy — skip if user not ready
-    2. Get detected emotion from mood analyzer (or fused emotion)
-    3. Query database for best techniques per category
-    4. Select single primary technique
-    5. Store structured technique data in state
-    
+    2. Get detected emotion + intensity from state (prefers fused values)
+    3. Query database for top-3 techniques (intensity-routed, unused-first)
+    4. primary = top 1, alternatives = items 2 & 3
+    5. Store all in state for SSE streaming to frontend
+
     No LLM involved - pure database queries
-    
-    Input State:
-        - emotion: From mood analyzer
-        - fused_emotion: From emotion fusion (preferred)
-        - conversation_strategy: From planner
-        - technique_readiness: From planner
-        - user_id: For personalization (avoid recently recommended)
-    
+
     Output State:
-        - recommended_technique: Single best technique dict
-        - recommended_techniques_by_category: All 6 categories with best technique
+        - recommended_technique:           Single best technique dict
+        - recommended_techniques_by_category: {category: technique} (single entry, for UI compat)
+        - alternative_techniques:          List of up to 2 alternative dicts
     """
-    
+
     try:
-        # ============================================
-        # PLANNER GATING: Respect conversation strategy
-        # ============================================
+        # ── Planner gating ───────────────────────────────────────────────────
         strategy = state.get("conversation_strategy", "validate_only")
         readiness = state.get("technique_readiness", 0.0)
-        
+
+        _empty = {
+            "recommended_technique": {},
+            "recommended_techniques_by_category": {},
+            "alternative_techniques": [],
+        }
+
         skip_strategies = {"validate_only", "ask_question", "encourage_reflection"}
         if strategy in skip_strategies:
-            print(f"[TECHNIQUE] ⏭️ Skipping (planner strategy: {strategy}, readiness: {readiness:.0%})")
-            return {
-                "recommended_technique": {},
-                "recommended_techniques_by_category": {}
-            }
-        
-        # Prefer fused emotion, fall back to raw text emotion
-        emotion = state.get("fused_emotion", state.get("emotion", "neutral"))
-        user_id = state.get("user_id", "")
-        
-        print(f"\n[TECHNIQUE] 🎯 Selecting for emotion: {emotion.upper()} (strategy: {strategy})")
+            print(f"[TECHNIQUE] ⏭️ Skipping (strategy: {strategy}, readiness: {readiness:.0%})")
+            return _empty
 
-        # ============================================
-        # FIX: CHITCHAT/NO_ACTION BYPASS (Audit Finalization)
-        # If the planner decided on no_action (e.g., casual greeting or grocery list),
-        # there is absolutely no need to query the database for CBT techniques.
-        # This saves ~1.5-3.5 seconds of query latency on neutral messages.
-        # ============================================
         if strategy == "no_action":
-            print(f"[TECHNIQUE] ⏭️  Skipping technique search (strategy: no_action — casual conversation)")
-            return {
-                "recommended_technique": {},
-                "recommended_techniques_by_category": {}
-            }
+            print(f"[TECHNIQUE] ⏭️ Skipping (strategy: no_action — casual conversation)")
+            return _empty
 
-        # Decide if we MIGHT use a technique
-        # We load them anyway if readiness is high enough, even for 'reframe'
         if strategy in ["validate_only", "ask_question"] and readiness < 0.6:
-            print(f"[TECHNIQUE] ⏭️  Skipping (strategy indicates not ready for technique)")
-            return {
-                "recommended_technique": {},
-                "recommended_techniques_by_category": {}
-            }
-            
+            print(f"[TECHNIQUE] ⏭️ Skipping (not ready, readiness={readiness:.0%})")
+            return _empty
+
+        # ── Inputs ───────────────────────────────────────────────────────────
+        emotion   = state.get("fused_emotion", state.get("emotion", "neutral"))
+        intensity = state.get("fused_intensity", state.get("intensity", 0.5))
+        user_id   = state.get("user_id", "")
+
+        print(f"\n[TECHNIQUE] 🎯 emotion={emotion.upper()} intensity={intensity:.0%} strategy={strategy}")
+
         start_time = time.time()
-        
-        # Get all best techniques by category
-        techniques_by_category = await recommend_technique.ainvoke({
-            "emotion": emotion,
-            "user_id": user_id
+
+        # ── Fetch top-3 (list) ───────────────────────────────────────────────
+        top3: list = await recommend_technique.ainvoke({
+            "emotion":   emotion,
+            "intensity": intensity,
+            "user_id":   user_id,
         })
-        
+
         elapsed_ms = int((time.time() - start_time) * 1000)
-        
-        # Select primary technique (highest rated from available)
-        recommended_technique = {}
-        if techniques_by_category:
-            # Get first (best rated) technique
-            primary_technique = next(iter(techniques_by_category.values()))
-            recommended_technique = primary_technique
-            
-            print(f"[TECHNIQUE] ✅ {recommended_technique.get('name', 'Unknown')} ({recommended_technique.get('category', 'Unknown')}) | Time: {elapsed_ms}ms")
-        else:
-            print(f"[TECHNIQUE] ⚠️ No techniques found for {emotion}")
-        
+
+        if not top3:
+            print(f"[TECHNIQUE] ⚠️ No techniques found for {emotion} | Time: {elapsed_ms}ms")
+            return _empty
+
+        primary      = top3[0]
+        alternatives = top3[1:]          # 0, 1, or 2 items
+
+        cat_name = primary.get("category", "Recommended")
+        print(f"[TECHNIQUE] ✅ Primary: {primary.get('name')} ({cat_name}) "
+              f"| Alternatives: {[t.get('name') for t in alternatives]} "
+              f"| Time: {elapsed_ms}ms")
+
         return {
-            "recommended_technique": recommended_technique,
-            "recommended_techniques_by_category": techniques_by_category
+            "recommended_technique":            primary,
+            "recommended_techniques_by_category": {cat_name: primary},
+            "alternative_techniques":            alternatives,
         }
-        
+
     except Exception as e:
         print(f"[TECHNIQUE] ❌ Error: {str(e)[:80]}")
         return {
             "recommended_technique": {},
-            "recommended_techniques_by_category": {}
+            "recommended_techniques_by_category": {},
+            "alternative_techniques": [],
         }

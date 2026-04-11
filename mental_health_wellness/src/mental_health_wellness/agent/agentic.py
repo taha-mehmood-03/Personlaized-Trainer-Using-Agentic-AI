@@ -286,10 +286,13 @@ Do NOT call analyze_voice (no audio available)"""
 [GREETING] No emotion words + short message → Call ZERO tools
   Examples: "Hi", "Hey there", "How are you"
 
-[CRISIS] Explicit self-harm is handled BEFORE you by a safety screener.
-  You will ONLY see messages that passed the screener.
-  If you detect SUBTLE self-harm not caught by keywords → Call handle_crisis.
-  ❌ Do NOT call handle_crisis for: work stress, metaphors, past references
+[CRISIS] ONLY call handle_crisis for EXPLICIT self-harm or suicidal intent.
+  ✅ DO call: "I want to kill myself", "I've been cutting myself", "I have a plan to end my life"
+  ❌ NEVER call for: loneliness, exhaustion, worthlessness alone, social media breaks, metaphors
+  ❌ NEVER call for: "I feel worthless at work", "I'm tired of fighting deadlines",
+                     "I want to disappear from social media", "nobody understands me",
+                     "everything feels heavy", "every day is worse", "I'm the only one who struggles"
+  RULE: If no EXPLICIT mention of dying, suicide, self-harm, or ending life → DO NOT call handle_crisis
 
 [EMOTIONAL] Has emotion words + intensity matters → analyze_mood → (if intensity ≥ 0.5 AND negative) → recommend_technique
   ✅ Examples: "anxious about job" → analyze_mood → recommend_technique
@@ -298,19 +301,27 @@ Do NOT call analyze_voice (no audio available)"""
 
 [EXERCISE] "breathing exercise", "meditation", "technique" → recommend_technique
 
+═══ TECHNIQUE SELECTION RULES ═══
+
+Match technique to the PRIMARY emotion detected by analyze_mood:
+  sadness / grief / depression → recommend_technique("sadness") [Journaling, CBT, Behavioral Activation]
+  anxiety / fear / panic / overwhelmed → recommend_technique("anxiety") [Box Breathing, 4-7-8, Body Scan]
+  anger / frustration / rage → recommend_technique("anger") [DBT Emotion Regulation, PMR]
+  neutral / mild (<0.4 intensity) → NO technique — do NOT call recommend_technique
+
 ═══ MANDATORY SEQUENCE ═══
 
 1. NEVER call recommend_technique WITHOUT analyze_mood first
 2. ALWAYS recommend_technique IF (emotion=negative AND intensity ≥ 0.5)
 3. NEVER recommend_technique FOR positive emotions
-4. NEVER call handle_crisis FOR: work stress, anger at others, metaphors, past references
+4. NEVER call handle_crisis UNLESS explicit self-harm / suicidal language present
 5. NEVER call same tool twice
 6. ZERO tools for pure greetings/thanks
 
-═══ 6 CRITICAL EXAMPLES ═══
+═══ 8 CRITICAL EXAMPLES ═══
 
 Ex1: "Really anxious about interview"
-→ analyze_mood → recommend_technique ✅
+→ analyze_mood → recommend_technique("anxiety") ✅
 
 Ex2: "Hey, how are you?"
 → ZERO tools ✅
@@ -319,13 +330,19 @@ Ex3: "I want to end my life"
 → handle_crisis ONLY, STOP ✅
 
 Ex4: "My boss is killing me, so stressed"
-→ analyze_mood → recommend_technique (NOT crisis) ✅
+→ analyze_mood → recommend_technique("anxiety") (NOT crisis) ✅
 
 Ex5: "I'm doing great today!"
 → analyze_mood ONLY (positive emotion) ✅
 
-Ex6: "Tried that exercise, still nervous"
-→ analyze_mood → recommend_technique ✅
+Ex6: "I feel so lonely, nobody understands me"
+→ analyze_mood → recommend_technique("sadness") (NOT crisis) ✅
+
+Ex7: "I feel worthless at everything"
+→ analyze_mood → recommend_technique("sadness") (NOT crisis — no suicide mention) ✅
+
+Ex8: "I've been crying all day"
+→ analyze_mood → recommend_technique("sadness") [Journaling/CBT, NOT Breathing] ✅
 
 ═══ QUALITY OVER QUANTITY ═══
 
@@ -724,6 +741,41 @@ def _post_process_results(result: dict, state: dict) -> dict:
     crisis_level = result["crisis_level"]
     crisis_resources = result.get("crisis_resources")
     tools_called = result["tools_called"]
+    
+    # FIX 4: If crisis was detected but the LLM skipped analyze_mood
+    # (common — LLM jumps straight to handle_crisis), the emotion_data
+    # remains at the default 'neutral'. Run a quick synchronous fallback
+    # to give the API response, dashboard, and analytics a real emotion label.
+    if crisis_detected and emotion_data.get("emotion") == "neutral" and state.get("messages"):
+        try:
+            import asyncio
+            raw_message = state["messages"][-1].content if state["messages"] else ""
+            if raw_message:
+                print("[AGENT] 🔄 FIX4: Crisis path — forcing mood analysis for emotion label...")
+                from ..tools import analyze_mood as _analyze_mood_tool
+                # Run synchronously in an executor to avoid blocking the event loop
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # We are already inside an async context — invoke directly
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as pool:
+                        future = pool.submit(_analyze_mood_tool.invoke, {"message": raw_message})
+                        mood_result = future.result(timeout=8)
+                else:
+                    mood_result = loop.run_until_complete(
+                        _analyze_mood_tool.ainvoke({"message": raw_message})
+                    )
+                if mood_result and mood_result.get("emotion") != "neutral":
+                    print(f"[AGENT] ✅ FIX4: Crisis emotion corrected: neutral → {mood_result['emotion']}")
+                    emotion_data = {
+                        "emotion": mood_result.get("emotion", "neutral"),
+                        "sentiment": mood_result.get("sentiment", "negative"),
+                        "intensity": mood_result.get("intensity", 0.8),
+                        "confidence": mood_result.get("confidence", 0.7),
+                    }
+        except Exception as e:
+            print(f"[AGENT] ⚠️ FIX4: Fallback mood analysis failed: {e}")
+            # Keep existing emotion_data — still better than crashing
     
     # Determine intent
     intent = "casual"

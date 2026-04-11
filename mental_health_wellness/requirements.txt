@@ -38,13 +38,7 @@ soundfile>=0.12.0
 torch>=2.0.0
 torchaudio>=2.0.0
 
-# ============================================
-# Embedding Memory (ChromaDB + HuggingFace)
-# ============================================
-chromadb>=0.4.0
-sentence-transformers>=2.2.0
-langchain-huggingface>=0.1.0
-langchain-chroma>=0.1.0
+
 
 # ============================================
 # Checkpointer (PostgreSQL)

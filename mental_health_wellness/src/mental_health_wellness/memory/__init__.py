@@ -8,7 +8,7 @@ from typing import Optional
 from datetime import datetime
 
 # Use lazy imports to avoid startup slowdown
-_vectorstore = None
+_vectorstore_cache: dict = {}  # Cache per user_id to avoid reconnection overhead
 _embeddings = None
 _MEMORY_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "memory_store")
 
@@ -58,6 +58,10 @@ def _get_vectorstore(user_id: str):
     # Ensure memory directory exists
     os.makedirs(_MEMORY_DIR, exist_ok=True)
     
+    # Cache per-user to avoid repeated disk I/O
+    if user_id in _vectorstore_cache:
+        return _vectorstore_cache[user_id]
+
     embeddings = _get_embeddings()
     
     # Create user-specific collection
@@ -69,6 +73,7 @@ def _get_vectorstore(user_id: str):
         persist_directory=_MEMORY_DIR
     )
     
+    _vectorstore_cache[user_id] = vectorstore
     return vectorstore
 
 
@@ -98,8 +103,8 @@ async def store_conversation_memory(
         # Create a combined document for the conversation turn
         timestamp = datetime.now().isoformat()
         
-        # Store user message with metadata
-        user_doc = f"User said: {user_message}"
+        # Store ONLY user message — clean text, no prefix (no "User said:")
+        user_doc = user_message  # Clean text for best embedding quality
         user_metadata = {
             "role": "user",
             "emotion": emotion,
@@ -107,25 +112,18 @@ async def store_conversation_memory(
             "session_id": session_id or "unknown"
         }
         
-        # Store assistant response with metadata
-        assistant_doc = f"Assistant replied: {assistant_response}"
-        assistant_metadata = {
-            "role": "assistant",
-            "timestamp": timestamp,
-            "session_id": session_id or "unknown"
-        }
-        
-        # Add documents to vectorstore
+        # Add only user message (assistant responses never retrieved — no point storing them)
         vectorstore.add_texts(
-            texts=[user_doc, assistant_doc],
-            metadatas=[user_metadata, assistant_metadata]
+            texts=[user_doc],
+            metadatas=[user_metadata]
         )
         
-        print(f"[MEMORY] 💾 Stored conversation in vector memory for user {user_id[:8]}...")
+        print(f"[MEMORY] 💾 Stored user message in ChromaDB for user {user_id[:8]}...")
         return True
         
     except Exception as e:
-        raise
+        print(f"[MEMORY] ⚠️ store_conversation_memory failed (non-fatal): {str(e)[:100]}")
+        return False
 
 
 async def retrieve_relevant_memories(
@@ -166,9 +164,10 @@ async def retrieve_relevant_memories(
         
         memories = []
         for doc, score in results:
-            # Only include highly relevant results (stricter threshold prevents hallucinations)
-            if score < 0.8:  # Tight threshold for quality
-                # Only include user messages (avoid injecting assistant responses as context)
+            # Threshold: 1.2 (L2 distance range 0-2; was 0.8 which was too strict)
+            if score < 1.2:
+                # Skip non-user messages (we no longer store assistant messages,
+                # but guard against old data in the store)
                 if doc.metadata.get("role") != "user":
                     continue
                 
@@ -205,7 +204,8 @@ async def retrieve_relevant_memories(
         return memories
         
     except Exception as e:
-        raise
+        print(f"[MEMORY] ⚠️ retrieve_relevant_memories failed (non-fatal): {str(e)[:100]}")
+        return []
 
 
 async def get_memory_context_for_prompt(

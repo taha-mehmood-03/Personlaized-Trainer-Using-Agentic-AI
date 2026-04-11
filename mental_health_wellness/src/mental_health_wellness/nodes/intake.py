@@ -152,9 +152,21 @@ async def intake_node(state: MentalHealthState) -> dict:
     # STEP 3: RETRIEVE SEMANTIC MEMORIES
     # ============================================
     
-    print("[NODE:INTAKE] 🧠 Step 3: Retrieving semantic memories from ChromaDB")
+    print("[NODE:INTAKE] 🧠 Step 3: Retrieving memory context (3-layer ChatGPT-style memory)")
     memory_context = await _retrieve_semantic_memories(user_id, current_message, session_id)
-    print(f"[NODE:INTAKE] ✅ Retrieved {len(memory_context)} chars of cross-session memory")
+
+    # Background task: extract facts from user message (non-blocking)
+    if current_message and user_id:
+        import asyncio
+        from ..memory.explicit_facts import extract_and_save_facts
+        asyncio.create_task(extract_and_save_facts(
+            user_id=user_id,
+            message=current_message,
+            session_id=session_id
+        ))
+        print(f"[NODE:INTAKE] 📝 Fact extraction scheduled (background)")
+
+    print(f"[NODE:INTAKE] ✅ Retrieved {len(memory_context)} chars of memory context")
     
     # ============================================
     # STEP 4: BUILD FULL CONTEXT
@@ -202,26 +214,26 @@ async def intake_node(state: MentalHealthState) -> dict:
 
 async def _retrieve_semantic_memories(user_id: str, current_message: str, session_id: str = "") -> str:
     """
-    Retrieve semantically relevant memories from the vector store.
-    
-    Args:
-        user_id: User's unique identifier
-        current_message: The current message to find relevant context for
-        session_id: Current session ID to filter memories (optional)
-        
-    Returns:
-        Formatted string of relevant memories for prompt injection
+    Retrieve memory context using the new 3-layer ChatGPT-style memory system.
+    Falls back to empty string if memory builder fails.
+
+    Layer 1: Explicit facts (Prisma UserFact)
+    Layer 2: Session summaries (Prisma SessionSummary)
+    Layer 3: Sliding window (current session, in-memory)
     """
-    from ..memory import get_memory_context_for_prompt
-    
-    memory_context = await get_memory_context_for_prompt(
-        user_id=user_id,
-        current_message=current_message,
-        max_memories=5
-        # NOTE: No session_id filter — enables cross-session memory recall
-    )
-    
-    return memory_context
+    try:
+        from ..memory.memory_builder import build_full_memory_context
+        # Pass empty list for window — the window is managed inside the pipeline via state["messages"]
+        # Only facts + summaries are needed at intake time
+        memory_context = await build_full_memory_context(
+            user_id=user_id,
+            current_messages=[],   # Window handled by response generator via state
+            include_window=False
+        )
+        return memory_context
+    except Exception as e:
+        print(f"[NODE:INTAKE] ⚠️ Memory builder failed (non-fatal): {str(e)[:120]}")
+        return ""
 
 
 async def _load_session_chat_history(session_id: str, limit: int = 10) -> list[dict]:

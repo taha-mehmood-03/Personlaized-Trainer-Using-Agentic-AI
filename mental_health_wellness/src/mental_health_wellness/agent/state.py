@@ -66,6 +66,7 @@ class MentalHealthState(TypedDict):
     # ============================================
     recommended_technique: dict
     recommended_techniques_by_category: dict  # All 6 categories with best technique each
+    alternative_techniques: list[dict]        # Top 2 alternatives for escape hatch
     
     # ============================================
     # RESPONSE (from response_generator_node)
@@ -149,6 +150,13 @@ class MentalHealthState(TypedDict):
     technique_delivery_emotion: Optional[str]   # FIX 4 NEW: emotion at exact moment technique was delivered
     technique_delivery_intensity: Optional[float]  # FIX 4 NEW: intensity at exact moment technique was delivered
 
+    # ============================================
+    # v5.3: PREFETCHED INTENT (from parallel_intake)
+    # ============================================
+    # Intent pre-check runs concurrently with crisis screening + intake + mood.
+    # conversation_planner reads this and skips its own LLM call when available.
+    prefetched_intent: Optional[dict]   # {"intent": str, "confidence": float} or None
+
 
 def get_initial_state() -> MentalHealthState:
     """
@@ -189,6 +197,7 @@ def get_initial_state() -> MentalHealthState:
         # Technique
         recommended_technique={},
         recommended_techniques_by_category={},
+        alternative_techniques=[],
         technique_formatted="",
         
         # Response
@@ -249,4 +258,7 @@ def get_initial_state() -> MentalHealthState:
         crisis_pre_screened=False,       # FIX 1: set by crisis_pre_screener_node
         technique_delivery_emotion=None,    # FIX 4: set by session_saver when technique delivered
         technique_delivery_intensity=None,  # FIX 4: set by session_saver when technique delivered
+
+        # v5.3: Prefetched intent from parallel_intake (None on first turn until prefetch completes)
+        prefetched_intent=None,
     )

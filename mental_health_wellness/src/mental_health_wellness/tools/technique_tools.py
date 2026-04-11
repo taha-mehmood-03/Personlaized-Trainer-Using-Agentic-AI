@@ -1,126 +1,155 @@
 """
-Technique Tools - Therapy techniques and exercises by category
+Technique Tools - Smarter selection with intensity-based routing,
+unused-first scoring, and top-3 alternatives.
 """
 
 from langchain_core.tools import tool
-from typing import Dict, Optional
+from typing import Dict, List
+
+# Intensity → preferred categories mapping
+INTENSITY_CATEGORY_MAP = {
+    "high":     ["Breathing", "DBT"],                            # ≥ 0.7: immediate physical relief
+    "moderate": ["Mindfulness", "CBT", "DBT"],                   # 0.4–0.7
+    "low":      ["Journaling", "Behavioral Activation", "CBT"],  # < 0.4: reflective
+}
+
+
+def _intensity_tier(intensity: float) -> str:
+    if intensity >= 0.7:
+        return "high"
+    elif intensity >= 0.4:
+        return "moderate"
+    return "low"
+
+
+def _score(technique, recently_used: set) -> float:
+    """
+    Priority scoring:
+      Unused + has rating  → avgRating          (best first)
+      Unused + no rating   → 0.5                (neutral placeholder)
+      Used recently        → avgRating * 0.5    (penalise repetition)
+    """
+    rating = technique.avgRating or 0.0
+    used = technique.id in recently_used
+    if used:
+        return rating * 0.5
+    return rating if rating > 0 else 0.5
+
 
 @tool
 async def recommend_technique(
     emotion: str,
+    intensity: float = 0.5,
     user_id: str = ""
-) -> Dict[str, Dict]:
+) -> List[Dict]:
     """
-    Recommend the best-rated technique for the given emotion from EACH category.
-    Returns top technique per category (Breathing, Mindfulness, CBT, DBT, Journaling, Behavioral Activation).
-    Excludes categories that have no techniques for that emotion.
-    
+    Return the top-3 ranked techniques for the given emotion and intensity.
+
+    Selection logic:
+      1. Prefer categories mapped to the intensity tier (high/moderate/low).
+      2. Score each candidate: unused+rated > unused+unrated > used (penalised).
+      3. Return top 3 sorted by score (desc).  Falls back to all categories if
+         preferred ones yield < 3 results.
+
     Args:
-        emotion: The detected emotion (e.g., "anxiety", "sadness", "anger", "fear", "joy", "neutral", "disgust", "surprise")
-        user_id: Optional user ID for personalization (to avoid recently recommended)
-        
+        emotion:    Detected emotion string.
+        intensity:  Fused emotion intensity 0.0–1.0.
+        user_id:    For personalization (avoid recently recommended).
+
     Returns:
-        Dict mapping category name to best technique dict. 
-        Example: {"Breathing": {...}, "CBT": {...}, "Journaling": {...}}
-        Only includes categories with matching techniques (excludes empty ones).
+        List of up to 3 technique dicts, best first.  Empty list on error.
     """
     try:
         from ..db.client import get_prisma_client
         prisma = await get_prisma_client()
-        
+
         emotion_map = {
-            "fear": "FEAR",
-            "anxiety": "ANXIETY",
-            "sadness": "SADNESS",
-            "anger": "ANGER",
-            "joy": "JOY",
-            "neutral": "NEUTRAL",
-            "disgust": "DISGUST",
-            "surprise": "SURPRISE"
+            "fear": "FEAR", "anxiety": "ANXIETY", "sadness": "SADNESS",
+            "anger": "ANGER", "joy": "JOY", "neutral": "NEUTRAL",
+            "disgust": "DISGUST", "surprise": "SURPRISE",
         }
         target_emotion = emotion_map.get(emotion.lower(), emotion.upper())
-        
-        print(f"[TOOL] recommend_technique: Getting best technique per category for {emotion.upper()}")
-        
-        # Get all categories (sort in Python to avoid Prisma order_by issues)
-        all_categories_unsorted = await prisma.techniquecategory.find_many()
-        all_categories = sorted(all_categories_unsorted, key=lambda c: c.name)
-        
-        # FIX 7a: Correct attribute name for recently recommended techniques.
-        # The field is `recommendedTechniqueIds` (not `recommendedTech`).
-        # Wrap in explicit try/except with WARNING-level logging — do NOT silently continue.
-        recently_recommended = set()
+        tier = _intensity_tier(intensity)
+        preferred_cats = INTENSITY_CATEGORY_MAP[tier]
+
+        print(f"[TOOL] recommend_technique: emotion={emotion.upper()} "
+              f"intensity={intensity:.0%} tier={tier} preferred={preferred_cats}")
+
+        # ── Lookup tables ────────────────────────────────────────────────────
+        all_cats = await prisma.techniquecategory.find_many()
+        cat_id_to_name = {c.id: c.name for c in all_cats}
+        cat_name_to_id = {c.name: c.id for c in all_cats}
+
+        # ── Recently used (personalization) ──────────────────────────────────
+        recently_used: set = set()
         if user_id:
             try:
-                all_sessions = await prisma.session.find_many(
-                    where={"userId": user_id}
-                )
-                recent_sessions = sorted(all_sessions, key=lambda s: s.startedAt, reverse=True)[:5]
-                for session in recent_sessions:
-                    # FIX 7a: correct attribute name
-                    tech_ids = getattr(session, "recommendedTechniqueIds", None)
-                    if tech_ids:
-                        recently_recommended.update(tech_ids)
-                print(f"[TOOL] recommend_technique: User has {len(recently_recommended)} recently recommended techniques")
+                sessions = await prisma.session.find_many(where={"userId": user_id})
+                for s in sorted(sessions, key=lambda s: s.startedAt, reverse=True)[:5]:
+                    ids = getattr(s, "recommendedTechniqueIds", None)
+                    if ids:
+                        recently_used.update(ids)
+                print(f"[TOOL]   recently_used: {len(recently_used)} techniques")
             except Exception as e:
-                # FIX 7a: Log as WARNING (not silent), increment metric counter for monitoring
-                print(f"[TOOL] recommend_technique: WARNING — Could not fetch user history: {str(e)[:80]}")
-                # recently_recommended stays empty → use all techniques (safe fallback)
-        
-        # FIX 7b: BATCH all category+emotion queries into a SINGLE DB call.
-        # Previously: N sequential find_many calls (one per category) → ~5000ms
-        # Now: 1 find_many for all techniques + 1 for all categories → ~200ms
-        category_id_to_name = {cat.id: cat.name for cat in all_categories}
-        
-        all_matching_techniques = await prisma.technique.find_many(
-            where={
-                "isActive": True,
-                "targetEmotions": {"hasSome": [target_emotion]},
-                "categoryId": {"in": list(category_id_to_name.keys())}
+                print(f"[TOOL]   WARNING — history fetch failed: {str(e)[:60]}")
+
+        # ── DB fetch (preferred categories first) ────────────────────────────
+        preferred_ids = [cat_name_to_id[n] for n in preferred_cats if n in cat_name_to_id]
+
+        candidates = []
+        if preferred_ids:
+            preferred_hits = await prisma.technique.find_many(
+                where={
+                    "isActive": True,
+                    "targetEmotions": {"hasSome": [target_emotion]},
+                    "categoryId": {"in": preferred_ids},
+                }
+            )
+            candidates = preferred_hits
+
+        # Fall back to all categories if we don't have enough preferred results
+        if len(candidates) < 3:
+            all_hits = await prisma.technique.find_many(
+                where={
+                    "isActive": True,
+                    "targetEmotions": {"hasSome": [target_emotion]},
+                }
+            )
+            # De-duplicate: keep preferred hits + non-preferred ones
+            seen_ids = {t.id for t in candidates}
+            for t in all_hits:
+                if t.id not in seen_ids:
+                    candidates.append(t)
+
+        if not candidates:
+            print(f"[TOOL]   No techniques found for {emotion}")
+            return []
+
+        # ── Score & rank ─────────────────────────────────────────────────────
+        ranked = sorted(candidates, key=lambda t: _score(t, recently_used), reverse=True)
+        top3 = ranked[:3]
+
+        def _fmt(t) -> Dict:
+            return {
+                "id":               t.id,
+                "name":             t.name,
+                "brief":            t.brief,
+                "description":      t.description,
+                "steps":            t.steps,
+                "duration_minutes": t.durationMinutes,
+                "difficulty":       t.difficulty,
+                "category":         cat_id_to_name.get(t.categoryId, "Unknown"),
+                "why_it_works":     t.whyItWorks,
+                "avg_rating":       t.avgRating,
+                "effectiveness":    t.effectiveness,
             }
-        )
-        
-        # Group by category
-        techniques_by_category: dict[str, list] = {}
-        for t in all_matching_techniques:
-            cat_name = category_id_to_name.get(t.categoryId, "Unknown")
-            techniques_by_category.setdefault(cat_name, []).append(t)
-        
-        result = {}
-        for cat in all_categories:
-            cat_techniques = techniques_by_category.get(cat.name, [])
-            if not cat_techniques:
-                print(f"[TOOL]   ✗ {cat.name}: No techniques found (excluding)")
-                continue
-            
-            # Pick best-rated (exclude recently recommended if alternatives exist)
-            technique = max(cat_techniques, key=lambda t: t.avgRating or 0)
-            if technique.id in recently_recommended and len(cat_techniques) > 1:
-                other = [t for t in cat_techniques if t.id != technique.id]
-                if other:
-                    technique = max(other, key=lambda t: t.avgRating or 0)
-            
-            result[cat.name] = {
-                "id": technique.id,
-                "name": technique.name,
-                "brief": technique.brief,
-                "description": technique.description,
-                "steps": technique.steps,
-                "duration_minutes": technique.durationMinutes,
-                "difficulty": technique.difficulty,
-                "category": cat.name,
-                "why_it_works": technique.whyItWorks,
-                "avg_rating": technique.avgRating,
-                "effectiveness": technique.effectiveness
-            }
-            print(f"[TOOL]   ✓ {cat.name}: {technique.name} (rating: {technique.avgRating})")
-        
-        print(f"[TOOL] recommend_technique: Returning {len(result)} categories with techniques")
+
+        result = [_fmt(t) for t in top3]
+        for r in result:
+            print(f"[TOOL]   → {r['name']} ({r['category']}) score={_score(ranked[result.index(r)], recently_used):.2f}")
+
         return result
-    
+
     except Exception as e:
-        print(f"[TOOL] recommend_technique: Error: {str(e)[:100]}")
-        return {}
-
-
-
+        print(f"[TOOL] recommend_technique ERROR: {str(e)[:120]}")
+        return []

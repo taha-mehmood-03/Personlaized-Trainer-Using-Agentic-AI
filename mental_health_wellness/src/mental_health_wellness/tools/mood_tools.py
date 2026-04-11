@@ -50,9 +50,54 @@ def analyze_mood(message: str) -> dict:
                 "confidence": 0.0
             }
         
+        # ── FIX 5: Emoji pre-processing ─────────────────────────
+        # Convert common emotion emojis to text so DistilBERT can
+        # interpret them meaningfully instead of returning neutral.
+        EMOJI_EMOTION_MAP = [
+            # Sadness / crying
+            ("😭", "feeling sad and crying "),
+            ("😢", "feeling sad and tearful "),
+            ("😿", "feeling sad and crying "),
+            ("😔", "feeling sad and disappointed "),
+            ("💔", "feeling heartbroken and sad "),
+            ("🥺", "feeling sad and pleading "),
+            # Anger
+            ("😡", "feeling very angry and frustrated "),
+            ("🤬", "feeling furious and outraged "),
+            ("😤", "feeling annoyed and frustrated "),
+            # Fear / Anxiety
+            ("😰", "feeling scared and anxious "),
+            ("😨", "feeling frightened and anxious "),
+            ("😱", "feeling terrified and panicked "),
+            ("😟", "feeling worried and uneasy "),
+            ("😣", "feeling overwhelmed and distressed "),
+            # Joy / Positive
+            ("😊", "feeling happy and content "),
+            ("😁", "feeling joyful and excited "),
+            ("🎉", "feeling celebratory and happy "),
+            ("😄", "feeling joyful and pleased "),
+            ("❤️", "feeling loved and happy "),
+        ]
+        
+        processed_message = message
+        emoji_text_prepend = ""
+        for emoji_char, text_replacement in EMOJI_EMOTION_MAP:
+            if emoji_char in message:
+                emoji_text_prepend += text_replacement
+        
+        # If the message is ONLY emojis (no real words), prepend emotion text
+        has_real_words = any(c.isalpha() for c in message)
+        if emoji_text_prepend and not has_real_words:
+            processed_message = emoji_text_prepend.strip()
+            print(f"[MOOD_TOOLS] 🎭 Emoji→text: '{message}' → '{processed_message}'")
+        elif emoji_text_prepend:
+            # Mixed message — prepend hint to help the model
+            processed_message = emoji_text_prepend.strip() + " " + message
+        # ────────────────────────────────────────────────────────
+        
         pipe = _get_emotion_pipeline()
         
-        results = pipe(message[:512])
+        results = pipe(processed_message[:512])
         if not results:
             print("[MOOD_TOOLS] ⚠️ Model returned no results - returning neutral")
             return {
@@ -67,6 +112,8 @@ def analyze_mood(message: str) -> dict:
         confidence = round(top_result['score'], 2)
         
         # GoEmotions (28 labels) -> SentiMind Core Emotions (6 labels)
+        # FIX 2: Standardize ALL fear/anxiety variants to 'anxiety' for
+        # clinical consistency. The app uses 'anxiety' not 'fear' everywhere.
         go_emotions_map = {
             # Joy / Positive cluster
             'admiration': 'joy', 'amusement': 'joy', 'approval': 'joy', 'caring': 'joy',
@@ -78,10 +125,11 @@ def analyze_mood(message: str) -> dict:
             'anger': 'anger', 'annoyance': 'anger', 'disapproval': 'anger', 'disgust': 'disgust',
             # Sadness cluster
             'sadness': 'sadness', 'disappointment': 'sadness', 'grief': 'sadness', 'remorse': 'sadness',
-            # Fear / Anxiety cluster
-            'fear': 'fear', 'nervousness': 'anxiety',
+            # Fear / Anxiety cluster — FIX: ALL map to 'anxiety' (consistent label)
+            'fear': 'anxiety', 'nervousness': 'anxiety', 'anxiety': 'anxiety',
             # Neutral / Ambiguous
-            'confusion': 'neutral', 'curiosity': 'neutral', 'neutral': 'neutral'
+            'confusion': 'neutral', 'curiosity': 'neutral', 'neutral': 'neutral',
+            'embarrassment': 'sadness', 'shame': 'sadness',
         }
         
         # Map to core emotion
@@ -102,6 +150,23 @@ def analyze_mood(message: str) -> dict:
             "good for nothing", "so stupid", "useless", "pointless"
         ]
         
+        # FIX 3: Neutral-phrasing indicators — model wrongly labels these as 'joy'
+        # because GoEmotions picks up on polite/positive-toned language patterns.
+        neutral_override_indicators = [
+            "i feel okay", "feel okay today", "feeling okay", "i'm okay",
+            "feel fine", "i feel fine", "feeling fine", "i'm fine",
+            "feel alright", "feeling alright", "i'm alright",
+            "nothing special happened", "just a normal day", "average day",
+            "nothing much", "not much going on", "same as usual",
+        ]
+        
+        # FIX 3: Anxiety/help-seeking phrases misclassified as 'joy'
+        anxiety_override_indicators = [
+            "manage my anxiety", "managing my anxiety", "need guidance",
+            "need help with anxiety", "guidance on managing",
+            "i need some guidance", "help me cope",
+        ]
+        
         # If model detected joy/surprise but message has negative context, correct it
         if emotion in ['joy', 'surprise']:
             if any(phrase in message_lower for phrase in mocking_context_indicators):
@@ -112,6 +177,14 @@ def analyze_mood(message: str) -> dict:
                 print(f"[MOOD_TOOLS] ✅ Context correction: '{emotion}' → 'sadness' (detected failure/worthlessness context)")
                 emotion = 'sadness'
                 confidence = 0.85
+            elif any(phrase in message_lower for phrase in neutral_override_indicators):
+                print(f"[MOOD_TOOLS] ✅ Context correction: '{emotion}' → 'neutral' (detected neutral phrasing)")
+                emotion = 'neutral'
+                confidence = 0.75
+            elif any(phrase in message_lower for phrase in anxiety_override_indicators):
+                print(f"[MOOD_TOOLS] ✅ Context correction: '{emotion}' → 'anxiety' (detected anxiety help-seeking)")
+                emotion = 'anxiety'
+                confidence = 0.80
         
         sentiment_map = {
             'anger': 'negative', 'disgust': 'negative', 'fear': 'negative',

@@ -33,6 +33,11 @@ class MultiKeyGroqChat:
         self.groq_api_keys = api_keys or self._load_groq_keys()
         self.current_groq_key_idx = 0
         self.groq_failed_keys: set = set()
+
+        # v5.3 OPT-2: Instance cache — reuse ChatGroq objects instead of
+        # reconstructing them (with header/client setup) on every pipeline call.
+        # Cache keyed by (key_idx, model) and cleared when a key is failed.
+        self._llm_cache: Dict[tuple, Any] = {}
         
         if not self.groq_api_keys:
             raise ValueError("No Groq API keys found. Set GROQ_API_KEY or GROQ_API_KEY_1, GROQ_API_KEY_2, etc. in .env")
@@ -92,10 +97,11 @@ class MultiKeyGroqChat:
                 return idx
         return None
     
-    def get_llm(self) -> BaseChatModel:
+    def get_llm(self, model: Optional[str] = None) -> BaseChatModel:
         """
         Get a Groq LLM instance with automatic key rotation.
-        If all keys are exhausted, reset and try again.
+        Returns a CACHED instance when the same key+model was used before.
+        If all keys are exhausted, resets and tries again.
         """
         key_idx = self._get_available_groq_key_idx()
         
@@ -103,24 +109,37 @@ class MultiKeyGroqChat:
         if key_idx is None:
             print(f"[LLM] ⚠️ All Groq keys exhausted. Resetting...")
             self.groq_failed_keys.clear()
+            self._llm_cache.clear()  # Clear cache on full reset
             key_idx = self._get_available_groq_key_idx()
         
         if key_idx is None:
             raise RuntimeError("No valid Groq API keys available")
-        
-        print(f"[LLM] 🔑 Using Groq Key {key_idx + 1}/{len(self.groq_api_keys)}")
-        return ChatGroq(
-            api_key=self.groq_api_keys[key_idx],
-            model=self.model,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens
-        )
+
+        effective_model = model or self.model
+        cache_key = (key_idx, effective_model)
+
+        if cache_key not in self._llm_cache:
+            print(f"[LLM] 🔑 Creating new ChatGroq instance — Key {key_idx + 1}/{len(self.groq_api_keys)} | Model: {effective_model}")
+            self._llm_cache[cache_key] = ChatGroq(
+                api_key=self.groq_api_keys[key_idx],
+                model=effective_model,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens
+            )
+        else:
+            print(f"[LLM] ⚡ Reusing cached ChatGroq — Key {key_idx + 1}/{len(self.groq_api_keys)} | Model: {effective_model}")
+
+        return self._llm_cache[cache_key]
 
     def mark_key_failed(self):
         """Mark current key as failed and rotate to next one."""
         current_idx = self._get_available_groq_key_idx()
         if current_idx is not None:
             self.groq_failed_keys.add(current_idx)
+            # Evict cache entries for the failed key across all models
+            to_remove = [k for k in self._llm_cache if k[0] == current_idx]
+            for k in to_remove:
+                del self._llm_cache[k]
             remaining = len(self.groq_api_keys) - len(self.groq_failed_keys)
             print(f"[LLM] ⚠️ Groq Key {current_idx + 1} marked failed. Remaining: {remaining}/{len(self.groq_api_keys)}")
     

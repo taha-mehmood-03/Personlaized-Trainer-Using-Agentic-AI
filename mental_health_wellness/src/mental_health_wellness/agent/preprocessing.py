@@ -96,17 +96,76 @@ class MessagePreprocessor:
             # like "Should I be worried about my panic attacks?"
         ]
         
-        # Crisis/self-harm markers - ONLY these trigger crisis_check
+        # ── FIX 1: Crisis markers — TIGHTENED ──────────────────────────
+        # These patterns must be SPECIFIC enough to avoid false positives.
+        # Rules:
+        #   1. Require self-referential constructions (myself, my life, I)
+        #   2. Require compound phrases, not isolated risky words
+        #   3. Metaphorical uses (kill this assignment) are handled by blocklist below
         self.crisis_markers = [
-            # Self-harm / Suicide intent
+            # Direct self-harm / suicide intent (explicit)
             r"\b(kill|hurt|harm|cut|injure|wound)(ing)?\s+(myself|my\s+self)\b",
-            r"\b(suicide|suicidal|end\s+(my\s+)?life|want\s+to\s+die|better\s+off\s+dead)\b",
-            r"\b(no\s+point|no\s+reason|can't\s+go\s+on|can't\s+take\s+it|nothing\s+matters)\b",
-            # Passive SI - "don't want to be here", "don't feel like going on"
-            r"(don't|do\s+not).{0,20}(want\s+to\s+be\s+here|feel\s+like\s+going\s+on|want\s+to\s+exist)",
-            r"\b(burden|everyone\s+would\s+be|better\s+without|world\s+better\s+without)\b",
-            # Severe self-harm behavior descriptions
-            r"\b(overdose|cutting|self\s+harm|self\s+injur|suffocate|drown|jump)\b",
+            r"\b(suicide|suicidal)\b",
+            r"\b(end|take)\s+(my\s+own\s+)?life\b",
+            r"\bwant\s+to\s+die\b",
+            r"\bbetter\s+off\s+dead\b",
+            # Passive suicidal ideation (must include self-reference)
+            r"(don't|do\s+not)\s+want\s+to\s+be\s+here\s+anymore",
+            r"(don't|do\s+not)\s+feel\s+like\s+(going\s+on|living|continuing)\b",
+            r"(don't|do\s+not)\s+want\s+to\s+exist\b",
+            # Hopelessness with specific ending/ceasing language
+            r"\bno\s+reason\s+to\s+(keep\s+going|live|continue|go\s+on)\b",
+            r"\bno\s+point\s+in\s+(living|continuing|going\s+on|existing)\b",
+            r"\bcan't\s+go\s+on\s+(like\s+this|anymore|any\s+longer)\b",
+            # Passive ideation — burden / others better off
+            r"\beveryone\s+(would\s+be|is)\s+better\s+off\s+without\s+me\b",
+            r"\b(world|everyone|family|friends)\s+better\s+without\s+me\b",
+            r"\bi\s+am\s+a\s+burden\b",
+            r"\bif\s+i\s+(wasn't|weren't|wasn't|was\s+not|were\s+not)\s+(here|alive|around)\b",
+            # Active planning / timeline
+            r"\b(plan|planning|decided)\s+to\s+(end|kill|take)\b",
+            r"\bend\s+(it|everything|this)\s+(tonight|today|this\s+week|soon)\b",
+            # Severe self-harm behaviours (specific, not metaphorical)
+            r"\b(overdose|took\s+(too\s+many|some|pills)|self\s+harm|self\s.injur)\b",
+            r"\b(cutting|been\s+cutting)\s+(myself|my\s+wrist|my\s+arm)\b",
+            # Indirect but unambiguous signals
+            r"\b(sleep|sleeping)\s+and\s+never\s+(wake|waking)\s+up\b",
+            r"\bwant\s+(the\s+)?pain\s+to\s+stop\s+forever\b",
+            r"\bending\s+(it\s+all|everything)\b",
+            r"\bno\s+interest\s+in\s+(life|living|anything)\s+anymore\b",
+            r"\bnobody\s+would\s+(notice|care|miss)\s+if\s+i\s+(disappeared|was\s+gone|died)\b",
+        ]
+        
+        # ── FIX 1: False-positive blocklist ────────────────────────────
+        # If a message MATCHES a crisis_marker BUT ALSO matches one of these
+        # patterns, it is NOT a crisis — it's figurative/metaphorical language.
+        self.false_positive_crisis_patterns = [
+            # Figurative "kill" — academic or hyperbolic frustration
+            r"(kill|killing|killed)\s+(this|the|my|an|it|them).{0,30}(assignment|exam|test|quiz|project|paper|task|interview|deadline|homework)",
+            r"(kill|killing|killed).{0,40}(stress|boredom|time|it|the game)",
+            # Figurative "dying" — clear positive/humor context
+            r"(dying|die).{0,30}(laugh|laughter|lol|haha|funny|hilarious|cute|adorable|cringe)",
+            r"(i'm|im)\s+(dying|dead).{0,20}(lol|haha|😂|lmao|😭|funniest)",
+            # "Disappear from" — digital detox, social context
+            r"disappear\s+from\s+(social\s+media|instagram|twitter|tiktok|facebook|the\s+internet|online)",
+            r"(take|taking)\s+a\s+(break|step\s+back)\s+from\s+(social\s+media|the\s+internet|online)",
+            # "Sleep forever" — clearly tiredness/relief context
+            r"(sleep|could\s+sleep).{0,20}forever.{0,30}(week|work|day|tired|exhausted|long\s+day)",
+            r"(after\s+(this|that|a|the)).{0,30}(sleep|sleeping).{0,20}forever",
+            # Metaphorical "fighting" without self-harm context  
+            r"(tired|exhausted)\s+of\s+fighting.{0,30}(for|against|with|my|the|this)",
+            # "Worthless" in distortion/self-criticism context (not suicidal)
+            r"(feel|feeling).{0,20}worthless.{0,30}(at|in|with).{0,30}(everything|anything|work|school|life)",
+            # "Only one" — cognitive distortion, not crisis  
+            r"(only|the\s+only)\s+one\s+who\s+(struggles|feels|has|seems)",
+            # "Lonely, nobody understands" — social isolation, not crisis
+            r"(lonely|alone).{0,30}(nobody|no\s+one).{0,30}(understand|gets|cares|listens)",
+            # "Heavy" — vague emotional weight, not crisis
+            r"(feel|feels|feeling).{0,15}heavy.{0,30}(lately|today|these\s+days|recently)",
+            # "Every day is worse" — worsening mood, needs trainer not hotlines
+            r"every\s+day\s+is\s+worse\s+than\s+the\s+last",
+            # Context: "must be perfect or worthless" — cognitive distortion pattern
+            r"(must|have\s+to)\s+be\s+perfect.{0,30}(or|otherwise).{0,30}(worthless|failure|nothing)",
         ]
         
         # Anger/conflict patterns - NOT crisis
@@ -159,17 +218,29 @@ class MessagePreprocessor:
         # ============================================
         # STEP 1: Check for ACTUAL crisis markers FIRST (highest safety priority)
         # ============================================
+        crisis_keyword_matched = False
         for pattern in self.crisis_markers:
             if re.search(pattern, msg_lower, re.IGNORECASE):
+                crisis_keyword_matched = True
+                break
+        
+        if crisis_keyword_matched:
+            # FIX 1: Before flagging as crisis, check the false-positive blocklist.
+            # If the message matches a known safe metaphor/context, it's NOT a crisis.
+            is_false_positive = any(
+                re.search(fp_pattern, msg_lower, re.IGNORECASE)
+                for fp_pattern in self.false_positive_crisis_patterns
+            )
+            
+            if is_false_positive:
+                print(f"[PREPROCESSOR] 🛡️ Crisis keyword found but matched false-positive blocklist — NOT flagging crisis")
+                # Fall through to normal distress classification
+            else:
                 results["has_crisis_markers"] = True
                 results["detected_patterns"].append("crisis_marker")
                 results["suggested_tools"].append("handle_crisis")
-                break
-        
-        # If crisis markers found, do NOT skip handle_crisis under any circumstances
-        # Return early — crisis takes absolute priority
-        if results["has_crisis_markers"]:
-            return results
+                # Crisis takes absolute priority — return immediately
+                return results
         
         # ============================================
         # STEP 2: Check for greeting (but only if message is PURELY a greeting)
@@ -287,25 +358,32 @@ def get_message_classification(message: str) -> Dict[str, any]:
 
 
 # Emotion mapping normalization
+# FIX 2: All anxiety/fear variants standardized to 'anxiety'
 EMOTION_NORMALIZATION_MAP = {
-    # Normalize similar emotions
-    "fear": "anxiety",           # Fear and anxiety are closely related
+    # All fear/anxiety variants → 'anxiety'
+    "fear": "anxiety",
     "worry": "anxiety",
     "nervous": "anxiety",
     "dread": "anxiety",
     "panic": "anxiety",
+    "scared": "anxiety",
+    "frightened": "anxiety",
+    "overwhelmed": "anxiety",
     
     # Sadness related
     "depressed": "sadness",
     "down": "sadness",
     "blue": "sadness",
     "melancholy": "sadness",
+    "grief": "sadness",
+    "lonely": "sadness",
     
     # Anger related
     "rage": "anger",
     "furious": "anger",
     "livid": "anger",
     "resentment": "anger",
+    "frustrated": "anger",
     
     # Keep as-is
     "anxiety": "anxiety",

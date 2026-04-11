@@ -93,6 +93,7 @@ model User {
   id           String   @id @default(cuid())
   email        String   @unique
   name         String
+  passwordHash String?
   consentGiven Boolean  @default(false)
   consentDate  DateTime?
   createdAt    DateTime @default(now())
@@ -103,15 +104,15 @@ model User {
   moodLogs          MoodLog[]
   techniqueRatings  UserTechniqueRating[]
   crisisLogs        CrisisLog[]
-  safetyPlans       SafetyPlan[]
-  dailyCheckIns     DailyCheckIn[]
   preference        UserPreference?
   statistics        UserStatistics?
-  behaviorProfile   BehaviorProfile?
 
   // v3: New intelligent subsystems
   psychProfile           PsychProfile?
-  proactiveNotifications ProactiveNotification[]
+
+  // ChatGPT-style memory layers
+  facts              UserFact[]
+  sessionSummaries   SessionSummary[]
 
   @@index([email])
 }
@@ -216,25 +217,6 @@ model MoodLog {
   @@index([emotion])
 }
 
-model DailyCheckIn {
-  id           String       @id @default(cuid())
-  userId       String
-  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  
-  moodRating   Int
-  sleepQuality SleepQuality
-  energyLevel  EnergyLevel
-  
-  highlight    String?
-  challenge    String?
-  
-  checkInDate  DateTime     @default(now()) @db.Date
-
-  @@unique([userId, checkInDate])
-  @@index([userId])
-  @@index([checkInDate])
-}
-
 // ============================================
 // TECHNIQUE MODELS
 // ============================================
@@ -323,28 +305,6 @@ model CrisisLog {
   @@index([createdAt])
 }
 
-model SafetyPlan {
-  id                   String   @id @default(cuid())
-  userId               String
-  user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  
-  warningSigns         String[]
-  copingStrategies     String[]
-  socialDistractions   String[]
-  supportContacts      String[]
-  professionalContacts String[]
-  safetyActions        String?
-  
-  reasonsToLive        String[]
-  
-  isActive             Boolean  @default(true)
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
-
-  @@index([userId])
-  @@index([isActive])
-}
-
 // ============================================
 // USER SETTINGS & ANALYTICS
 // ============================================
@@ -404,13 +364,45 @@ model UserStatistics {
 
 model SessionSummary {
   id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   sessionId  String
   session    Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  // ChatGPT-style summary fields
+  title      String
   summary    String   @db.Text
+  emotion    String   @default("neutral")
+  techniques String[]
+  outcome    String   @default("neutral")
+
+  // Legacy field kept for backward compat
   keyThemes  String[]
+
   createdAt  DateTime @default(now())
 
   @@index([sessionId])
+  @@index([userId])
+  @@index([createdAt])
+}
+
+// ============================================
+// CHATGPT-STYLE MEMORY: EXPLICIT FACTS
+// ============================================
+
+model UserFact {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  fact      String
+  category  String   // identity | preference | goal | clinical | context
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([category])
 }
 
 model TechniqueOutcome {
@@ -428,20 +420,6 @@ model TechniqueOutcome {
 
   @@index([sessionId])
   @@index([techniqueId])
-}
-
-model BehaviorProfile {
-  id                     String   @id @default(cuid())
-  userId                 String   @unique
-  user                   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  prefersAdvice          Boolean  @default(true)
-  prefersListening       Boolean  @default(false)
-  prefersShortResponse   Boolean  @default(false)
-  avgTechniqueAcceptance Float    @default(0.5)
-  createdAt              DateTime @default(now())
-  updatedAt              DateTime @updatedAt
-
-  @@index([userId])
 }
 
 // ============================================
@@ -495,20 +473,4 @@ model EmotionSnapshot {
 
   @@index([sessionId])
   @@index([userId])
-}
-
-model ProactiveNotification {
-  id       String @id @default(cuid())
-  userId   String
-  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  alertType String   // gradual_mood_decline | repeated_anxiety_spikes | disengagement_risk | ...
-  isRead    Boolean  @default(false)
-  payload   String?  @db.Text  // JSON hint for response generator
-
-  createdAt DateTime @default(now())
-
-  @@index([userId])
-  @@index([isRead])
-  @@index([alertType])
 }

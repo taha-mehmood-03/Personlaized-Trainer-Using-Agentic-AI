@@ -87,8 +87,32 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
           f"Intensity: {intensity:.0%} | Trend: {trend} | Messages: {user_msg_count}")
 
     # ============================================
-    # FIX 3: CHITCHAT BYPASS GATE
-    # Runs BEFORE the LLM intent check to save 2-3 seconds of latency
+    # v5.2 FIX: TECHNIQUE REQUEST PRE-CHECK
+    # Must run BEFORE chitchat bypass — DistilBERT often classifies
+    # "help me calm down" as neutral, causing a false no_action bypass.
+    # ============================================
+    _PRE_TECHNIQUE_SIGNALS = {
+        "breathing exercise", "breathing technique", "meditation",
+        "help me calm down", "suggest a technique", "can you guide me",
+        "coping technique", "cbt technique", "relaxation technique",
+        "grounding exercise", "mindfulness exercise", "walk me through",
+        "do an exercise", "try an exercise", "calming exercise",
+        "stress relief", "anxiety exercise",
+    }
+    msg_lower = current_message.lower()
+    if any(sig in msg_lower for sig in _PRE_TECHNIQUE_SIGNALS):
+        print(f"[NODE: PLANNER] ⚡ Technique request detected (pre-bypass) — routing to suggest_technique")
+        return {
+            "conversation_strategy": "suggest_technique",
+            "conversation_phase": state.get("conversation_phase", "venting"),
+            "technique_readiness": 1.0,
+            "crisis_detected": False,
+            "session_message_count": user_msg_count,
+        }
+
+    # ============================================
+    # CHITCHAT BYPASS GATE
+    # Runs AFTER technique pre-check to avoid false no_action on requests.
     # If emotion is neutral with low intensity — return no_action immediately.
     # ============================================
     _NEUTRAL_INTENSITY_THRESHOLD = 0.25  # below this + neutral = definitely not therapeutic
@@ -99,9 +123,9 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
             "conversation_strategy": "no_action",
             "conversation_phase": "neutral",
             "technique_readiness": 0.0,
-            "crisis_detected": False,  # EXPLICIT CLEAR
+            "crisis_detected": False,
             "session_message_count": user_msg_count,
-            "recommended_techniques_by_category": {},  # CLEAR stale techniques from previous turn
+            "recommended_techniques_by_category": {},
         }
 
     if emotion == "neutral" and intensity < _NEUTRAL_INTENSITY_THRESHOLD:
@@ -110,19 +134,62 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
             "conversation_strategy": "no_action",
             "conversation_phase": "neutral",
             "technique_readiness": 0.0,
-            "crisis_detected": False,  # EXPLICIT CLEAR
+            "crisis_detected": False,
             "session_message_count": user_msg_count,
-            "recommended_techniques_by_category": {},  # CLEAR stale techniques from previous turn
+            "recommended_techniques_by_category": {},
         }
 
     # ============================================
-    # LLM INTENT CLASSIFIER (replaces brittle keyword sets)
-    # Only runs if the message was NOT caught by the chitchat bypass
+    # v5.3 OPT-4: PREFETCHED INTENT (from parallel_intake)
+    # parallel_intake ran llm_intent_pre_check concurrently with crisis
+    # screening and mood analysis. Reuse that result and skip LLM entirely.
     # ============================================
-    print(f"[NODE: PLANNER] 🤖 Running LLM intent classifier...")
-    intent_result = await llm_intent_check(current_message)
+    prefetched_intent = state.get("prefetched_intent")
+    intent_result = None
+
+    if prefetched_intent and isinstance(prefetched_intent, dict) and prefetched_intent.get("intent"):
+        intent_result = prefetched_intent
+        print(f"[NODE: PLANNER] ⚡ Using prefetched intent — skipping LLM call: "
+              f"{intent_result['intent']} ({intent_result.get('confidence', 0):.0%}) [saves ~800-1500ms]")
+    else:
+        # ============================================
+        # v5.2 OPT-3: HEURISTIC INTENT FAST-PATH (fallback when no prefetch)
+        # Try keyword matching first — only call LLM for ambiguous messages.
+        # ============================================
+        _HEURISTIC_TECHNIQUE_SIGNALS = {
+            "breathing exercise", "breathing technique", "meditation",
+            "help me calm down", "suggest a technique", "can you guide me",
+            "coping technique", "cbt technique", "relaxation technique",
+            "grounding exercise", "mindfulness exercise", "walk me through",
+            "do an exercise", "try an exercise", "calming exercise",
+            "stress relief", "anxiety exercise",
+        }
+        _HEURISTIC_VENTING_SIGNALS = {
+            "i feel", "i'm so", "i am so", "today was", "i just",
+            "i can't", "everything is", "nobody", "i hate",
+            "it's been", "i've been", "i keep", "why do i",
+        }
+
+        msg_lower = current_message.lower()
+
+        # Fast-path 1: Obvious technique request
+        if any(sig in msg_lower for sig in _HEURISTIC_TECHNIQUE_SIGNALS):
+            intent_result = {"intent": "technique_request", "confidence": 0.85}
+            print(f"[NODE: PLANNER] ⚡ Heuristic match: technique_request (skipping LLM)")
+
+        # Fast-path 2: Obvious venting with emotional signal
+        elif any(sig in msg_lower for sig in _HEURISTIC_VENTING_SIGNALS) and intensity >= 0.3:
+            intent_result = {"intent": "venting", "confidence": 0.80}
+            print(f"[NODE: PLANNER] ⚡ Heuristic match: venting (skipping LLM)")
+
+        # Ambiguous + no prefetch → call LLM (now rare, ~20% of messages)
+        if intent_result is None:
+            print(f"[NODE: PLANNER] 🤖 No prefetch + no heuristic — calling LLM intent classifier...")
+            intent_result = await llm_intent_check(current_message)
+
     intent = intent_result.get("intent", "venting")
     intent_confidence = intent_result.get("confidence", 0.0)
+
 
     # High-confidence technique request → bypass normal readiness logic
     if intent == "technique_request" and intent_confidence >= 0.65:
@@ -190,6 +257,7 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
         print(f"[NODE: PLANNER] 🔄 Reflection override ({intent_confidence:.0%}) → encourage_reflection (user is practicing/reporting a technique)")
 
     else:
+        psych_profile = state.get("psych_profile", {})
         strategy = _select_strategy(
             emotion=emotion,
             intensity=intensity,
@@ -198,6 +266,7 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
             readiness=readiness,
             user_msg_count=user_msg_count,
             current_message=current_message,
+            psych_profile=psych_profile,
         )
 
     print(f"[NODE: PLANNER] ✅ Strategy: {strategy.upper()} | "
@@ -311,11 +380,50 @@ def _select_strategy(
     readiness: float,
     user_msg_count: int,
     current_message: str,
+    psych_profile: dict = None,
 ) -> str:
     """
     Select therapeutic strategy based on the full context.
     This is the core decision matrix of SentiMind's intelligence.
+
+    v5.1: Now profile-aware — uses psych_profile to adapt strategy
+    based on coping style, resilience, and technique acceptance rate.
     """
+    psych_profile = psych_profile or {}
+    coping_style = psych_profile.get("copingStyle", "mixed")
+    resilience = psych_profile.get("resilienceScore", 0.5)
+    acceptance_rate = psych_profile.get("techniqueAccRate", 0.5)
+
+    # ============================================
+    # PROFILE-AWARE OVERRIDES (v5.1)
+    # Run BEFORE the default rules to adapt to user patterns.
+    # ============================================
+
+    # Avoidant coping + moderate distress → don't push techniques, just validate
+    # These users historically reject techniques; pushing causes disengagement.
+    if coping_style == "avoidant" and 0.3 <= intensity < 0.7 and readiness < 0.7:
+        print(f"[NODE: PLANNER] 🧬 Profile override: avoidant coping → validate_only (skip technique push)")
+        return "validate_only"
+
+    # High resilience + low distress → encourage reflection (they can handle it)
+    if resilience > 0.7 and intensity < 0.5 and user_msg_count >= 2:
+        print(f"[NODE: PLANNER] 🧬 Profile override: high resilience ({resilience:.0%}) → encourage_reflection")
+        return "encourage_reflection"
+
+    # Low technique acceptance rate + worsening trend → reframe instead of technique
+    # If they never accept techniques, stop suggesting and try reframing instead.
+    if acceptance_rate < 0.3 and trend == "worsening" and intensity >= 0.5:
+        print(f"[NODE: PLANNER] 🧬 Profile override: low acceptance ({acceptance_rate:.0%}) + worsening → reframe")
+        return "reframe"
+
+    # Proactive coping + high distress → go straight to technique (they want action)
+    if coping_style == "proactive" and intensity >= 0.5 and user_msg_count >= 2:
+        print(f"[NODE: PLANNER] 🧬 Profile override: proactive coping → suggest_technique (action-oriented user)")
+        return "suggest_technique"
+
+    # ============================================
+    # DEFAULT STRATEGY RULES (unchanged from v5.0)
+    # ============================================
 
     # Positive emotions → validate only (don't over-therapize)
     if emotion in _RECOVERY_POSITIVE_EMOTIONS and intensity < 0.4:
