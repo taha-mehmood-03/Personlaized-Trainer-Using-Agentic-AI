@@ -10,6 +10,62 @@ export interface ApiResponse<T = unknown> {
     ok: boolean
 }
 
+// Crisis-related types
+export interface CrisisResource {
+    primary_hotline?: {
+        name: string
+        number: string
+        available: string
+        call_text?: string
+        language?: string
+    }
+    secondary_hotline?: {
+        name: string
+        number: string
+        available: string
+        call_text?: string
+        language?: string
+    }
+    tertiary_hotline?: {
+        name: string
+        number: string
+        available: string
+        call_text?: string
+    }
+    text_line?: {
+        name: string
+        action: string
+        available: string
+        supported?: boolean
+    }
+    international?: {
+        name: string
+        website: string
+    }
+    message?: string
+}
+
+export interface CrisisResourcesResponse {
+    success: boolean
+    country_code: string
+    resources: CrisisResource
+    user_id?: string
+}
+
+export interface CountryDetectionResponse {
+    success: boolean
+    country_code: string
+    detected_from: string
+}
+
+export interface CrisisCallResponse {
+    success: boolean
+    call_sid?: string
+    message: string
+    error?: string
+    user_id?: string
+}
+
 /** Generic fetch wrapper with consistent error handling. */
 export async function apiRequest<T>(
     path: string,

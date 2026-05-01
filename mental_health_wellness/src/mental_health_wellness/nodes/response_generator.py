@@ -79,11 +79,12 @@ async def response_generator_node(state: MentalHealthState) -> dict:
     
     try:
         # ============================================
-        # GUARD: Don't overwrite crisis response
+        # GUARD: Don't overwrite non-crisis responses
         # ============================================
         existing_response = state.get("final_response", "")
-        if existing_response and state.get("crisis_detected", False):
-            print("[NODE: RESPONSE_GENERATOR] ✅ Crisis response already set — passing through")
+        crisis_detected = state.get("crisis_detected", False)
+        if existing_response and not crisis_detected:
+            print("[NODE: RESPONSE_GENERATOR] ✅ Response already set — passing through")
             return {"final_response": existing_response}
         
         # ============================================
@@ -257,8 +258,23 @@ Generate a warm, empathetic response to the user's situation.
             context_parts.append(
                 "IMPORTANT: You have conversation history with this user. "
                 "Reference previous topics naturally and maintain continuity. "
-                "Do NOT introduce yourself again or ask questions you already asked."
+                "Do NOT introduce yourself again or ask questions you already asked. "
+                "If user mentioned exercises, techniques, or coping strategies before, "
+                "acknowledge that context in your response."
             )
+        
+        # Check messages for previous exercise discussion to preserve context
+        if len(messages) >= 2:
+            # Look at recent messages to see if exercises were discussed
+            recent_msgs_str = " ".join([
+                m.content.lower() for m in messages[-4:] 
+                if hasattr(m, 'content') and hasattr(m, 'type') and m.type == 'ai'
+            ])
+            if any(term in recent_msgs_str for term in ['exercise', 'breathing', 'meditation', 'technique', 'grounding', 'relaxation']):
+                context_parts.append(
+                    "CONTEXT: We recently discussed a coping technique or exercise. "
+                    "When answering, maintain context about that conversation and reference it if relevant."
+                )
         
         # Add user communication preferences
         if user_prefs:

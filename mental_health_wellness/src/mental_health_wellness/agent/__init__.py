@@ -4,7 +4,7 @@ Agent Module - Core agent components
 
 from .state import MentalHealthState, get_initial_state
 from .prompts import PROMPTS
-from .graph import build_graph, get_agent, chat_with_agent, check_agent_health
+from .graph import build_graph, get_agent, chat_with_agent, chat_with_agent_streaming, check_agent_health
 
 __all__ = [
     "MentalHealthState",
@@ -13,5 +13,6 @@ __all__ = [
     "build_graph",
     "get_agent",
     "chat_with_agent",
+    "chat_with_agent_streaming",
     "check_agent_health"
 ]

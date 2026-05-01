@@ -20,11 +20,11 @@ ERROR HANDLING:
 """
 
 from ..agent.state import MentalHealthState
-from ..tools import save_session
+from ..tools import save_session as db_save_session
 from datetime import datetime
 
 
-async def session_saver_node(state: MentalHealthState) -> dict:
+async def save_session(state: MentalHealthState) -> dict:
     """
     SESSION SAVER NODE - Persist all conversation data.
     
@@ -122,7 +122,7 @@ async def session_saver_node(state: MentalHealthState) -> dict:
             
             # Save to database
             try:
-                result = await save_session.ainvoke({
+                result = await db_save_session.ainvoke({
                     "user_id": user_id,
                     "user_message": user_message,
                     "assistant_response": final_response,
@@ -156,10 +156,13 @@ async def session_saver_node(state: MentalHealthState) -> dict:
         
 
         # ============================================
-        # STEP 3: UPDATE USER STATISTICS
+        # STEP 3+4 (BATCHED): MOOD LOG + SESSION PHASE UPDATE
+        # v6.0 FIX 5: Batch Prisma writes to reduce IPC round-trips.
+        # Previously: 2-3 sequential calls (~200-500ms each on Windows).
+        # Now: single batch_() call (~100-200ms total).
         # ============================================
         
-        print("[NODE: SESSION_SAVER] 📊 Step 3: Updating user statistics...")
+        print("[NODE: SESSION_SAVER] 📊 Step 3+4: Batched mood log + session phase update...")
         
         try:
             from ..db.client import get_prisma_client
@@ -177,7 +180,6 @@ async def session_saver_node(state: MentalHealthState) -> dict:
                     print(f"[NODE: SESSION_SAVER] ⚠️ Invalid intensity, using default")
                 
                 # Map emotion to valid Prisma Emotion enum
-                # Comprehensive mapping covers ALL possible LLM outputs
                 from ..agent.preprocessing import normalize_emotion
                 
                 EMOTION_TO_PRISMA = {
@@ -220,20 +222,69 @@ async def session_saver_node(state: MentalHealthState) -> dict:
                 }
                 sentiment = emotion_to_sentiment.get(db_emotion, "NEUTRAL")
                 
+                # Prepare session phase data
+                conversation_phase = state.get("conversation_phase", "venting")
+                intent_confidence = state.get("intent_confidence", 1.0)
+                _PHASE_CONFIDENCE_THRESHOLD = 0.70
+                should_update_phase = (
+                    conversation_phase == "neutral"
+                    or intent_confidence >= _PHASE_CONFIDENCE_THRESHOLD
+                )
+                PHASE_MAP = {
+                    "venting":    "VENTING",
+                    "reflection": "REFLECTION",
+                    "solution":   "SOLUTION",
+                    "recovery":   "RECOVERY",
+                    "neutral":    "VENTING",
+                }
+                db_phase = PHASE_MAP.get(conversation_phase, "VENTING")
+                
+                # ── BATCHED WRITE: mood log + session phase in one IPC call ──
                 try:
-                    await prisma.moodlog.create(
-                        data={
-                            "userId": user_id,
-                            "emotion": db_emotion,
-                            "intensity": intensity,
-                            "sentiment": sentiment
-                        }
-                    )
-                    print(f"[NODE: SESSION_SAVER] ✅ User mood log updated: {emotion} → {db_emotion}")
+                    async with prisma.batch_() as batch:
+                        batch.moodlog.create(
+                            data={
+                                "userId": user_id,
+                                "emotion": db_emotion,
+                                "intensity": intensity,
+                                "sentiment": sentiment
+                            }
+                        )
+                        if session_id and should_update_phase:
+                            batch.session.update(
+                                where={"id": session_id},
+                                data={"phase": db_phase}
+                            )
                     
-                except Exception as mood_err:
-                    print(f"[NODE: SESSION_SAVER] ⚠️ Mood log creation failed: {str(mood_err)[:100]}")
-                    save_errors.append(f"Mood log: {str(mood_err)[:100]}")
+                    print(f"[NODE: SESSION_SAVER] ✅ Batched write complete: mood={db_emotion}, phase={db_phase if should_update_phase else 'skipped'}")
+                    
+                except Exception as batch_err:
+                    print(f"[NODE: SESSION_SAVER] ⚠️ Batched write failed: {str(batch_err)[:100]}")
+                    save_errors.append(f"Batched write: {str(batch_err)[:100]}")
+                
+                # Trigger LLM-powered session summary every 5 messages (background task)
+                msg_count = state.get("session_message_count", 0)
+                if session_id and msg_count > 0 and msg_count % 5 == 0:
+                    try:
+                        import asyncio
+                        from ..memory.session_summarizer import summarize_session
+
+                        technique = state.get("recommended_technique", {})
+                        technique_name = technique.get("name", "") if technique else ""
+                        tech_list = [technique_name] if technique_name else []
+
+                        asyncio.create_task(summarize_session(
+                            user_id=user_id,
+                            session_id=session_id,
+                            messages=messages,
+                            emotion=emotion,
+                            techniques=tech_list,
+                            outcome="neutral"
+                        ))
+                        print(f"[NODE: SESSION_SAVER] ✅ LLM session summary scheduled (msg #{msg_count})")
+                    except Exception as sum_err:
+                        print(f"[NODE: SESSION_SAVER] ⚠️ Summary task scheduling failed: {str(sum_err)[:80]}")
+                        save_errors.append(f"Summary scheduling: {str(sum_err)[:80]}")
                     
             except Exception as client_err:
                 print(f"[NODE: SESSION_SAVER] ❌ Prisma client error: {str(client_err)[:100]}")
@@ -246,84 +297,6 @@ async def session_saver_node(state: MentalHealthState) -> dict:
             print(f"[NODE: SESSION_SAVER] ❌ CRITICAL stats error: {type(e).__name__}")
             print(f"[NODE: SESSION_SAVER] Details: {str(e)[:150]}")
             save_errors.append(f"Critical stats error: {str(e)[:100]}")
-        
-        # ============================================
-        # STEP 4: UPDATE SESSION PHASE & GENERATE SUMMARY
-        # ============================================
-        
-        print("[NODE: SESSION_SAVER] 📋 Step 4: Updating session phase & summary...")
-        
-        try:
-            from ..db.client import get_prisma_client
-            prisma = await get_prisma_client()
-            
-            conversation_phase = state.get("conversation_phase", "venting")
-            intent_confidence = state.get("intent_confidence", 1.0)  # FIX 6: default full confidence
-
-            # FIX 6: Phase confidence gate.
-            # Only persist a non-neutral phase if we are confident enough about the intent.
-            # This prevents VENTING from being stored when processing a grocery list message.
-            _PHASE_CONFIDENCE_THRESHOLD = 0.70
-            should_update_phase = (
-                conversation_phase == "neutral"          # always OK to store neutral
-                or intent_confidence >= _PHASE_CONFIDENCE_THRESHOLD  # confident non-neutral
-            )
-            
-            # Map phase to Prisma enum
-            PHASE_MAP = {
-                "venting":    "VENTING",
-                "reflection": "REFLECTION",
-                "solution":   "SOLUTION",
-                "recovery":   "RECOVERY",
-                "neutral":    "VENTING",   # map neutral phase to DB-safe VENTING default
-            }
-            db_phase = PHASE_MAP.get(conversation_phase, "VENTING")
-            
-            if session_id:
-                if should_update_phase:
-                    try:
-                        await prisma.session.update(
-                            where={"id": session_id},
-                            data={"phase": db_phase}
-                        )
-                        print(f"[NODE: SESSION_SAVER] ✅ Session phase updated: {db_phase}")
-                    except Exception as phase_err:
-                        print(f"[NODE: SESSION_SAVER] ⚠️ Phase update failed: {str(phase_err)[:80]}")
-                        save_errors.append(f"Phase update: {str(phase_err)[:80]}")
-                else:
-                    print(f"[NODE: SESSION_SAVER] ⏭️  Phase update suppressed "
-                          f"(confidence={intent_confidence:.2f} < {_PHASE_CONFIDENCE_THRESHOLD}, phase={conversation_phase})")
-            
-            # Trigger LLM-powered session summary every 5 messages (background task)
-            msg_count = state.get("session_message_count", 0)
-            if session_id and msg_count > 0 and msg_count % 5 == 0:
-                try:
-                    import asyncio
-                    from ..memory.session_summarizer import summarize_session
-
-                    technique = state.get("recommended_technique", {})
-                    technique_name = technique.get("name", "") if technique else ""
-                    tech_list = [technique_name] if technique_name else []
-
-                    asyncio.create_task(summarize_session(
-                        user_id=user_id,
-                        session_id=session_id,
-                        messages=messages,
-                        emotion=emotion,
-                        techniques=tech_list,
-                        outcome="neutral"
-                    ))
-                    print(f"[NODE: SESSION_SAVER] ✅ LLM session summary scheduled (msg #{msg_count})")
-                except Exception as sum_err:
-                    print(f"[NODE: SESSION_SAVER] ⚠️ Summary task scheduling failed: {str(sum_err)[:80]}")
-                    save_errors.append(f"Summary scheduling: {str(sum_err)[:80]}")
-        
-        except ImportError as ie:
-            print(f"[NODE: SESSION_SAVER] ⚠️ DB module import error: {str(ie)[:100]}")
-            save_errors.append("DB module not available for phase/summary")
-        except Exception as e:
-            print(f"[NODE: SESSION_SAVER] ⚠️ Phase/summary error: {str(e)[:100]}")
-            save_errors.append(f"Phase/summary: {str(e)[:100]}")
         
         # ============================================
         # STEP 5: CLEANUP TEMPORARY FILES

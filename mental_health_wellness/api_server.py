@@ -1,7 +1,20 @@
 """
-FastAPI Server for Mental Health Wellness - Agent Version
-Single ReAct Agent with 8 tools handles all conversations
+FastAPI Server for Mental Health Wellness 
+Predefined deterministic graph pipeline 
 """
+
+# ── Force UTF-8 stdout/stderr on Windows so emoji print statements don't crash ──
+import sys
+if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
+    try:
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
 
 import os
 import time
@@ -21,6 +34,14 @@ load_dotenv()
 from src.mental_health_wellness.agent import chat_with_agent, get_agent, check_agent_health
 from src.mental_health_wellness.db.client import get_prisma_client, close_prisma_client
 
+# Import crisis routes
+crisis_router = None
+try:
+    from src.mental_health_wellness.api.crisis_routes import router as crisis_router
+    print("[SERVER] [OK] Crisis routes imported successfully")
+except Exception as e:
+    print(f"[SERVER] [WARN] Failed to import crisis routes: {e}")
+
 
 # ============================================
 # PYDANTIC MODELS
@@ -30,6 +51,7 @@ class ChatRequest(BaseModel):
     user_id: str
     message: str
     session_id: Optional[str] = None
+    audio_data: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -115,54 +137,66 @@ class SessionRenameRequest(BaseModel):
 async def lifespan(app: FastAPI):
     """Manage startup and shutdown events"""
     print("\n" + "="*60)
-    print("[SERVER] 🚀 Starting SentiMind Mental Health API")
+    print("[SERVER] 🚀 SentiMind Mental Health API — Starting Up")
     print("="*60)
-    
+
+    # ── Database ──────────────────────────────────────────────────────────
     try:
         await get_prisma_client()
-        print("[SERVER] ✅ Database connected")
+        print("[SERVER] ✅ Database connected (Supabase/PostgreSQL)")
     except Exception as e:
-        print(f"[SERVER] ❌ Database failed: {e}")
+        print(f"[SERVER] ❌ Database connection failed: {e}")
         import traceback
         traceback.print_exc()
-    
+
+    # ── LLM Provider (OpenRouter) ─────────────────────────────────────────
     try:
-        # Preload ALL ML models on startup to avoid slow first request
-        print("[SERVER] 🔄 Loading ML models...")
-        from src.mental_health_wellness.tools.mood_tools import preload_emotion_model
-        from src.mental_health_wellness.llm.llm_classifier import _get_crisis_classifier
+        print("[SERVER] 🔄 Initializing LLM provider (OpenRouter)...")
         from src.mental_health_wellness.llm.groq_llm import get_llm_manager
-        
-        print("[SERVER]   • Emotion detector (RoBERTa/GoEmotions)")
-        preload_emotion_model()
-        
-        print("[SERVER]   • Crisis specialist (ELECTRA sentinet/suicidality)")
-        _get_crisis_classifier()
-        
-        print("[SERVER]   • Groq LLM Manager (API key validation)")
         get_llm_manager()
-        
-        print("[SERVER] ✅ All models loaded")
+        print("[SERVER] ✅ LLM provider ready (OpenRouter / llama-3.3-70b)")
     except Exception as e:
-        print(f"[SERVER] ❌ Model loading failed: {e}")
+        print(f"[SERVER] ❌ LLM provider initialization failed: {e}")
         import traceback
         traceback.print_exc()
-    
+
+    # ── Agentic Pipeline ──────────────────────────────────────────────────
     try:
-        agent = get_agent()
-        print("[SERVER] ✅ Agent initialized")
+        get_agent()
+        print("[SERVER] ✅ Deterministic Agentic Pipeline initialized")
     except Exception as e:
-        print(f"[SERVER] ❌ Agent failed: {e}")
+        print(f"[SERVER] ❌ Pipeline initialization failed: {e}")
         import traceback
         traceback.print_exc()
-    
-    print("[SERVER] 🎯 Ready for requests\n")
-    
+
+    # ── Voice ML Models (preload to avoid first-request delay) ────────────
+    try:
+        print("[SERVER] 🔄 Preloading voice ML models (Whisper + wav2vec2 + OpenSMILE)...")
+        import asyncio
+        from src.mental_health_wellness.voice import preload_all_voice_models
+        # Run blocking model loads in a thread pool so we don't block the event loop
+        loop = asyncio.get_event_loop()
+        voice_status = await loop.run_in_executor(None, preload_all_voice_models)
+        ready = [k for k, v in voice_status.items() if v in ("ok", "fallback")]
+        failed = [k for k, v in voice_status.items() if k not in ready]
+        print(f"[SERVER] ✅ Voice models ready: {ready}")
+        if failed:
+            print(f"[SERVER] ⚠️  Voice models unavailable: {failed}")
+    except Exception as e:
+        print(f"[SERVER] ⚠️  Voice model preload failed (non-fatal): {e}")
+
+    print("="*60)
+    print("[SERVER] 🎯 All systems ready — listening for requests")
+    print("="*60 + "\n")
+
     yield
-    
-    print("\n[SERVER] 🛑 Shutting down...")
+
+    print("\n" + "="*60)
+    print("[SERVER] 🛑 Shutting down gracefully...")
     await close_prisma_client()
-    print("[SERVER] ✅ Cleanup complete\n")
+    print("[SERVER] ✅ Database connection closed")
+    print("[SERVER] 👋 Shutdown complete")
+    print("="*60)
 
 
 # ============================================
@@ -184,6 +218,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include crisis routes
+if crisis_router is not None:
+    app.include_router(crisis_router)
+    print("[SERVER] [OK] Crisis routes registered")
+else:
+    print("[SERVER] [WARN] Crisis routes not registered")
 
 
 # ============================================
@@ -231,8 +272,7 @@ async def health_check():
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     """
-    Main chat endpoint using the ReAct Agent.
-    The agent decides which tools to use based on the message.
+    Main chat endpoint using the deterministic graph pipeline.
     """
     try:
         result = await chat_with_agent(
@@ -264,65 +304,112 @@ async def chat(request: ChatRequest):
 @app.post("/api/chat/stream")
 async def chat_stream(request: ChatRequest):
     """
-    Streaming chat endpoint — SSE (Server-Sent Events).
-
-    Architecture:
-      1. Run the full deterministic pipeline (crisis check, mood analysis, planning etc.)
-         to produce all state signals and the final prompt.
-      2. Stream the LLM response token-by-token using Groq's streaming API.
-      3. Send a final SSE event with metadata (emotion, session_id, crisis_detected etc.)
-
-    Frontend consumes this with EventSource or fetch + ReadableStream.
+    True Token Streaming chat endpoint — SSE (Server-Sent Events) with LLM streaming.
     """
     from fastapi.responses import StreamingResponse
     import json
 
     async def event_generator():
+        audio_temp_path = None
         try:
-            # ---- Step 1: Run full pipeline (non-streaming part) ----
-            # We run the pipeline, which sets up state correctly,
-            # but intercept BEFORE the LLM call to stream it ourselves.
-            result = await chat_with_agent(
+            from src.mental_health_wellness.agent.graph import chat_with_agent_streaming
+            import tempfile
+            import base64
+            import os
+            
+            if request.audio_data:
+                try:
+                    # Strip data URI prefix if present
+                    b64_str = request.audio_data
+                    if "," in b64_str:
+                        b64_str = b64_str.split(",")[1]
+                        
+                    audio_bytes = base64.b64decode(b64_str)
+                    
+                    # Save to temp file
+                    with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tf:
+                        tf.write(audio_bytes)
+                        audio_temp_path = tf.name
+                        print(f"[STREAM] 🎤 Saved audio buffer to {audio_temp_path}")
+                except Exception as e:
+                    print(f"[STREAM] ❌ Failed to decode audio_data: {e}")
+            
+            voice_features_for_agent = None
+            final_message = request.message
+            if audio_temp_path:
+                from src.mental_health_wellness.nodes.voice_preprocessing import preprocess_voice_input
+                
+                voice_state = {
+                    "audio_file_path": audio_temp_path,
+                    "message": request.message
+                }
+                
+                voice_result = await preprocess_voice_input(voice_state)
+                voice_processed = voice_result.get("voice_processed", False)
+                voice_features = voice_result.get("voice_features", {})
+                transcription = voice_result.get("transcription", "")
+                # Use transcription as the final message if available, else fall back to typed text
+                final_message = voice_result.get("final_message", request.message) or request.message
+                
+                if voice_processed and voice_features:
+                    voice_features_for_agent = voice_features
+                    print(f"[STREAM] 🎯 Voice features captured: {voice_features.get('emotion')} "
+                          f"(conf={voice_features.get('confidence', 0):.0%}, "
+                          f"distress={voice_result.get('voice_distress_index', 0):.2f})")
+                    
+                    # Also inject a text annotation for the LLM response generator
+                    voice_confidence = voice_features.get('confidence', 0.0)
+                    voice_emotion = voice_features.get('emotion', 'neutral')
+                    if voice_confidence > 0.3:
+                        voice_context = (
+                            f"\n[Voice Analysis: The user's voice indicates they sound {voice_emotion} "
+                            f"(confidence: {voice_confidence:.0%}, arousal: {voice_features.get('arousal', 0.5):.1f}, "
+                            f"valence: {voice_features.get('valence', 0.5):.1f})]"
+                        )
+                        final_message = final_message + voice_context
+                        print(f"[STREAM] 📝 Injected voice annotation into message for LLM")
+                
+                # Clean up temp file now — voice features are captured, no need to keep the file
+                try:
+                    import os
+                    if audio_temp_path and os.path.exists(audio_temp_path):
+                        os.remove(audio_temp_path)
+                        audio_temp_path = None  # Mark as cleaned so finally-block skips it
+                        print(f"[STREAM] 🧹 Cleaned up temp audio file")
+                except Exception as cleanup_err:
+                    print(f"[STREAM] ⚠️ Could not cleanup audio file: {cleanup_err}")
+            
+            # chat_with_agent_streaming now returns an async generator yielding tokens and a final metadata event
+            stream = chat_with_agent_streaming(
                 user_id=request.user_id,
-                message=request.message,
-                session_id=request.session_id
+                message=final_message,
+                session_id=request.session_id,
+                voice_features=voice_features_for_agent  # Pass pre-extracted features
             )
 
-            final_response = result.get("response", "")
-
-            # Guard: if the pipeline produced an empty response (e.g. LLM key exhausted,
-            # Groq rate-limit, or empty crisis handler branch), send a safe fallback so
-            # the user never sees a blank bubble.
-            if not final_response or not final_response.strip():
-                print("[STREAM] ⚠️ Empty final_response detected — using fallback")
-                final_response = "I hear you and I'm here for you. Something went wrong on my end — could you try sending your message again? 💙"
-
-            # ---- Step 2: Stream the final response token by token ----
-            # Simulate streaming of the pre-computed response for now.
-            # This gives instant visual feedback while keeping pipeline architecture intact.
-            # Words stream at ~30ms intervals for a natural feel.
-            import asyncio
-            words = final_response.split(" ")
-            for i, word in enumerate(words):
-                chunk = word if i == 0 else " " + word
-                yield f"data: {json.dumps({'type': 'token', 'content': chunk})}\n\n"
-                await asyncio.sleep(0.03)  # 30ms per word — natural streaming pace
-
-            # ---- Step 3: Send metadata as final event ----
-            metadata = {
-                "type": "done",
-                "session_id": result.get("session_id"),
-                "emotion": result.get("emotion"),
-                "sentiment": result.get("sentiment"),
-                "crisis_detected": result.get("crisis_detected", False),
-                "recommended_techniques_by_category": result.get("recommended_techniques_by_category", {}),
-                "tools_used": result.get("tools_used", []),
-            }
-            yield f"data: {json.dumps(metadata)}\n\n"
+            async for chunk_data in stream:
+                if chunk_data["type"] == "token":
+                    yield f"data: {json.dumps({'type': 'token', 'content': chunk_data['content']})}\n\n"
+                elif chunk_data["type"] == "done":
+                    # Send metadata as final event
+                    metadata = chunk_data["metadata"]
+                    metadata["type"] = "done"  # Ensure type is explicitly set
+                    yield f"data: {json.dumps(metadata)}\n\n"
+                    print(f"[STREAM] ✅ Stream complete | Metadata sent")
 
         except Exception as e:
             print(f"[STREAM] ❌ Stream error: {e}")
+            import traceback
+            traceback.print_exc()
             yield f"data: {json.dumps({'type': 'error', 'content': 'Something went wrong. Please try again.'})}\n\n"
+        finally:
+            if audio_temp_path:
+                import os
+                try:
+                    if os.path.exists(audio_temp_path):
+                        os.remove(audio_temp_path)
+                except Exception as e:
+                    print(f"[STREAM] ⚠️ Could not cleanup temp audio file {audio_temp_path}: {e}")
 
     return StreamingResponse(
         event_generator(),
@@ -710,7 +797,46 @@ async def rename_session(session_id: str, request: SessionRenameRequest):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"[API] Error renaming session: {e}")
+        print(f"[SESSION] ❌ Error renaming session {session_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/session/{session_id}")
+async def delete_session(session_id: str):
+    """
+    Delete a chat session and all its messages.
+    Cascade-deletes: messages → session.
+    """
+    try:
+        print(f"[SESSION-DELETE] 🗑️  Deleting session: {session_id}")
+        prisma = await get_prisma_client()
+
+        # Verify session exists
+        session = await prisma.session.find_unique(where={"id": session_id})
+        if not session:
+            print(f"[SESSION-DELETE] ⚠️  Session not found: {session_id}")
+            raise HTTPException(status_code=404, detail="Session not found")
+
+        # Delete all messages first (FK constraint)
+        deleted_msgs = await prisma.message.delete_many(where={"sessionId": session_id})
+        print(f"[SESSION-DELETE] 🧹 Deleted {deleted_msgs} messages")
+
+        # Delete the session itself
+        await prisma.session.delete(where={"id": session_id})
+        print(f"[SESSION-DELETE] ✅ Session {session_id} deleted successfully")
+
+        return {
+            "status": "success",
+            "session_id": session_id,
+            "message": "Session and all messages permanently deleted"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[SESSION-DELETE] ❌ Error deleting session {session_id}: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1095,7 +1221,7 @@ async def chat_voice(
         # ROUTE TO VOICE PRE-PROCESSING NODE
         # ============================================
         
-        from src.mental_health_wellness.nodes.voice_preprocessing import voice_preprocessing_node
+        from src.mental_health_wellness.nodes.voice_preprocessing import preprocess_voice_input
         
         # Create state for voice preprocessing
         voice_state = {
@@ -1104,7 +1230,7 @@ async def chat_voice(
         }
         
         # Run voice preprocessing
-        voice_result = await voice_preprocessing_node(voice_state)
+        voice_result = await preprocess_voice_input(voice_state)
         
         voice_processed = voice_result.get("voice_processed", False)
         voice_features = voice_result.get("voice_features", {})

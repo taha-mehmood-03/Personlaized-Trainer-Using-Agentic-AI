@@ -4,28 +4,29 @@ Mood Analysis Tools - Emotion detection and analysis
 
 from langchain_core.tools import tool
 
-# Lazy load emotion model
+# ============================================
+# LOCAL ML MODEL DISABLED
+# ============================================
+
 _emotion_pipeline = None
 
+# def _get_emotion_pipeline():
+#     """Lazy load emotion model. Raises if model cannot be loaded."""
+#     global _emotion_pipeline
+#     if _emotion_pipeline is None:
+#         from transformers import pipeline
+#         print("[TOOLS] 🔄 Loading emotion model (SamLowe/roberta-base-go_emotions)...")
+#         _emotion_pipeline = pipeline(
+#             "text-classification",
+#             model="SamLowe/roberta-base-go_emotions",
+#             device=-1
+#         )
+#         print("[TOOLS] ✅ Emotion model loaded")
+#     return _emotion_pipeline
 
-def _get_emotion_pipeline():
-    """Lazy load emotion model. Raises if model cannot be loaded."""
-    global _emotion_pipeline
-    if _emotion_pipeline is None:
-        from transformers import pipeline
-        print("[TOOLS] 🔄 Loading emotion model (SamLowe/roberta-base-go_emotions)...")
-        _emotion_pipeline = pipeline(
-            "text-classification",
-            model="SamLowe/roberta-base-go_emotions",
-            device=-1
-        )
-        print("[TOOLS] ✅ Emotion model loaded")
-    return _emotion_pipeline
-
-
-def preload_emotion_model():
-    """Eagerly preload emotion model on startup."""
-    _get_emotion_pipeline()
+# def preload_emotion_model():
+#     """Eagerly preload emotion model on startup."""
+#     _get_emotion_pipeline()
 
 
 @tool
@@ -95,21 +96,37 @@ def analyze_mood(message: str) -> dict:
             processed_message = emoji_text_prepend.strip() + " " + message
         # ────────────────────────────────────────────────────────
         
-        pipe = _get_emotion_pipeline()
+        # ── LLM Emotion Classification (replaces local RoBERTa) ───────────
+        from src.mental_health_wellness.llm.groq_llm import get_llm_manager
+        import json
+        import re
         
-        results = pipe(processed_message[:512])
-        if not results:
-            print("[MOOD_TOOLS] ⚠️ Model returned no results - returning neutral")
-            return {
-                "emotion": "neutral",
-                "sentiment": "neutral",
-                "intensity": 0.5,
-                "confidence": 0.0
-            }
+        manager = get_llm_manager()
+        # Use the fast model (Haiku) for 8b instruct replacement
+        llm = manager.get_llm(model=manager.model_fast).bind(max_tokens=64, temperature=0.0)
         
-        top_result = results[0]
-        raw_emotion = top_result['label'].lower()
-        confidence = round(top_result['score'], 2)
+        prompt = f"""You are an emotion classification AI. Analyze the primary emotion in the user message.
+Choose from exactly one of these labels: admiration, amusement, anger, annoyance, approval, caring, confusion, curiosity, desire, disappointment, disapproval, disgust, embarrassment, excitement, fear, gratitude, grief, joy, love, nervousness, optimism, pride, realization, relief, remorse, sadness, surprise, neutral.
+
+Respond ONLY with valid JSON:
+{{"label": "emotion_name", "score": float_between_0_and_1}}
+
+Message: "{processed_message[:512]}"
+JSON:"""
+        try:
+            print("[MOOD_TOOLS] 🤖 Running LLM emotion analysis...")
+            response = llm.invoke(prompt)
+            content = re.sub(r"```(?:json)?", "", response.content).strip()
+            parsed = json.loads(content)
+            
+            raw_emotion = parsed.get("label", "neutral").lower()
+            confidence = round(float(parsed.get("score", 0.5)), 2)
+            print(f"[MOOD_TOOLS] ✅ LLM emotion result: {raw_emotion} ({confidence})")
+        except Exception as e:
+            print(f"[MOOD_TOOLS] ⚠️ LLM returned invalid result, falling back to neutral: {e}")
+            raw_emotion = "neutral"
+            confidence = 0.5
+        # ────────────────────────────────────────────────────────
         
         # GoEmotions (28 labels) -> SentiMind Core Emotions (6 labels)
         # FIX 2: Standardize ALL fear/anxiety variants to 'anxiety' for
@@ -203,6 +220,8 @@ def analyze_mood(message: str) -> dict:
         else:
             # Negative emotions: high confidence = high distress intensity
             intensity = round(confidence * 0.9 + 0.1, 2)
+        
+        print(f"[MOOD] ✔  FINAL EMOTION │ {emotion.upper()} │ sentiment={sentiment_map.get(emotion, 'neutral')} │ intensity={intensity:.0%} │ confidence={confidence:.0%}")
         
         return {
             "emotion": emotion,

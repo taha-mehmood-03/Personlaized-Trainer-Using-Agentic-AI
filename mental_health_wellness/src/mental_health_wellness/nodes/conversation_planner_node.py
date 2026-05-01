@@ -83,6 +83,16 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
     )
     current_message = messages[-1].content.lower() if messages else ""
 
+    recent_context = ""
+    if len(messages) > 1:
+        ctx_msgs = messages[-4:-1]
+        lines = []
+        for m in ctx_msgs:
+            role = "User" if getattr(m, "type", "") == "human" else "System"
+            content = getattr(m, "content", "")
+            lines.append(f"{role}: {content}")
+        recent_context = "\n".join(lines)
+
     print(f"\n[NODE: PLANNER] 🧠 Planning strategy | Emotion: {emotion} | "
           f"Intensity: {intensity:.0%} | Trend: {trend} | Messages: {user_msg_count}")
 
@@ -91,24 +101,7 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
     # Must run BEFORE chitchat bypass — DistilBERT often classifies
     # "help me calm down" as neutral, causing a false no_action bypass.
     # ============================================
-    _PRE_TECHNIQUE_SIGNALS = {
-        "breathing exercise", "breathing technique", "meditation",
-        "help me calm down", "suggest a technique", "can you guide me",
-        "coping technique", "cbt technique", "relaxation technique",
-        "grounding exercise", "mindfulness exercise", "walk me through",
-        "do an exercise", "try an exercise", "calming exercise",
-        "stress relief", "anxiety exercise",
-    }
-    msg_lower = current_message.lower()
-    if any(sig in msg_lower for sig in _PRE_TECHNIQUE_SIGNALS):
-        print(f"[NODE: PLANNER] ⚡ Technique request detected (pre-bypass) — routing to suggest_technique")
-        return {
-            "conversation_strategy": "suggest_technique",
-            "conversation_phase": state.get("conversation_phase", "venting"),
-            "technique_readiness": 1.0,
-            "crisis_detected": False,
-            "session_message_count": user_msg_count,
-        }
+
 
     # ============================================
     # CHITCHAT BYPASS GATE
@@ -128,8 +121,33 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
             "recommended_techniques_by_category": {},
         }
 
-    if emotion == "neutral" and intensity < _NEUTRAL_INTENSITY_THRESHOLD:
-        print(f"[NODE: PLANNER] ⏭️  Neutral + low intensity ({intensity:.0%}) — skipping LLM intent check, returning no_action")
+    # ============================================
+    # INTENT RETRIEVAL (Prefetch or Evaluate)
+    # ============================================
+    prefetched_intent = state.get("prefetched_intent")
+    intent_result = None
+
+    if prefetched_intent and isinstance(prefetched_intent, dict) and prefetched_intent.get("intent"):
+        intent_result = prefetched_intent
+        print(f"[NODE: PLANNER] ⚡ Using prefetched intent — skipping LLM call: "
+              f"{intent_result['intent']} ({intent_result.get('confidence', 0):.0%}) [saves ~800-1500ms]")
+    else:
+        # Fallback to LLM if prefetch failed
+        if intent_result is None:
+            from ..llm.llm_classifier import llm_intent_check
+            print(f"[NODE: PLANNER] 🤖 No prefetch — calling LLM intent classifier...")
+            intent_result = await llm_intent_check(current_message, recent_context)
+
+    intent = intent_result.get("intent", "venting")
+    intent_confidence = intent_result.get("confidence", 0.0)
+
+    # ============================================
+    # CHITCHAT BYPASS GATE
+    # ============================================
+    _NEUTRAL_INTENSITY_THRESHOLD = 0.25
+
+    if intent == "chitchat" and emotion == "neutral" and intensity < _NEUTRAL_INTENSITY_THRESHOLD:
+        print(f"[NODE: PLANNER] ⏭️  Chitchat Intent + low intensity ({intensity:.0%}) — returning no_action fast-path")
         return {
             "conversation_strategy": "no_action",
             "conversation_phase": "neutral",
@@ -140,58 +158,8 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
         }
 
     # ============================================
-    # v5.3 OPT-4: PREFETCHED INTENT (from parallel_intake)
-    # parallel_intake ran llm_intent_pre_check concurrently with crisis
-    # screening and mood analysis. Reuse that result and skip LLM entirely.
+    # High-confidence intent overrides
     # ============================================
-    prefetched_intent = state.get("prefetched_intent")
-    intent_result = None
-
-    if prefetched_intent and isinstance(prefetched_intent, dict) and prefetched_intent.get("intent"):
-        intent_result = prefetched_intent
-        print(f"[NODE: PLANNER] ⚡ Using prefetched intent — skipping LLM call: "
-              f"{intent_result['intent']} ({intent_result.get('confidence', 0):.0%}) [saves ~800-1500ms]")
-    else:
-        # ============================================
-        # v5.2 OPT-3: HEURISTIC INTENT FAST-PATH (fallback when no prefetch)
-        # Try keyword matching first — only call LLM for ambiguous messages.
-        # ============================================
-        _HEURISTIC_TECHNIQUE_SIGNALS = {
-            "breathing exercise", "breathing technique", "meditation",
-            "help me calm down", "suggest a technique", "can you guide me",
-            "coping technique", "cbt technique", "relaxation technique",
-            "grounding exercise", "mindfulness exercise", "walk me through",
-            "do an exercise", "try an exercise", "calming exercise",
-            "stress relief", "anxiety exercise",
-        }
-        _HEURISTIC_VENTING_SIGNALS = {
-            "i feel", "i'm so", "i am so", "today was", "i just",
-            "i can't", "everything is", "nobody", "i hate",
-            "it's been", "i've been", "i keep", "why do i",
-        }
-
-        msg_lower = current_message.lower()
-
-        # Fast-path 1: Obvious technique request
-        if any(sig in msg_lower for sig in _HEURISTIC_TECHNIQUE_SIGNALS):
-            intent_result = {"intent": "technique_request", "confidence": 0.85}
-            print(f"[NODE: PLANNER] ⚡ Heuristic match: technique_request (skipping LLM)")
-
-        # Fast-path 2: Obvious venting with emotional signal
-        elif any(sig in msg_lower for sig in _HEURISTIC_VENTING_SIGNALS) and intensity >= 0.3:
-            intent_result = {"intent": "venting", "confidence": 0.80}
-            print(f"[NODE: PLANNER] ⚡ Heuristic match: venting (skipping LLM)")
-
-        # Ambiguous + no prefetch → call LLM (now rare, ~20% of messages)
-        if intent_result is None:
-            print(f"[NODE: PLANNER] 🤖 No prefetch + no heuristic — calling LLM intent classifier...")
-            intent_result = await llm_intent_check(current_message)
-
-    intent = intent_result.get("intent", "venting")
-    intent_confidence = intent_result.get("confidence", 0.0)
-
-
-    # High-confidence technique request → bypass normal readiness logic
     if intent == "technique_request" and intent_confidence >= 0.65:
         print(f"[NODE: PLANNER] 🎯 LLM detected technique request ({intent_confidence:.0%}) → suggest_technique")
         return {

@@ -28,12 +28,12 @@ AFTER (parallel ~120ms):
 
 import asyncio
 from ..agent.state import MentalHealthState
-from .psych_profile_updater import psych_profile_updater_node
-from .session_saver import session_saver_node
-from .outcome_tracker_node import outcome_tracker_node
+from .psych_profile_updater import update_psych_profile
+from .session_saver import save_session
+from .outcome_tracker_node import track_outcome
 
 
-async def parallel_persist_node(state: MentalHealthState) -> dict:
+async def run_parallel_persist(state: MentalHealthState) -> dict:
     """
     Run all post-response persistence operations concurrently.
 
@@ -43,9 +43,9 @@ async def parallel_persist_node(state: MentalHealthState) -> dict:
     print("\n[NODE: PARALLEL_PERSIST] ⚡ Running profile + saver + outcome concurrently...")
 
     profile_result, saver_result, outcome_result = await asyncio.gather(
-        psych_profile_updater_node(state),
-        session_saver_node(state),
-        outcome_tracker_node(state),
+        update_psych_profile(state),
+        save_session(state),
+        track_outcome(state),
         return_exceptions=True,
     )
 

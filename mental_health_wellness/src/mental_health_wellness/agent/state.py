@@ -80,8 +80,15 @@ class MentalHealthState(TypedDict):
     voice_arousal: float
     voice_valence: float
     voice_confidence: float
+    voice_distress_index: float   # Psychoacoustic composite distress score (0-1)
+    voice_pause_density: float    # Proportion of silent frames (hesitancy indicator)
+    voice_mfcc_vector: list       # 13-dim MFCC mean vector from torchaudio/librosa
     has_voice: bool
+    voice_processed: bool         # True once voice_preprocessing_node has run
+    voice_features: Optional[dict]  # Voice analysis data dict for emotion_fusion_node
     audio_file_path: Optional[str]  # Path to voice audio file for analysis
+    audio_bytes: Optional[bytes]    # Raw audio bytes (alternative to file path)
+    transcription: str              # ASR output from Whisper (set by voice_preprocessing_node)
     
     # ============================================
     # EXPLAINABILITY
@@ -208,8 +215,15 @@ def get_initial_state() -> MentalHealthState:
         voice_arousal=0.5,
         voice_valence=0.5,
         voice_confidence=0.0,
+        voice_distress_index=0.0,
+        voice_pause_density=0.25,
+        voice_mfcc_vector=[],
         has_voice=False,
-        audio_file_path=None,  # Set by voice endpoint when audio is uploaded
+        voice_processed=False,
+        voice_features=None,    # Set by voice_preprocessing_node for emotion_fusion_node
+        audio_file_path=None,   # Set by voice endpoint when audio is uploaded
+        audio_bytes=None,       # Raw audio bytes (alternative to file path)
+        transcription="",       # ASR output from Whisper
         
         # Explainability
         technique_reasoning="",

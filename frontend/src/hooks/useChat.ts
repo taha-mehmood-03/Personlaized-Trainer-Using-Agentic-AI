@@ -12,9 +12,12 @@ export function useChat(userId: string, initialSessions: Session[]) {
 
     const refreshSessions = useCallback(async () => {
         setLoadingSessions(true)
-        const updated = await getSessions(userId)
-        setSessions(updated)
-        setLoadingSessions(false)
+        try {
+            const updated = await getSessions(userId)
+            setSessions(updated)
+        } finally {
+            setLoadingSessions(false)
+        }
     }, [userId])
 
     const startNewSession = useCallback(() => {
@@ -27,19 +30,41 @@ export function useChat(userId: string, initialSessions: Session[]) {
 
     const removeSession = useCallback(
         async (id: string) => {
-            await deleteSession(id)
+            // Optimistic update — remove immediately from UI
+            const previousSessions = sessions
             setSessions((prev) => prev.filter((s) => s.id !== id))
-            if (currentSessionId === id) startNewSession()
+
+            // If we're deleting the active session, clear it
+            if (currentSessionId === id) {
+                startNewSession()
+            }
+
+            // Persist to backend
+            const success = await deleteSession(id)
+            if (!success) {
+                // Rollback on failure
+                console.error('[useChat] Session delete failed — rolling back UI')
+                setSessions(previousSessions)
+                if (currentSessionId === id) {
+                    setCurrentSessionId(id)
+                }
+            }
         },
-        [currentSessionId, startNewSession]
+        [currentSessionId, sessions, startNewSession]
     )
 
     const updateSessionName = useCallback(async (id: string, title: string) => {
-        await renameSession(id, title)
+        // Optimistic rename
         setSessions((prev) =>
             prev.map((s) => (s.id === id ? { ...s, title } : s))
         )
-    }, [])
+        const success = await renameSession(id, title)
+        if (!success) {
+            // Rollback — re-fetch sessions
+            console.error('[useChat] Session rename failed — refreshing sessions')
+            await refreshSessions()
+        }
+    }, [refreshSessions])
 
     return {
         sessions,

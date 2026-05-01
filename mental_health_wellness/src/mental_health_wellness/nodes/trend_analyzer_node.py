@@ -20,7 +20,7 @@ Output:
 from ..agent.state import MentalHealthState
 
 
-async def trend_analyzer_node(state: MentalHealthState) -> dict:
+async def analyze_emotional_trends(state: MentalHealthState) -> dict:
     """
     TREND ANALYZER NODE - Track emotional trajectory.
 

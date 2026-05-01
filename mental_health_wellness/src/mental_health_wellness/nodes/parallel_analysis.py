@@ -23,11 +23,11 @@ Output: merged dict of both nodes' state updates.
 
 import asyncio
 from ..agent.state import MentalHealthState
-from .cognitive_distortion_node import cognitive_distortion_node
-from .trend_analyzer_node import trend_analyzer_node
+from .cognitive_distortion_node import detect_cognitive_distortions
+from .trend_analyzer_node import analyze_emotional_trends
 
 
-async def parallel_analysis_node(state: MentalHealthState) -> dict:
+async def run_parallel_analysis(state: MentalHealthState) -> dict:
     """
     Run cognitive distortion detection and trend analysis in parallel.
     
@@ -40,8 +40,8 @@ async def parallel_analysis_node(state: MentalHealthState) -> dict:
 
     # Run both nodes concurrently
     distortion_result, trend_result = await asyncio.gather(
-        cognitive_distortion_node(state),
-        trend_analyzer_node(state),
+        detect_cognitive_distortions(state),
+        analyze_emotional_trends(state),
         return_exceptions=True,
     )
 

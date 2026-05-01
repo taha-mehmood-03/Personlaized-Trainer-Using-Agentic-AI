@@ -12,7 +12,7 @@ from ..tools.technique_tools import recommend_technique
 import time
 
 
-async def technique_selector_node(state: MentalHealthState) -> dict:
+async def select_technique(state: MentalHealthState) -> dict:
     """
     TECHNIQUE SELECTOR NODE - Deterministic technique selection.
 

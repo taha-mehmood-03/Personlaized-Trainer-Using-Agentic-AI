@@ -1,23 +1,28 @@
 """
-Cognitive Distortion Detector Node (Node 2b) - SentiMind v3.0
+Cognitive Distortion Detector Node (Node 2b) - v7.0 LLM-Based
 
 ARCHITECTURE NODE 2b:
-Purpose: Detect cognitive distortions (maladaptive thinking patterns) from user language.
+Purpose: Detect cognitive distortions (maladaptive thinking patterns) using LLM semantic analysis.
          This enables the conversation planner to choose a 'reframe' strategy and the
          LLM to be explicitly instructed to address the specific distortion type.
 
 Runs AFTER emotion_fusion_node, BEFORE conversation_planner_node.
-No LLM call — pure deterministic keyword/pattern analysis.
+
+v7.0 CHANGES:
+  - Removed keyword pattern matching entirely
+  - LLM semantic analysis for accurate distortion detection
+  - Understands context and nuance better than keywords
+  - Consistent with therapeutic standards
 
 DISTORTION TYPES DETECTED:
-  - catastrophizing:     "always", "never", "everything is ruined", "hopeless"
-  - black_white:         "total failure", "completely useless", "perfect", "100% bad"
-  - overgeneralization:  "always happens to me", "nobody", "everyone hates me"
-  - mind_reading:        "they think", "he must think i'm", "she sees me as"
-  - personalization:     "it's my fault", "i caused this", "because of me"
-  - should_statements:   "i must", "i should", "i have to", "i ought to"
-  - emotional_reasoning: "i feel like it's true", "i know it's bad because i feel awful"
-  - magnification:       "the worst thing", "unbearable", "i can't handle this"
+  - catastrophizing:     Expecting worst possible outcome is inevitable
+  - black_white:         All-or-nothing thinking with no middle ground
+  - overgeneralization:  Single event becomes universal pattern
+  - mind_reading:        Assuming knowledge of others' thoughts
+  - personalization:     Excessive personal responsibility
+  - should_statements:   Rigid, inflexible rules on oneself
+  - emotional_reasoning: Treating emotions as objective proof
+  - magnification:       Significantly magnifying severity/impact
 
 OUTPUT STATE FIELDS:
   - distortion_type:        str | None
@@ -30,67 +35,7 @@ from ..agent.state import MentalHealthState
 from ..llm.llm_classifier import llm_distortion_check
 
 
-# ============================================
-# DISTORTION PATTERN LEXICONS
-# ============================================
-
-DISTORTION_PATTERNS: dict[str, list[str]] = {
-    "catastrophizing": [
-        "always", "never", "everything is", "nothing ever", "ruined",
-        "hopeless", "disaster", "worst ever", "it's all over", "completely destroyed",
-        "nothing will", "my whole life", "doomed", "total disaster",
-    ],
-    "black_white": [
-        "total failure", "complete failure", "completely useless", "absolutely worthless",
-        "perfect", "100% bad", "not at all", "entirely wrong", "always right",
-        "never works", "either it works or", "all or nothing",
-    ],
-    "overgeneralization": [
-        "always happens to me", "this always happens", "nobody", "everyone hates",
-        "people always", "they always", "i always mess", "every time i try",
-        "it never works out", "no one ever", "everyone thinks", "every single time",
-    ],
-    "mind_reading": [
-        "they think", "he must think", "she thinks i'm", "people see me as",
-        "everyone knows i'm", "they probably think", "i know they think",
-        "they must be laughing", "she must hate", "he must think i'm",
-        "i could tell they thought", "they assumed",
-    ],
-    "personalization": [
-        "my fault", "it's my fault", "i caused", "because of me", "i made them",
-        "i'm to blame", "it's all on me", "i ruined it", "i did this",
-        "this happened because of me", "it wouldn't have happened if i",
-    ],
-    "should_statements": [
-        "i should", "i must", "i have to", "i ought to", "i need to be",
-        "i should have", "i must not", "i can't", "i shouldn't have",
-        "one should", "people should", "they should",
-    ],
-    "emotional_reasoning": [
-        "i feel like it's true", "it must be bad because i feel",
-        "i just feel it", "i feel so", "my feelings prove",
-        "i feel worthless so i must be", "because i feel scared",
-        "since i feel anxious it means",
-    ],
-    "magnification": [
-        "the worst thing", "unbearable", "i can't handle", "i can't cope",
-        "too much to bear", "overwhelming", "i can't take it", "so bad i",
-        "it's unbearable", "devastating", "this is destroying me",
-    ],
-}
-
-# Weight by clinical importance (catastrophizing and black/white are highest priority)
-DISTORTION_WEIGHTS: dict[str, float] = {
-    "catastrophizing":     1.0,
-    "black_white":         0.9,
-    "mind_reading":        0.85,
-    "personalization":     0.85,
-    "overgeneralization":  0.80,
-    "should_statements":   0.70,
-    "magnification":       0.75,
-    "emotional_reasoning": 0.65,
-}
-
+# Distortion explanations for reference
 DISTORTION_EXPLANATIONS: dict[str, str] = {
     "catastrophizing":    "User uses absolute language suggesting the worst possible outcome is inevitable.",
     "black_white":        "User's language reflects all-or-nothing thinking with no middle ground.",
@@ -107,17 +52,16 @@ DISTORTION_EXPLANATIONS: dict[str, str] = {
 # MAIN NODE FUNCTION
 # ============================================
 
-async def cognitive_distortion_node(state: MentalHealthState) -> dict:
+async def detect_cognitive_distortions(state: MentalHealthState) -> dict:
     """
-    COGNITIVE DISTORTION DETECTOR — Pure deterministic pattern analysis.
+    COGNITIVE DISTORTION DETECTOR — LLM-Based Analysis (v7.0).
 
     Process:
     1. Extract user's message text
-    2. Scan against all distortion pattern lexicons
-    3. Score by match count × distortion weight
-    4. Return primary + secondary distortions
+    2. Use LLM semantic understanding to detect distortions
+    3. Return primary + secondary distortions with confidence
 
-    No LLM involved. ~<50ms per message.
+    LLM provides nuanced, context-aware analysis.
     """
     messages = state.get("messages", [])
     if not messages:
@@ -132,70 +76,33 @@ async def cognitive_distortion_node(state: MentalHealthState) -> dict:
     emotion = state.get("fused_emotion", state.get("emotion", "neutral"))
     intensity = state.get("fused_intensity", state.get("intensity", 0.5))
     
-    # CHITCHAT/POSITIVE BYPASS: If the local model detects neutral or positive emotion
-    # with low intensity, skip the 2-second LLM API call entirely.
+    # CHITCHAT/POSITIVE BYPASS: If emotion is neutral or positive
+    # with low intensity, skip the LLM call entirely for efficiency
     if emotion in ["neutral", "joy", "surprise"] and intensity < 0.3:
-        print(f"[NODE: DISTORTION] ⏩ Skipping LLM check (positive/neutral mood detected: {emotion} {intensity:.0%})")
+        print(f"[NODE: DISTORTION] ⏩ Skipping distortion check (positive/neutral mood: {emotion} {intensity:.0%})")
         return _no_distortion_result()
 
-    print(f"\n[NODE: DISTORTION] 🧠 Scanning for cognitive distortions...")
+    print(f"\n[NODE: DISTORTION] 🧠 Analyzing for cognitive distortions using LLM...")
 
     # ============================================
-    # SCORE EACH DISTORTION TYPE
+    # LLM-BASED DISTORTION DETECTION
     # ============================================
-    distortion_scores: dict[str, float] = {}
-
-    for distortion_type, patterns in DISTORTION_PATTERNS.items():
-        match_count = sum(1 for pattern in patterns if pattern in user_message)
-        if match_count > 0:
-            # Score = (matches / total_patterns) × weight × bonus for multiple matches
-            base_score = match_count / len(patterns)
-            multi_match_bonus = min(0.2, (match_count - 1) * 0.1)
-            raw_score = (base_score + multi_match_bonus) * DISTORTION_WEIGHTS[distortion_type]
-            distortion_scores[distortion_type] = min(1.0, raw_score * 3.0)  # scale up for readability
-
-    if not distortion_scores:
-        print(f"[NODE: DISTORTION] 🔁 No keyword match — escalating to LLM classifier...")
-        llm_result = await llm_distortion_check(user_message)
-        if llm_result.get("distortion_type"):
-            print(f"[NODE: DISTORTION] 🤖 LLM found: {llm_result['distortion_type']} ({llm_result.get('confidence', 0):.0%})")
-            return {
-                "distortion_type":        llm_result.get("distortion_type"),
-                "distortion_confidence":  llm_result.get("confidence", 0.5),
-                "distortion_explanation": llm_result.get("explanation", ""),
-                "all_distortions":        llm_result.get("all_distortions", []),
-            }
-        print(f"[NODE: DISTORTION] ✅ LLM also found no distortions")
-        return _no_distortion_result()
-
-    # Sort by score descending
-    sorted_distortions = sorted(distortion_scores.items(), key=lambda x: x[1], reverse=True)
-    primary_type, primary_confidence = sorted_distortions[0]
-    all_distortions = [d[0] for d in sorted_distortions if d[1] > 0.1]
-
-    # If keyword confidence is low (ambiguous signal), validate with LLM
-    if primary_confidence < 0.4:
-        print(f"[NODE: DISTORTION] ⚠️  Low keyword confidence ({primary_confidence:.0%}) — escalating to LLM...")
-        llm_result = await llm_distortion_check(user_message)
-        if llm_result.get("distortion_type") and llm_result.get("confidence", 0) >= 0.4:
-            print(f"[NODE: DISTORTION] 🤖 LLM override: {llm_result['distortion_type']} ({llm_result.get('confidence', 0):.0%})")
-            return {
-                "distortion_type":        llm_result.get("distortion_type"),
-                "distortion_confidence":  llm_result.get("confidence", 0.5),
-                "distortion_explanation": llm_result.get("explanation", ""),
-                "all_distortions":        llm_result.get("all_distortions", []),
-            }
-
-    print(f"[NODE: DISTORTION] ⚠️  Primary: {primary_type.upper()} (conf: {primary_confidence:.0%})")
-    if len(all_distortions) > 1:
-        print(f"[NODE: DISTORTION] 🔍 Also detected: {', '.join(all_distortions[1:])}")
-
-    return {
-        "distortion_type":        primary_type,
-        "distortion_confidence":  round(primary_confidence, 3),
-        "distortion_explanation": DISTORTION_EXPLANATIONS.get(primary_type, ""),
-        "all_distortions":        all_distortions,
-    }
+    llm_result = await llm_distortion_check(user_message)
+    
+    if llm_result.get("distortion_type"):
+        print(f"[NODE: DISTORTION] ✅ Detected: {llm_result['distortion_type']} ({llm_result.get('confidence', 0):.0%})")
+        if llm_result.get("all_distortions") and len(llm_result["all_distortions"]) > 1:
+            print(f"[NODE: DISTORTION] 🔍 Also found: {', '.join(llm_result['all_distortions'][1:])}")
+        
+        return {
+            "distortion_type":        llm_result.get("distortion_type"),
+            "distortion_confidence":  llm_result.get("confidence", 0.5),
+            "distortion_explanation": llm_result.get("explanation", ""),
+            "all_distortions":        llm_result.get("all_distortions", []),
+        }
+    
+    print(f"[NODE: DISTORTION] ✅ No cognitive distortions detected")
+    return _no_distortion_result()
 
 
 def _no_distortion_result() -> dict:

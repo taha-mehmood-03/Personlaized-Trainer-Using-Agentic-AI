@@ -15,7 +15,7 @@ Decision:
 from ..agent.state import MentalHealthState
 
 
-async def crisis_router_node(state: MentalHealthState) -> dict:
+async def route_crisis(state: MentalHealthState) -> dict:
     """
     CRISIS ROUTER - Conditional routing node.
     

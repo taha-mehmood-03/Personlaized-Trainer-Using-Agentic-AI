@@ -38,7 +38,7 @@ _REFLECTION_KEYWORDS = {
 }
 
 
-async def psych_profile_updater_node(state: MentalHealthState) -> dict:
+async def update_psych_profile(state: MentalHealthState) -> dict:
     """
     PSYCHOLOGICAL PROFILE UPDATER — Persistent behavioral model update.
 

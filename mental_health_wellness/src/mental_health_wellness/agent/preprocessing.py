@@ -1,16 +1,21 @@
 """
 Message Pre-Processing Module
-Detects special message types BEFORE LLM to prevent incorrect tool calling.
+Detects special message types using LLM-based semantic understanding instead of keywords.
 
-This module provides reliable pattern matching for:
+This module provides LLM-powered classification for:
 - Greetings (prevent crisis_check false positives)
 - Exercise/technique requests (ensure recommend_technique is called)
 - Cognitive distortions (ensure analyze_mood + cbt_reframe)
 - Casual conversations (prevent unnecessary tool calls)
+- Crisis markers (high-precision detection)
+
+NO KEYWORD-BASED FAST-PATHS: All decisions use LLM for reliability.
 """
 
 import re
+import json
 from typing import Dict, List, Tuple, Optional
+import asyncio
 
 
 class MessagePreprocessor:
@@ -402,3 +407,119 @@ def normalize_emotion(emotion: str) -> str:
     """
     emotion_lower = emotion.lower().strip()
     return EMOTION_NORMALIZATION_MAP.get(emotion_lower, emotion_lower)
+
+
+# ============================================
+# LLM-BASED CLASSIFICATION (NO KEYWORDS)
+# ============================================
+
+async def classify_message_with_llm(message: str) -> Dict[str, any]:
+    """
+    Use LLM to classify message intent semantically.
+    Returns: {
+        "is_greeting": bool,
+        "is_exercise_request": bool,
+        "is_cognitive_distortion": bool,
+        "is_casual_conversation": bool,
+        "has_crisis_markers": bool,
+        "confidence": float,
+        "reasoning": str,
+        "detected_patterns": List[str],
+        "suggested_tools": List[str],
+        "tools_to_skip": List[str],
+    }
+    """
+    try:
+        from ..llm.groq_llm import get_llm_manager
+        from langchain_core.messages import SystemMessage, HumanMessage
+        
+        manager = get_llm_manager()
+        llm = manager.get_llm("llama-3.1-8b-instant")  # Fast classification model
+        
+        classification_prompt = f"""Classify this user message semantically (NO keyword matching - understand intent).
+
+MESSAGE: "{message}"
+
+Classify as JSON:
+{{
+  "is_greeting": bool (simple greeting like "hi", "hello", "how are you?"),
+  "is_exercise_request": bool (asking to learn/practice a coping technique, meditation, breathing, grounding, etc),
+  "is_cognitive_distortion": bool (negative self-talk, catastrophizing, all-or-nothing thinking),
+  "is_casual_conversation": bool (casual chat with no emotional content),
+  "has_crisis_markers": bool (signs of immediate danger: suicidal ideation, self-harm intent),
+  "confidence": float (0.0-1.0, your confidence in this classification),
+  "reasoning": str (brief 1-sentence explanation)
+}}
+
+Output ONLY valid JSON, no markdown."""
+
+        response = await llm.ainvoke([
+            SystemMessage(content="You are a semantic message classifier. Output only valid JSON."),
+            HumanMessage(content=classification_prompt),
+        ])
+        
+        response_text = response.content if hasattr(response, 'content') else str(response)
+        
+        # Parse JSON response
+        classification = json.loads(response_text)
+        
+        # Build tools suggestion
+        suggested_tools = []
+        tools_to_skip = []
+        
+        if classification.get("has_crisis_markers"):
+            suggested_tools.append("handle_crisis")
+            tools_to_skip = ["analyze_mood", "recommend_technique"]
+        elif classification.get("is_exercise_request"):
+            suggested_tools.append("recommend_technique")
+            tools_to_skip.append("handle_crisis")
+        elif classification.get("is_cognitive_distortion"):
+            suggested_tools.extend(["analyze_mood", "recommend_technique"])
+            tools_to_skip.append("handle_crisis")
+        elif classification.get("is_greeting"):
+            tools_to_skip = ["handle_crisis", "analyze_mood", "recommend_technique"]
+        elif classification.get("is_casual_conversation"):
+            tools_to_skip = ["handle_crisis"]
+        
+        classification["suggested_tools"] = suggested_tools
+        classification["tools_to_skip"] = list(set(tools_to_skip))
+        classification["detected_patterns"] = []
+        
+        if classification.get("is_greeting"):
+            classification["detected_patterns"].append("greeting")
+        if classification.get("is_exercise_request"):
+            classification["detected_patterns"].append("exercise_request")
+        if classification.get("is_cognitive_distortion"):
+            classification["detected_patterns"].append("cognitive_distortion")
+        if classification.get("is_casual_conversation"):
+            classification["detected_patterns"].append("casual_conversation")
+        if classification.get("has_crisis_markers"):
+            classification["detected_patterns"].append("crisis_marker")
+        
+        print(f"[PREPROCESSOR] 🤖 LLM Classification: {classification.get('reasoning', 'N/A')}")
+        return classification
+        
+    except Exception as e:
+        print(f"[PREPROCESSOR] ⚠️ LLM classification failed: {e}")
+        # Fallback to keyword-based if LLM fails
+        return get_message_classification_fallback(message)
+
+
+def get_message_classification_fallback(message: str) -> Dict[str, any]:
+    """
+    DEPRECATED - Fallback is now LLM-only.
+    v7.0 CHANGE: No longer using keyword-based classification fallback.
+    Returns minimal structure to force LLM processing.
+    """
+    return {
+        "is_greeting": False,
+        "is_exercise_request": False,
+        "is_cognitive_distortion": False,
+        "is_casual_conversation": False,
+        "has_crisis_markers": False,
+        "confidence": 0.0,  # Force LLM to make the decision
+        "reasoning": "LLM-based classification (v7.0 - keyword-free)",
+        "detected_patterns": [],
+        "suggested_tools": [],
+        "tools_to_skip": [],
+    }

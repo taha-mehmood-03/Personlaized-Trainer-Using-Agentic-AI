@@ -15,10 +15,37 @@ async function apiFetch<T>(
             headers: { 'Content-Type': 'application/json', ...options?.headers },
             cache: 'no-store',
         })
-        if (!res.ok) return null
+        if (!res.ok) {
+            console.error(`[API] ${options?.method ?? 'GET'} ${path} → ${res.status} ${res.statusText}`)
+            return null
+        }
         return res.json() as Promise<T>
-    } catch {
+    } catch (err) {
+        console.error(`[API] Network error for ${path}:`, err)
         return null
+    }
+}
+
+// ─── Normalise a raw session from the backend ───────────────────────────────
+// Backend returns snake_case (started_at, ended_at), frontend expects camelCase
+function normaliseSession(raw: Record<string, unknown>): Session {
+    return {
+        id: raw.id as string,
+        title: (raw.title as string | null) ?? 'Untitled Chat',
+        // started_at is the canonical DB field; fallback to createdAt if already mapped
+        createdAt: (raw.started_at as string) ?? (raw.createdAt as string) ?? new Date().toISOString(),
+        updatedAt: (raw.ended_at as string) ?? (raw.updatedAt as string) ?? (raw.started_at as string) ?? new Date().toISOString(),
+        messages: ((raw.messages as unknown[]) ?? []).map((m: unknown) => {
+            const msg = m as Record<string, unknown>
+            return {
+                role: ((msg.role as string) ?? 'assistant').toLowerCase() as 'user' | 'assistant',
+                content: msg.content as string,
+                emotion: msg.emotion as string | undefined,
+                sentiment: msg.sentiment as string | undefined,
+                timestamp: (msg.createdAt as string) ?? (msg.timestamp as string),
+                technique: (msg.technique as Message['technique']) ?? null,
+            }
+        }),
     }
 }
 
@@ -33,41 +60,35 @@ export async function ensureUser(userId: string): Promise<boolean> {
 
 // ─── Get all sessions (sidebar list) ───────────────────────────────────────
 export async function getSessions(userId: string): Promise<Session[]> {
-    const data = await apiFetch<{ sessions: Session[] }>(
+    const data = await apiFetch<{ sessions: Record<string, unknown>[] }>(
         `/user/${userId}/sessions?limit=50`
     )
-    return data?.sessions ?? []
+    return (data?.sessions ?? []).map(normaliseSession)
 }
 
 // ─── Get latest session with messages ──────────────────────────────────────
 export async function getLatestSession(
     userId: string
 ): Promise<{ messages: Message[]; sessionId: string | null }> {
-    const data = await apiFetch<{ sessions: Session[] }>(
+    const data = await apiFetch<{ sessions: Record<string, unknown>[] }>(
         `/user/${userId}/sessions?limit=1`
     )
 
-    const lastSession = data?.sessions?.[0]
-    if (!lastSession?.messages?.length) return { messages: [], sessionId: null }
+    const rawSession = data?.sessions?.[0]
+    if (!rawSession) return { messages: [], sessionId: null }
 
-    const messages: Message[] = lastSession.messages.map((m) => ({
-        role: m.role?.toLowerCase() as 'user' | 'assistant',
-        content: m.content,
-        emotion: m.emotion,
-        sentiment: m.sentiment,
-        timestamp: m.timestamp,
-        technique: m.technique ?? null,
-    }))
+    const session = normaliseSession(rawSession)
+    if (!session.messages.length) return { messages: [], sessionId: null }
 
-    return { messages, sessionId: lastSession.id }
+    return { messages: session.messages, sessionId: session.id }
 }
 
 // ─── Delete a session ───────────────────────────────────────────────────────
 export async function deleteSession(sessionId: string): Promise<boolean> {
-    const res = await apiFetch<unknown>(`/session/${sessionId}`, {
+    const res = await apiFetch<{ status: string }>(`/session/${sessionId}`, {
         method: 'DELETE',
     })
-    return res !== null
+    return res?.status === 'success'
 }
 
 // ─── Rename a session ───────────────────────────────────────────────────────
@@ -75,11 +96,11 @@ export async function renameSession(
     sessionId: string,
     title: string
 ): Promise<boolean> {
-    const res = await apiFetch<unknown>(`/session/${sessionId}/rename`, {
+    const res = await apiFetch<{ status: string }>(`/session/${sessionId}/rename`, {
         method: 'PATCH',
         body: JSON.stringify({ title }),
     })
-    return res !== null
+    return res?.status === 'success'
 }
 
 // ─── Submit technique rating ────────────────────────────────────────────────

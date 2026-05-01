@@ -16,6 +16,7 @@ export interface Message {
     // Streaming-only — never persisted
     _streaming?: boolean
     _streamingId?: number
+    _showCursor?: boolean
 }
 
 export interface Session {

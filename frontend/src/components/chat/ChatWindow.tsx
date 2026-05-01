@@ -1,17 +1,24 @@
 'use client'
 
 import { useEffect, useRef } from 'react'
-import { Loader } from 'lucide-react'
 import { Message } from '@/types'
 import { MessageBubble } from './MessageBubble'
+import { TypingIndicator } from './TypingIndicator'
+import { Sparkles } from 'lucide-react'
 
 interface ChatWindowProps {
   messages: Message[]
   isLoading: boolean
+  showTypingIndicator?: boolean
   userId: string
 }
 
-export function ChatWindow({ messages, isLoading, userId }: ChatWindowProps) {
+export function ChatWindow({ 
+  messages, 
+  isLoading, 
+  showTypingIndicator = false,
+  userId 
+}: ChatWindowProps) {
   const bottomRef = useRef<HTMLDivElement>(null)
 
   // Auto-scroll to bottom on new messages
@@ -26,15 +33,16 @@ export function ChatWindow({ messages, isLoading, userId }: ChatWindowProps) {
           <MessageBubble key={i} message={message} />
         ))}
 
-        {/* Thinking spinner */}
-        {isLoading && (
-          <div className="flex justify-start items-end gap-2.5 animate-fade-in">
-            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-purple-400 to-teal-400 flex items-center justify-center shrink-0 shadow-sm border border-purple-200">
-              <Loader className="w-4 h-4 text-white animate-spin" />
+        {/* Elegant Typing Indicator */}
+        {(showTypingIndicator || isLoading) && (
+          <div className="flex w-full justify-start items-end gap-3 animate-slide-up mb-2">
+            {/* Assistant Avatar for Typing */}
+            <div className="w-9 h-9 rounded-full bg-gradient-to-br from-purple-brand via-purple-500 to-teal-brand flex items-center justify-center shrink-0 border border-white/20 shadow-[0_4px_12px_rgba(124,58,237,0.25)]">
+              <Sparkles className="w-4 h-4 text-white" />
             </div>
-            <div className="px-4 py-3 rounded-2xl bg-white border border-slate-200 text-slate-500 text-sm rounded-tl-sm shadow-sm">
-              Thinking…
-            </div>
+            
+            {/* Glassmorphism Typing Pill */}
+            <TypingIndicator message={showTypingIndicator ? "Thinking" : "Processing"} />
           </div>
         )}
 

@@ -92,7 +92,7 @@ FALLBACK_ACTIONS = [
 # MAIN NODE FUNCTION
 # ============================================
 
-def behavioral_activation_node(state: MentalHealthState) -> dict:
+def activate_behavioral_intervention(state: MentalHealthState) -> dict:
     """
     BEHAVIORAL ACTIVATION ENGINE — Deterministic real-world micro-action recommender.
 

@@ -53,7 +53,7 @@ def _set_cached_user_data(user_id: str, data: dict):
     }
 
 
-async def intake_node(state: MentalHealthState) -> dict:
+async def load_user_context(state: MentalHealthState) -> dict:
     """
     INTAKE NODE - Build comprehensive context before agent analysis.
     

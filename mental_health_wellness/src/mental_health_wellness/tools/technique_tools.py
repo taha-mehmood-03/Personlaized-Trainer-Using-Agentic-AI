@@ -121,8 +121,18 @@ async def recommend_technique(
                 if t.id not in seen_ids:
                     candidates.append(t)
 
+        # Final Fallback for Neutral/Joy: If STILL empty, just fetch ANY active technique
+        # This handles cases where a user wants an exercise despite not feeling negative emotions.
         if not candidates:
-            print(f"[TOOL]   No techniques found for {emotion}")
+            print(f"[TOOL]   No techniques mapped to {emotion}, falling back to general techniques")
+            fallback_hits = await prisma.technique.find_many(
+                where={"isActive": True},
+                take=3
+            )
+            candidates.extend(fallback_hits)
+
+        if not candidates:
+            print(f"[TOOL]   CRITICAL: Database has no active techniques at all!")
             return []
 
         # ── Score & rank ─────────────────────────────────────────────────────

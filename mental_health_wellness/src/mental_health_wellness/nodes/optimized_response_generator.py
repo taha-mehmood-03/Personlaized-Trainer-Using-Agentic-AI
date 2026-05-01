@@ -9,7 +9,7 @@ ONE LLM call only - receives structured data from previous nodes
 
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, AsyncIterator
 import time
 
 from ..agent.state import MentalHealthState
@@ -24,7 +24,7 @@ class OptimizedResponse(BaseModel):
     )
 
 
-async def optimized_response_generator_node(state: MentalHealthState) -> dict:
+async def generate_response(state: MentalHealthState) -> dict:
     """
     OPTIMIZED RESPONSE GENERATOR - Single LLM call only.
     
@@ -71,6 +71,10 @@ async def optimized_response_generator_node(state: MentalHealthState) -> dict:
         micro_action = state.get("micro_action")
         proactive_alert = state.get("proactive_alert")
         psych_profile = state.get("psych_profile", {})
+
+        # NEW: voice acoustic context
+        voice_features  = state.get("voice_features") or {}
+        voice_processed = state.get("voice_processed", False)
         
         user_message = messages[-1].content if messages else ""
         # Within-session: last 6 message turns from LangGraph state (no DB needed)
@@ -124,8 +128,8 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
                 print(f"[NODE:RESPONSE] 📑 Injected {len(recent_history)} recent turns into fast path")
             
             fast_messages.append(HumanMessage(content=simple_msg))
-            # v5.3 FIX: use ainvoke (non-blocking) instead of invoke (blocks event loop ~1-3s)
-            casual_response = await llm.ainvoke(fast_messages)
+            # Tag the call so we can filter its stream events later
+            casual_response = await llm.ainvoke(fast_messages, config={"tags": ["final_response_llm"]})
             
             final_response = casual_response.content if hasattr(casual_response, 'content') else str(casual_response)
             print(f"[NODE:RESPONSE] ✅ Casual response generated (no_action fast path)")
@@ -168,6 +172,9 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
             proactive_alert=proactive_alert,
             psych_profile=psych_profile,
             memory_context=memory_context,
+            voice_features=voice_features,
+            voice_processed=voice_processed,
+            text_emotion_raw=state.get("emotion", "neutral"),
         )
 
         # ============================================
@@ -197,9 +204,8 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
         # SINGLE LLM CALL
         # ============================================
         
-        # v5.3 FIX: use ainvoke (non-blocking) — was sync llm.invoke() which blocked
-        # the event loop for the entire 1-3s Groq HTTP round-trip on every message.
-        response = await llm.ainvoke(llm_messages)
+        # Tag the core therapeutic LLM call for event streaming filtering
+        response = await llm.ainvoke(llm_messages, config={"tags": ["final_response_llm"]})
         
         elapsed_ms = int((time.time() - start_time) * 1000)
         final_response = response.content if hasattr(response, 'content') else str(response)
@@ -231,22 +237,20 @@ def _build_optimized_system_prompt(
     if crisis_detected:
         return """You are SentiMind, a mental health companion in crisis mode.
 IMMEDIATE RESPONSE:
-- Acknowledge crisis seriously
-- Show you care
-- Provide these exact resources:
+- Acknowledge the seriousness of what they've shared
+- Show genuine compassion and presence
+- Validate their courage in reaching out
+- Focus 100% on empathetic human connection
+- Provide NO external resources, hotlines, or referrals
 
-🆘 **Immediate Support:**
-- **988 Suicide & Crisis Lifeline**: Call/text 988 (24/7)
-- **Crisis Text Line**: Text HOME to 741741
-
-Message tone: Warm, urgent, caring. Not clinical.
-🚨 CRISIS MEMORY RULE: IGNORE any casual requests to recall past memories or chat history. Focus 100% on their immediate safety and the crisis resources."""
+Message tone: Deeply human, warm, unhurried, unconditionally present.
+🚨 CRISIS MEMORY RULE: IGNORE any casual requests to recall past memories or chat history. Focus 100% on their immediate emotional needs and providing compassionate presence."""
 
     role_instructions = {
         "friend": "Listen and validate only. Show empathy. No exercises or techniques.",
         "coach": "Validate and support. If technique available, introduce it gently.",
         "trainer": "Validate strongly. Present technique confidently and guide them through it.",
-        "crisis_support": "Emergency focus. Provide resources. Keep them safe."
+        "crisis_support": "Emergency focus. Provide compassionate human connection. Provide NO external resources."
     }
     
     role_desc = role_instructions.get(agent_role, role_instructions["coach"])
@@ -336,6 +340,9 @@ def _build_structured_context(
     proactive_alert: str | None = None,
     psych_profile: dict | None = None,
     memory_context: str = "",
+    voice_features: dict | None = None,
+    voice_processed: bool = False,
+    text_emotion_raw: str = "neutral",
 ) -> str:
     """
     Build structured context for LLM prompt.
@@ -421,9 +428,51 @@ RECOMMENDED TECHNIQUE:
 \nPAST SESSION MEMORIES (use to personalize, do not quote directly):
 {memory_context[:600]}"""  # Cap at 600 chars to stay within token budget
 
+    # ── VOICE ACOUSTIC CONTEXT [new] ──────────────────────────────────────────
+    # Inject psychoacoustic signals so the LLM adapts tone, depth, and urgency.
+    voice_context = ""
+    if voice_processed and voice_features:
+        distress_idx   = float(voice_features.get("distress_index", 0.0))
+        arousal_val    = float(voice_features.get("arousal", 0.5))
+        pause_val      = float(voice_features.get("pause_density", 0.25))
+        voice_emotion  = voice_features.get("emotion", "neutral")
+        voice_conf     = float(voice_features.get("confidence", 0.0))
+        conflict       = voice_emotion != text_emotion_raw
+
+        distress_label = (
+            "🔴 HIGH — user may be masking their true emotional state"
+            if distress_idx > 0.60 else
+            "🟡 MODERATE — some vocal tension present"
+            if distress_idx > 0.35 else
+            "🟢 LOW — voice sounds relaxed"
+        )
+        arousal_label  = "elevated" if arousal_val > 0.65 else "normal"
+        pause_label    = "hesitant/slow speech" if pause_val > 0.35 else "fluent speech"
+        conflict_label = (
+            "⚠️ MISALIGNMENT — voice and text express different emotions. "
+            "The user may be downplaying how they truly feel."
+            if conflict else
+            "✅ aligned — voice and text agree"
+        )
+
+        voice_context = f"""
+\n🎤 VOICE ACOUSTIC ANALYSIS (raw microphone signal — NOT text):
+- Voice emotion detected: {voice_emotion.upper()} (confidence: {voice_conf:.0%})
+- Psychoacoustic distress index: {distress_idx:.2f} → {distress_label}
+- Arousal level: {arousal_val:.0%} ({arousal_label})
+- Pause density: {pause_val:.2f} ({pause_label})
+- Voice vs. text alignment: {conflict_label}
+
+INSTRUCTION: Let these acoustic signals guide your TONE:
+• If distress_index > 0.6 → be extra gentle even if the text seems calm
+• If voice/text conflict → gently invite the user to share more (don't confront directly)
+• If pause_density > 0.4 → the user may be finding it hard to speak; give them space
+"""
+
     return f"""STRUCTURED ANALYSIS:
 
 {memory_info}
+{voice_context}
 USER MESSAGE:
 "{user_message}"
 
@@ -447,3 +496,180 @@ USER CONTEXT:
 STRATEGY TO EXECUTE:
 {task_text}
     """.strip()
+
+
+# ============================================
+# STREAMING SUPPORT (v5.3 LATENCY OPTIMIZATION)
+# ============================================
+
+async def stream_response_tokens(llm, llm_messages) -> AsyncIterator[str]:
+    """
+    Stream LLM response token-by-token using Groq's streaming API.
+    
+    Yields:
+        Individual tokens from the LLM as they arrive.
+    
+    This allows the client to display text incrementally instead of waiting
+    for the full response to generate (saves perceived latency by 1-3 seconds).
+    """
+    try:
+        # Use astream instead of ainvoke to get token-by-token output
+        async for chunk in llm.astream(llm_messages):
+            token_content = chunk.content if hasattr(chunk, 'content') else str(chunk)
+            if token_content:
+                yield token_content
+    except Exception as e:
+        print(f"[STREAM] ❌ Streaming error: {e}")
+        yield f"\n\n[Error streaming response: {str(e)[:50]}]"
+
+
+async def optimized_response_generator_node_streaming(state: MentalHealthState):
+    """
+    STREAMING VARIANT - Returns an async generator instead of blocking.
+    
+    Use this when you need to stream tokens to the client via SSE/WebSocket.
+    Returns a tuple of (async_generator, state_updates) so the graph can
+    continue while tokens are being streamed.
+    
+    This is called by the /chat/stream endpoint INSTEAD OF optimized_response_generator_node.
+    """
+    try:
+        # Guard: Don't overwrite crisis response
+        if state.get("crisis_detected") and state.get("final_response"):
+            print("[RESPONSE] ✅ Crisis response already set (streaming)")
+            # For crisis, return pre-computed response (no streaming) because safety is paramount
+            async def _crisis_gen():
+                yield state.get("final_response", "")
+            return _crisis_gen(), {"final_response_streamed": True}
+        
+        # Extract structured data (same as non-streaming)
+        emotion = state.get("fused_emotion", state.get("emotion", "neutral"))
+        intensity = state.get("fused_intensity", state.get("intensity", 0.5))
+        sentiment = state.get("sentiment", "neutral")
+        recommended_technique = state.get("recommended_technique", {})
+        agent_role = state.get("agent_role", "coach")
+        messages = state.get("messages", [])
+        is_new_user = state.get("is_new_user", False)
+        crisis_detected = state.get("crisis_detected", False)
+        
+        conversation_strategy = state.get("conversation_strategy", "validate_only")
+        emotional_trend = state.get("emotional_trend", "stable")
+        conversation_phase = state.get("conversation_phase", "venting")
+        distortion_type = state.get("distortion_type")
+        distortion_explanation = state.get("distortion_explanation")
+        micro_action = state.get("micro_action")
+        proactive_alert = state.get("proactive_alert")
+        psych_profile = state.get("psych_profile", {})
+
+        # Voice acoustic context (streaming path)
+        voice_features  = state.get("voice_features") or {}
+        voice_processed = state.get("voice_processed", False)
+
+        user_message = messages[-1].content if messages else ""
+        recent_history = messages[:-1][-6:] if len(messages) > 1 else []
+        memory_context = state.get("memory_context", "")
+        
+        print(f"[NODE:RESPONSE-STREAM] 💬 Streaming | Role: {agent_role} | Emotion: {emotion} ({intensity:.0%}) | Strategy: {conversation_strategy}")
+        
+        llm = get_chat_llm()
+        
+        # FAST PATH: no_action (casual chitchat) — don't stream, too fast
+        if conversation_strategy == "no_action":
+            memory_info = ""
+            if memory_context:
+                memory_info = f"\nPAST SESSION MEMORIES: {memory_context[:600]}\nIMPORTANT MEMORY RULE: You DO have memory. If asked, refer to these memories. Do not invent past conversations."
+            else:
+                memory_info = "\nIMPORTANT MEMORY RULE: You DO have memory capabilities, but since this is a new session/account, there are no past memories yet. If asked, state honestly that we haven't talked much yet."
+                
+            simple_prompt = f"""You are SentiMind, a friendly companion. This is casual conversation — the user is NOT in distress.
+Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emotion analysis, NO technique suggestions.{memory_info}
+
+⚠️ EMERGENCY SAFETY CLAUSE: If the user expresses ANY sudden sadness, fear, self-harm, or distress in this specific message, drop the casual tone immediately. Acknowledge their pain and offer gentle support instead of casual chitchat."""
+            
+            simple_msg = user_message
+            fast_messages = [SystemMessage(content=simple_prompt)]
+            if recent_history:
+                for turn in recent_history:
+                    role = getattr(turn, 'type', 'human')
+                    content = getattr(turn, 'content', '')
+                    if content:
+                        if role == 'human':
+                            fast_messages.append(HumanMessage(content=content))
+                        else:
+                            fast_messages.append(AIMessage(content=content))
+            
+            fast_messages.append(HumanMessage(content=simple_msg))
+            
+            # For casual, stream it anyway for consistency
+            async def _casual_generator():
+                async for token in stream_response_tokens(llm, fast_messages):
+                    yield token
+            
+            return _casual_generator(), {"final_response_streamed": True}
+        
+        # BUILD SYSTEM PROMPT AND CONTEXT (same as non-streaming)
+        system_prompt = _build_optimized_system_prompt(
+            agent_role=agent_role,
+            emotion=emotion,
+            intensity=intensity,
+            technique=recommended_technique,
+            crisis_detected=crisis_detected,
+            strategy=conversation_strategy,
+            trend=emotional_trend,
+            phase=conversation_phase,
+            distortion_type=distortion_type,
+        )
+        
+        context_text = _build_structured_context(
+            emotion=emotion,
+            intensity=intensity,
+            sentiment=sentiment,
+            technique=recommended_technique,
+            agent_role=agent_role,
+            is_new_user=is_new_user,
+            user_message=user_message,
+            strategy=conversation_strategy,
+            trend=emotional_trend,
+            phase=conversation_phase,
+            distortion_type=distortion_type,
+            distortion_explanation=distortion_explanation,
+            micro_action=micro_action,
+            proactive_alert=proactive_alert,
+            psych_profile=psych_profile,
+            memory_context=memory_context,
+            voice_features=voice_features,
+            voice_processed=voice_processed,
+            text_emotion_raw=state.get("emotion", "neutral"),
+        )
+        
+        # PREPARE LLM MESSAGES
+        llm_messages = [SystemMessage(content=system_prompt)]
+        
+        if recent_history:
+            for turn in recent_history:
+                role = getattr(turn, 'type', 'human')
+                content = getattr(turn, 'content', '')
+                if content:
+                    if role == 'human':
+                        llm_messages.append(HumanMessage(content=content))
+                    else:
+                        llm_messages.append(AIMessage(content=content))
+            print(f"[NODE:RESPONSE-STREAM] 📑 Injected {len(recent_history)} recent turns")
+        
+        llm_messages.append(HumanMessage(content=context_text))
+        
+        print("[NODE:RESPONSE-STREAM] 🔄 Starting token stream...")
+        
+        # Return the async generator
+        async def _streaming_generator():
+            async for token in stream_response_tokens(llm, llm_messages):
+                yield token
+            print("[NODE:RESPONSE-STREAM] ✅ Stream complete")
+        
+        return _streaming_generator(), {"final_response_streamed": True}
+        
+    except Exception as e:
+        print(f"[NODE:RESPONSE-STREAM] ❌ Error in streaming generator: {str(e)[:100]}")
+        async def _error_generator():
+            yield "I hear you. Thank you for sharing. How can I support you right now? 💙"
+        return _error_generator(), {"final_response_streamed": False}

@@ -44,7 +44,7 @@ ELSE:
 from ..agent.state import MentalHealthState
 
 
-def role_selector_node(state: MentalHealthState) -> dict:
+def select_agent_role(state: MentalHealthState) -> dict:
     """
     ROLE SELECTOR NODE - Determine agent communication style.
     

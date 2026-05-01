@@ -14,6 +14,7 @@ import { ChatWindow } from '@/components/chat/ChatWindow'
 import { ChatInput } from '@/components/chat/ChatInput'
 import { VoiceIndicator } from '@/components/chat/VoiceIndicator'
 import { TechniquePanel } from '@/components/layout/TechniquePanel'
+import { LocationConsentModal } from '@/components/crisis/LocationConsentModal'
 
 interface ChatLayoutProps {
   userId: string
@@ -29,6 +30,8 @@ const WELCOME_MESSAGE: Message = {
 }
 
 export function ChatLayout({ userId, initialSessions, initialMessages, initialSessionId, children }: ChatLayoutProps) {
+  const [isConsentComplete, setIsConsentComplete] = useState(false)
+
   // Extract state management to custom hooks
   const {
     sessions,
@@ -46,6 +49,7 @@ export function ChatLayout({ userId, initialSessions, initialMessages, initialSe
     messages,
     setMessages,
     isStreaming,
+    showTypingIndicator,
     latestEmotion,
     latestSentiment,
     activeTechnique,
@@ -81,11 +85,11 @@ export function ChatLayout({ userId, initialSessions, initialMessages, initialSe
     }
   }, [initialMessages, initialSessionId, setMessages, clearMessages, setCurrentSessionId])
 
-  const handleSend = (text: string) => {
+  const handleSend = (text: string, audioData?: string) => {
     sendMessage(text, currentSessionId, (sid) => {
       setCurrentSessionId(sid)
       refreshSessions()
-    })
+    }, audioData)
   }
 
   // Handle sidebar selections overriding local chat messages state
@@ -104,7 +108,11 @@ export function ChatLayout({ userId, initialSessions, initialMessages, initialSe
   }
 
   return (
-    <div className="flex flex-col h-screen w-full overflow-hidden bg-slate-50">
+    <div className="flex flex-col h-screen w-full overflow-hidden bg-slate-50 relative">
+      {!isConsentComplete && (
+        <LocationConsentModal onComplete={() => setIsConsentComplete(true)} />
+      )}
+      
       <CrisisBanner />
 
       <div className="flex flex-1 overflow-hidden">
@@ -116,7 +124,11 @@ export function ChatLayout({ userId, initialSessions, initialMessages, initialSe
             isLoading={loadingSessions}
             onNewSession={() => { startNewSession(); clearMessages(WELCOME_MESSAGE) }}
             onSelectSession={handleSelectSession}
-            onDeleteSession={(id) => { removeSession(id); clearMessages(WELCOME_MESSAGE) }}
+            onDeleteSession={async (id) => {
+              await removeSession(id)
+              // Always clear chat view + show welcome after any deletion
+              clearMessages(WELCOME_MESSAGE)
+            }}
             onRenameSession={updateSessionName}
           />
         </div>
@@ -135,7 +147,12 @@ export function ChatLayout({ userId, initialSessions, initialMessages, initialSe
             </div>
           </div>
 
-          <ChatWindow messages={messages} isLoading={isStreaming} userId={userId} />
+          <ChatWindow 
+            messages={messages} 
+            isLoading={isStreaming} 
+            showTypingIndicator={showTypingIndicator}
+            userId={userId} 
+          />
 
           <ChatInput
             isLoading={isStreaming}

@@ -34,7 +34,7 @@ _EMOTION_TO_PRISMA = {
 }
 
 
-async def outcome_tracker_node(state: MentalHealthState) -> dict:
+async def track_outcome(state: MentalHealthState) -> dict:
     """
     OUTCOME TRACKER NODE - Measure technique effectiveness.
 

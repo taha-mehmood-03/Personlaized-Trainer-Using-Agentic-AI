@@ -11,22 +11,22 @@ export function MessageBubble({ message }: MessageBubbleProps) {
   const isUser = message.role === 'user'
 
   return (
-    <div className={`flex w-full ${isUser ? 'justify-end' : 'justify-start'}`}>
-      <div className={`flex max-w-[85%] sm:max-w-[75%] gap-3 items-end ${isUser ? 'flex-row-reverse' : 'flex-row'}`}>
+    <div className={`flex w-full mb-2 ${isUser ? 'justify-end' : 'justify-start'}`}>
+      <div className={`flex max-w-[88%] sm:max-w-[78%] gap-3 items-end ${isUser ? 'flex-row-reverse' : 'flex-row'}`}>
         {/* Avatar */}
-        <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 border shadow-sm select-none ${
+        <div className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 border select-none transition-transform duration-500 hover:scale-105 ${
           isUser
-            ? 'bg-slate-100 border-slate-200 text-slate-500'
-            : 'bg-gradient-to-br from-purple-500 to-teal-400 border-purple-400/50 text-white'
+            ? 'bg-gradient-to-tr from-slate-50 to-slate-100 border-slate-200 text-slate-500 shadow-sm'
+            : 'bg-gradient-to-br from-purple-brand via-purple-500 to-teal-brand border-white/20 text-white shadow-[0_4px_12px_rgba(124,58,237,0.25)]'
         }`}>
-          {isUser ? <span className="text-xs font-semibold">ME</span> : <Sparkles className="w-4 h-4" />}
+          {isUser ? <span className="text-xs font-bold tracking-tight">ME</span> : <Sparkles className="w-4 h-4" />}
         </div>
 
         {/* Bubble */}
-        <div className={`relative px-4 py-3 rounded-2xl shadow-sm text-sm ${
+        <div className={`relative px-5 py-3.5 rounded-2xl text-[15px] leading-relaxed transition-all duration-300 animate-slide-up ${
           isUser
-            ? 'bg-gradient-to-br from-purple-600 to-purple-500 text-white rounded-br-sm'
-            : 'bg-white border border-slate-200 text-slate-800 rounded-bl-sm'
+            ? 'bg-gradient-to-br from-purple-brand to-teal-500 text-white rounded-br-sm shadow-[0_4px_15px_rgba(124,58,237,0.15)]'
+            : 'bg-white/90 backdrop-blur-xl border border-white/60 text-slate-800 rounded-bl-sm shadow-[0_8px_30px_rgb(0,0,0,0.04)] hover:shadow-[0_8px_30px_rgb(0,0,0,0.06)]'
         }`}>
           {/* Audio feature info for user */}
           {isUser && message.voiceEmotion && (
@@ -52,12 +52,12 @@ export function MessageBubble({ message }: MessageBubbleProps) {
           )}
 
           {/* Markdown-like simple parsing for bolding */}
-          <div className="leading-relaxed whitespace-pre-wrap break-words">
+          <div className="whitespace-pre-wrap break-words tracking-tight">
             {message.content.split('**').map((chunk, i) => (
-              i % 2 === 1 ? <strong key={i} className="font-bold">{chunk}</strong> : chunk
+              i % 2 === 1 ? <strong key={i} className={`font-semibold ${isUser ? 'text-white' : 'text-slate-900'}`}>{chunk}</strong> : chunk
             ))}
-            {message._streaming && (
-              <span className="inline-block w-1.5 h-4 ml-1 bg-current animate-pulse align-middle" />
+            {message._streaming && message._showCursor && (
+              <span className="inline-block w-1.5 h-4 ml-1 bg-current align-middle rounded-full animate-pulse opacity-80 shadow-[0_0_8px_currentColor]" />
             )}
           </div>
         </div>

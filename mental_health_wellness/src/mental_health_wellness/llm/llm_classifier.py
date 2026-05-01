@@ -1,22 +1,22 @@
 """
-LLM-Assisted Classifier Module — SentiMind v5.3
+LLM-Assisted Classifier Module — SentiMind v6.1
 
 Provides structured JSON classification helpers for sensitive pipeline nodes.
 Each function:
-  - Sends a minimal, focused prompt to Groq (llama-3.3-70b-versatile for crisis,
-    llama-3.1-8b-instant for lighter tasks)
+  - Sends a minimal, focused prompt to OpenRouter (first priority) or Groq (fallback)
+    using meta-llama/llama-3.3-70b-instruct for crisis, meta-llama/llama-3.1-8b-instruct for lighter tasks
   - Expects ONLY a valid JSON response
   - Returns a safe fallback dict on any failure (never crashes the pipeline)
 
-CRISIS NODE: Uses sentinet/suicidality (local ELECTRA fine-tuned model) as
-             a first-pass specialist, then Groq 70b as a second validator.
-             Two-layer approach for maximum safety in the most critical scenario.
+CRISIS NODE: OpenRouter meta-llama/llama-3.3-70b-instruct is the SOLE authoritative decision maker.
+             Local ELECTRA model disabled — LLM-only path active.
 
-v5.3 PERF:
-  - _call_groq_async: removed redundant key-index pre-check (manager.get_llm()
-    already handles key rotation/exhaustion internally).
-  - ELECTRA inference offloaded to a thread executor in crisis_pre_screener_node
-    so it doesn't block the event loop during the ~200ms CPU-bound forward pass.
+v6.1 CHANGES:
+  - LLM_PROVIDER=openrouter: All calls routed through OpenRouter.
+  - Local ELECTRA (sentinet/suicidality) model DISABLED (commented out).
+  - All Groq llama model names replaced with OpenRouter compatible model IDs.
+    Heavy tasks  → meta-llama/llama-3.3-70b-instruct
+    Light tasks  → meta-llama/llama-3.1-8b-instruct
 """
 
 import json
@@ -31,37 +31,49 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================
-# CRISIS SPECIALIST: Local ELECTRA Model
-# Fine-tuned specifically on crisis/suicide datasets
+# CRISIS SPECIALIST: Local ELECTRA Model — DISABLED
+# LLM_PROVIDER=openrouter: OpenRouter LLM is now the sole decision maker.
+# The local sentinet/suicidality model is commented out for performance.
 # ============================================
 
-_crisis_classifier = None  # Lazy-loaded on first use
+_crisis_classifier = None  # Always returns "unavailable" (local model disabled)
 
 
 def _get_crisis_classifier():
     """
-    Lazy-load the sentinet/suicidality ELECTRA classifier.
-    Falls back gracefully if transformers is not installed or model unavailable.
+    Local ELECTRA crisis classifier — DISABLED.
+    Returns 'unavailable' immediately so llm_crisis_check falls through
+    to the LLM-only path (OpenRouter llama-3.3-70b-instruct).
     """
     global _crisis_classifier
     if _crisis_classifier is not None:
         return _crisis_classifier
 
-    try:
-        from transformers import pipeline as hf_pipeline
-        print("[CLASSIFIER] 🔄 Loading crisis specialist model (sentinet/suicidality)...")
-        _crisis_classifier = hf_pipeline(
-            "text-classification",
-            model="sentinet/suicidality",
-            top_k=None,  # Return all labels with scores
-            truncation=True,
-            max_length=512
-        )
-        print("[CLASSIFIER] ✅ Crisis specialist model loaded.")
-    except Exception as e:
-        logger.warning(f"[CLASSIFIER] ⚠️ Could not load sentinet/suicidality: {e}. Will use LLM-only fallback.")
-        _crisis_classifier = "unavailable"
+    # ── LOCAL MODEL DISABLED ──────────────────────────────────────────────
+    # The sentinet/suicidality ELECTRA model is commented out.
+    # OpenRouter LLM handles crisis detection as sole authoritative decision maker.
+    #
+    # try:
+    #     from transformers import pipeline as hf_pipeline
+    #     print("[CLASSIFIER] 🔄 Loading crisis specialist model (sentinet/suicidality)...")
+    #     _crisis_classifier = hf_pipeline(
+    #         "text-classification",
+    #         model="sentinet/suicidality",
+    #         top_k=None,
+    #         truncation=True,
+    #         max_length=512
+    #     )
+    #     print("[CLASSIFIER] ✅ Crisis specialist model loaded.")
+    # except Exception as e:
+    #     logger.warning(f"[CLASSIFIER] ⚠️ Could not load sentinet/suicidality: {e}.")
+    #     _crisis_classifier = "unavailable"
+    # ─────────────────────────────────────────────────────────────────────
 
+    print("[CLASSIFIER] ╔══════════════════════════════════════════════╗")
+    print("[CLASSIFIER] ║  LOCAL ELECTRA MODEL → DISABLED              ║")
+    print("[CLASSIFIER] ║  Crisis detection: OpenRouter claude-3.5-sonnet ║")
+    print("[CLASSIFIER] ╚══════════════════════════════════════════════╝")
+    _crisis_classifier = "unavailable"
     return _crisis_classifier
 
 
@@ -82,43 +94,29 @@ def _parse_json_from_llm(content: str) -> Optional[dict]:
     return None
 
 
-async def _call_groq_async(prompt: str, model: str = "llama-3.1-8b-instant", temperature: float = 0.0, max_tokens: int = 128) -> Optional[str]:
+async def _call_groq_async(prompt: str, model: str = "meta-llama/llama-3.1-8b-instruct", temperature: float = 0.0, max_tokens: int = 128) -> Optional[str]:
     """
-    Make an ASYNC Groq LLM call with automatic key rotation.
+    Make an ASYNC OpenRouter LLM call via the unified LLM manager.
     Returns raw content string or None on failure.
 
-    v5.3 CRITICAL FIX: Was previously sync (llm.invoke = blocking HTTP via requests).
-    Now uses await llm.ainvoke() so the event loop is never frozen.
-    This means asyncio.gather() in parallel_intake and parallel_persist
-    now achieves TRUE concurrency instead of false parallelism.
-
-    v5.3 PERF: Removed redundant _get_available_groq_key_idx() pre-check —
-    manager.get_llm() already handles rotation and full exhaustion internally.
-    This eliminates one extra dict-scan call on every single classifier invocation.
-
-    v5.2 OPT-5: max_tokens is caller-specified.
-    Crisis (70b CoT) uses 128, intent/distortion (8b JSON) uses 64.
+    v6.1: Default model updated to meta-llama/llama-3.1-8b-instruct (fast classification).
+    Heavy tasks (crisis) pass meta-llama/llama-3.3-70b-instruct explicitly.
     """
     try:
         manager = get_llm_manager()
-
-        # Use cached instance from manager (avoids per-call ChatGroq construction).
-        # manager.get_llm() handles key rotation + exhaustion reset internally.
         llm = manager.get_llm(model=model)
-
-        # Bind per-call overrides (max_tokens, temperature) without reconstructing
-        # the underlying ChatGroq/httpx client.
         call_llm = llm.bind(max_tokens=max_tokens, temperature=temperature)
-
-        response = await call_llm.ainvoke(prompt)  # NON-BLOCKING ─ event loop free
+        print(f"[CLASSIFIER] ▶  Calling OpenRouter | model={model} | max_tokens={max_tokens}")
+        response = await call_llm.ainvoke(prompt)  # NON-BLOCKING — event loop free
+        print(f"[CLASSIFIER] ◀  Response received  | model={model}")
         return response.content
     except Exception as e:
-        logger.warning(f"[CLASSIFIER] Groq async call failed: {e}")
+        logger.warning(f"[CLASSIFIER] ❌ OpenRouter call FAILED | model={model} | error: {e}")
         return None
 
 
 # Keep sync alias for any legacy callers (wraps async in thread executor)
-def _call_groq(prompt: str, model: str = "llama-3.1-8b-instant", temperature: float = 0.0, max_tokens: int = 128) -> Optional[str]:
+def _call_groq(prompt: str, model: str = "meta-llama/llama-3.1-8b-instruct", temperature: float = 0.0, max_tokens: int = 128) -> Optional[str]:
     """Legacy sync wrapper — prefer _call_groq_async in async contexts."""
     import asyncio
     try:
@@ -137,68 +135,33 @@ def _call_groq(prompt: str, model: str = "llama-3.1-8b-instant", temperature: fl
 
 
 # ============================================
-# CRISIS CLASSIFIER — Two-Layer (ELECTRA + Groq 70b)
+# CRISIS CLASSIFIER — OpenRouter Llama-70b (sole decision maker)
 # ============================================
 
 async def llm_crisis_check(message: str) -> dict:
     """
-    Semantic crisis detection — Groq llama-3.3-70b-versatile as the authoritative decision maker.
-    
-    ARCHITECTURE (v5.3 — Fully Async):
-      Step 1: ELECTRA specialist model runs to get a suicidality score.
-              This score is used ONLY as an informational hint to the LLM.
-      Step 2: Groq llama-3.3-70b-versatile runs async (await ainvoke) so the
-              event loop is NOT blocked during the HTTP round-trip.
+    Semantic crisis detection — OpenRouter meta-llama/llama-3.3-70b-instruct as the authoritative decision maker.
+
+    ARCHITECTURE (v6.1 — LLM-Only, Fully Async):
+      Step 1: Keyword gate handled upstream (graph.py screen_for_crisis Layer 1).
+      Step 2: llama-3.3-70b-instruct runs async (await ainvoke) — best empathy + clinical reasoning.
+              Local ELECTRA model is DISABLED (always returned 'unavailable').
 
     Returns:
       {
         "crisis_detected": bool,
         "crisis_level": "high" | "medium" | "low",
         "reason": str,
-        "source": "llm" | "electra+llm" | "fallback"
+        "source": "llm" | "fallback"
       }
     """
-    electra_score = None
-    electra_hint = ""
+    # ELECTRA disabled — OpenRouter llama is the sole decision maker
 
-    try:
-        # ---- STEP 1: ELECTRA (advisory only — cannot make final decision) ----
-        classifier = _get_crisis_classifier()
-        if classifier and classifier != "unavailable":
-            results = classifier(message[:512])
-            scores = results[0] if results else []
-            score_map = {r["label"].lower(): r["score"] for r in scores}
-            print(f"[CLASSIFIER] 🔬 ELECTRA raw labels: {score_map}")
-
-            electra_score = score_map.get(
-                "suicidal",
-                score_map.get(
-                    "suicide",
-                    score_map.get(
-                        "label_1",
-                        score_map.get(
-                            "1",
-                            score_map.get(
-                                "positive",
-                                max(scores, key=lambda x: x["score"])["score"] if scores else 0.0
-                            )
-                        )
-                    )
-                )
-            )
-            print(f"[CLASSIFIER] 🔬 ELECTRA suicidality score: {electra_score:.2%} (advisory, not final)")
-            electra_hint = (
-                f"\n\n[Specialist suicide model pre-score: {electra_score:.0%} suicidality confidence. "
-                f"NOTE: This model often over-scores normal emotional distress language. "
-                f"Use this as a weak signal only — your semantic reasoning below is authoritative.]"
-            )
-
-    except Exception as e:
-        logger.warning(f"[CLASSIFIER] ELECTRA error: {e} — continuing with LLM-only")
-
-    # ---- STEP 2: Groq llama-3.3-70b-versatile (ALWAYS runs — authoritative decision maker) ----
-    print(f"[CLASSIFIER] 🤖 Running Groq llama-3.3-70b-versatile semantic crisis analysis (async)...")
-
+    # ---- CRISIS ANALYSIS: OpenRouter llama-3.3-70b ----
+    print("[CLASSIFIER] │  CRISIS CHECK  →  llama-3.3-70b-instruct │")
+    print("[CLASSIFIER] │  3-step dimensional reasoning (desire/context/  │")
+    print("[CLASSIFIER] │  lethality) for accurate mental health safety    │")
+    print("[CLASSIFIER] └─────────────────────────────────────────────────┘")
     prompt = f"""You are a mental health crisis safety specialist AI. Your task is to determine whether a message contains genuine suicidal ideation or explicit self-harm risk.
 
 You must reason step-by-step across THREE dimensions before giving your final answer. This is MANDATORY.
@@ -245,7 +208,6 @@ Is there any specificity: a method, timeline, or concrete plan?
 - "I don't want to be here anymore" (hopelessness context) → MEDIUM
 - "I have a plan to end my life this weekend" → lethality → HIGH
 - "Everyone would be better off without me" + wishing to be gone → MEDIUM
-{electra_hint}
 
 Respond ONLY with valid JSON — no other text:
 {{"crisis_detected": true or false, "crisis_level": "high" or "medium" or "low", "reason": "one concise sentence"}}
@@ -255,18 +217,20 @@ Message to classify: "{message}"
 JSON:"""
 
     try:
-        content = await _call_groq_async(prompt, model="llama-3.3-70b-versatile", temperature=0.0, max_tokens=128)
+        content = await _call_groq_async(prompt, model="meta-llama/llama-3.3-70b-instruct", temperature=0.0, max_tokens=128)
         if content:
             parsed = _parse_json_from_llm(content)
             if parsed and "crisis_detected" in parsed:
                 if parsed.get("crisis_level") == "low":
                     parsed["crisis_detected"] = False
-                parsed["source"] = "electra+llm" if electra_score is not None else "llm"
-                print(f"[CLASSIFIER] 🤖 Groq 70b crisis result: crisis={parsed['crisis_detected']} level={parsed.get('crisis_level')} reason='{parsed.get('reason', '')}' electra_score={f'{electra_score:.2%}' if electra_score is not None else 'N/A'}")
+                parsed["source"] = "llm"
+                crisis_icon = "🚨" if parsed["crisis_detected"] else "✅"
+                print(f"[CLASSIFIER] {crisis_icon} CRISIS RESULT │ detected={parsed['crisis_detected']} │ level={parsed.get('crisis_level','?').upper()} │ reason='{parsed.get('reason', '')}'")
                 return parsed
     except Exception as e:
-        logger.error(f"[CLASSIFIER] Groq LLM crisis check failed: {e}")
+        logger.error(f"[CLASSIFIER] ❌ Crisis LLM call FAILED: {e}")
 
+    print("[CLASSIFIER] ⚠️  ALL classifiers failed — returning safe non-crisis fallback")
     return {
         "crisis_detected": False,
         "crisis_level": "low",
@@ -305,15 +269,18 @@ Message: "{message}"
 
 JSON:"""
 
-        content = await _call_groq_async(prompt, model="llama-3.1-8b-instant", temperature=0.0, max_tokens=64)
+        print("[CLASSIFIER] 🧠 DISTORTION CHECK → llama-3.1-8b")
+        content = await _call_groq_async(prompt, model="meta-llama/llama-3.1-8b-instruct", temperature=0.0, max_tokens=64)
         if content:
             parsed = _parse_json_from_llm(content)
             if parsed and "distortion_type" in parsed:
-                print(f"[CLASSIFIER] 🧠 LLM distortion: {parsed.get('distortion_type')} ({parsed.get('confidence', 0):.0%})")
+                dtype = parsed.get('distortion_type') or 'none'
+                conf  = parsed.get('confidence', 0)
+                print(f"[CLASSIFIER] 🧠 DISTORTION RESULT │ type={dtype} │ confidence={conf:.0%}")
                 return parsed
 
     except Exception as e:
-        logger.warning(f"[CLASSIFIER] Distortion check failed: {e}")
+        logger.warning(f"[CLASSIFIER] ❌ Distortion check FAILED: {e}")
 
     return {
         "distortion_type": None,
@@ -327,7 +294,7 @@ JSON:"""
 # CONVERSATION INTENT CLASSIFIER — Groq 8b
 # ============================================
 
-async def llm_intent_check(message: str) -> dict:
+async def llm_intent_check(message: str, recent_context: str = "") -> dict:
     """
     LLM-assisted intent classification for the conversation planner.
     v5.3: Now truly async via _call_groq_async.
@@ -339,11 +306,11 @@ async def llm_intent_check(message: str) -> dict:
       }
     """
     try:
-        prompt = f"""You are a mental health conversation assistant. Classify the USER's intent.
+        prompt = f"""You are a mental health conversation assistant. Classify the USER's latest intent based on their latest message.
 
 Choose ONE: technique_request | reflection | venting | chitchat | crisis_signal
 
-- technique_request: user asks for help, exercises, or something to calm down
+- technique_request: user asks for help, exercises, coping mechanisms, OR asks for an alternative/different technique after one was suggested.
 - reflection: user shows understanding, insight, or asks "why/how" about their feelings
 - venting: user expressing strong emotion, needs to be heard
 - chitchat: casual, off-topic, non-emotional message
@@ -352,24 +319,29 @@ Choose ONE: technique_request | reflection | venting | chitchat | crisis_signal
 Respond ONLY with valid JSON:
 {{"intent": string, "confidence": float 0.0-1.0}}
 
-Message: "{message}"
+Previous Conversation Context:
+{recent_context}
+
+User's Latest Message: "{message}"
 
 JSON:"""
 
-        content = await _call_groq_async(prompt, model="llama-3.1-8b-instant", temperature=0.0, max_tokens=64)
+        print("[CLASSIFIER] 💬 INTENT CHECK → llama-3.1-8b")
+        content = await _call_groq_async(prompt, model="meta-llama/llama-3.1-8b-instruct", temperature=0.0, max_tokens=64)
         if content:
             parsed = _parse_json_from_llm(content)
             if parsed and "intent" in parsed:
-                print(f"[CLASSIFIER] 💬 LLM intent: {parsed.get('intent')} ({parsed.get('confidence', 0):.0%})")
+                print(f"[CLASSIFIER] 💬 INTENT RESULT │ intent={parsed.get('intent')} │ confidence={parsed.get('confidence', 0):.0%}")
                 return parsed
 
     except Exception as e:
-        logger.warning(f"[CLASSIFIER] Intent check failed: {e}")
+        logger.warning(f"[CLASSIFIER] ❌ Intent check FAILED: {e}")
 
+    print("[CLASSIFIER] ⚠️  Intent check failed — defaulting to 'venting'")
     return {"intent": "venting", "confidence": 0.0}
 
 
-async def llm_intent_pre_check(message: str) -> dict:
+async def llm_intent_pre_check(message: str, recent_context: str = "") -> dict:
     """
     v5.3 NEW: Lightweight intent pre-check for parallel_intake.
 
@@ -383,8 +355,8 @@ async def llm_intent_pre_check(message: str) -> dict:
 
     This removes the intent LLM call from the serial critical path entirely.
     """
-    print("[CLASSIFIER] ⚡ [PREFETCH] Running intent check concurrently with intake...")
-    result = await llm_intent_check(message)
-    print(f"[CLASSIFIER] ✅ [PREFETCH] Intent prefetch done: {result.get('intent')} ({result.get('confidence', 0):.0%})")
+    print("[CLASSIFIER] ⚡ PREFETCH │ Intent check starting concurrently with intake...")
+    result = await llm_intent_check(message, recent_context)
+    print(f"[CLASSIFIER] ⚡ PREFETCH │ Intent done → {result.get('intent')} ({result.get('confidence', 0):.0%}) — stored for planner")
     return result
 
