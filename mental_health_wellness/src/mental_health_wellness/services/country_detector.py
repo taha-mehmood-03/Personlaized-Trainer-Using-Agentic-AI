@@ -72,17 +72,17 @@ class CountryDetector:
             db_path = os.getenv("GEOIP_DB_PATH", "")
             
             if not db_path or not os.path.exists(db_path):
-                print(f"[GEO] ℹ️ GeoIP database not found at {db_path}")
+                print(f"[GEO]  GeoIP database not found at {db_path}")
                 return "US"
             
             with geoip2.database.Reader(db_path) as reader:
                 response = reader.country(ip_address)
                 country_code = response.country.iso_code
-                print(f"[GEO] 📍 Detected country from IP {ip_address}: {country_code}")
+                print(f"[GEO]  Detected country from IP {ip_address}: {country_code}")
                 return country_code
         
         except Exception as e:
-            print(f"[GEO] ⚠️ Could not detect country from IP: {str(e)}")
+            print(f"[GEO]  Could not detect country from IP: {str(e)}")
             return "US"
     
     @staticmethod

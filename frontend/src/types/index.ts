@@ -82,9 +82,78 @@ export type EmotionType =
     | 'anxiety'
     | 'guilt'
 
+export interface MoodDataPoint {
+    date: string       // 'Mon', 'Tue', …
+    score: number      // 0–100
+    emotion: EmotionType
+}
+
+export interface EmotionSlice {
+    emotion: EmotionType
+    count: number
+    percentage: number
+}
+
+export interface TopTechniqueEntry {
+    name: string
+    category: string
+    usageCount: number
+}
+
+export interface SessionSummary {
+    id: string
+    title: string
+    date: string
+    dominantEmotion: EmotionType
+    durationMinutes: number
+    techniqueUsed?: string
+}
+
+export interface PsychologicalProfile {
+    copingStyle: 'Active' | 'Avoidant' | 'Supportive' | 'Mixed'
+    resilience: number        // 0–100
+    anxietyBaseline: 'Low' | 'Moderate' | 'High'
+    aiInsight: string
+}
+
 export interface DashboardStats {
     totalSessions: number
     avgMood: number
     streak: number
     topEmotion: EmotionType
+    sessionsThisWeek: number
+    moodTrend: 'up' | 'down' | 'stable'
+    techniquesTried: number
+    moodTimeline: MoodDataPoint[]
+    emotionDistribution: EmotionSlice[]
+    topTechniques: TopTechniqueEntry[]
+    recentSessions: SessionSummary[]
+    psychologicalProfile: PsychologicalProfile
+}
+
+// ─── Onboarding ─────────────────────────────────────────────────────────────
+
+export type MoodLevel = 'great' | 'good' | 'okay' | 'low' | 'awful'
+
+export interface OnboardingGoal {
+    id: string
+    label: string
+    icon: string
+}
+
+export interface OnboardingData {
+    mood: MoodLevel | null
+    goals: string[]
+    notificationsEnabled: boolean
+}
+
+// ─── Profile / Settings ──────────────────────────────────────────────────────
+
+export interface UserSettings {
+    dailyReminderEnabled: boolean
+    weeklyEmailEnabled: boolean
+    sessionAutoSave: boolean
+    anonymousMode: boolean
+    shareLocationInCrisis: boolean
+    theme: 'light' | 'dark' | 'system'
 }

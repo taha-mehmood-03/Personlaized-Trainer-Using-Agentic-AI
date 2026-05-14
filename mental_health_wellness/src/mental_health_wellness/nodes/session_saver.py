@@ -68,7 +68,7 @@ async def save_session(state: MentalHealthState) -> dict:
         
         save_errors = []
         
-        print(f"\n[NODE: SESSION_SAVER] 💾 Saving session data")
+        print(f"\n[NODE: SESSION_SAVER]  Saving session data")
         print(f"[NODE: SESSION_SAVER] User: {user_id[:20] if user_id else 'UNKNOWN'}...")
         print(f"[NODE: SESSION_SAVER] Crisis: {crisis_detected}, Emotion: {emotion}, Role: {agent_role}")
         
@@ -77,7 +77,7 @@ async def save_session(state: MentalHealthState) -> dict:
         # ============================================
         
         if not user_id:
-            print("[NODE: SESSION_SAVER] ❌ No user_id provided")
+            print("[NODE: SESSION_SAVER]  No user_id provided")
             return {
                 "session_saved": False,
                 "saved_session_id": None,
@@ -85,7 +85,7 @@ async def save_session(state: MentalHealthState) -> dict:
             }
         
         if not messages:
-            print("[NODE: SESSION_SAVER] ❌ No messages to save")
+            print("[NODE: SESSION_SAVER]  No messages to save")
             return {
                 "session_saved": False,
                 "saved_session_id": None,
@@ -102,7 +102,7 @@ async def save_session(state: MentalHealthState) -> dict:
         # STEP 1: SAVE TO PRISMA DATABASE
         # ============================================
         
-        print("[NODE: SESSION_SAVER] 💾 Step 1: Saving to Prisma database...")
+        print("[NODE: SESSION_SAVER]  Step 1: Saving to Prisma database...")
         
         try:
             # Prepare voice data if present
@@ -115,9 +115,9 @@ async def save_session(state: MentalHealthState) -> dict:
                         "voice_valence": voice_features.get("valence", 0.5),
                         "voice_confidence": voice_features.get("confidence", 0.0),
                     }
-                    print(f"[NODE: SESSION_SAVER] 🎤 Including voice data")
+                    print(f"[NODE: SESSION_SAVER]  Including voice data")
                 except Exception as ve:
-                    print(f"[NODE: SESSION_SAVER] ⚠️ Voice data prep error: {str(ve)[:100]}")
+                    print(f"[NODE: SESSION_SAVER]  Voice data prep error: {str(ve)[:100]}")
                     save_errors.append(f"Voice data prep: {str(ve)[:100]}")
             
             # Save to database
@@ -138,19 +138,19 @@ async def save_session(state: MentalHealthState) -> dict:
                 session_saved = result.get("saved", False)
                 
                 if session_saved:
-                    print(f"[NODE: SESSION_SAVER] ✅ Prisma DB saved: {saved_session_id[:20] if saved_session_id else 'UNKNOWN'}")
+                    print(f"[NODE: SESSION_SAVER]  Prisma DB saved: {saved_session_id[:20] if saved_session_id else 'UNKNOWN'}")
                 else:
-                    print(f"[NODE: SESSION_SAVER] ⚠️ Prisma save returned false (may still be queued)")
+                    print(f"[NODE: SESSION_SAVER]  Prisma save returned false (may still be queued)")
                     save_errors.append("Prisma save returned false")
                     
             except Exception as db_err:
-                print(f"[NODE: SESSION_SAVER] ❌ DB save error: {type(db_err).__name__}")
+                print(f"[NODE: SESSION_SAVER]  DB save error: {type(db_err).__name__}")
                 print(f"[NODE: SESSION_SAVER] Details: {str(db_err)[:150]}")
                 save_errors.append(f"DB save: {str(db_err)[:100]}")
                 session_saved = False
                 
         except Exception as e:
-            print(f"[NODE: SESSION_SAVER] ❌ CRITICAL DB error: {type(e).__name__}")
+            print(f"[NODE: SESSION_SAVER]  CRITICAL DB error: {type(e).__name__}")
             print(f"[NODE: SESSION_SAVER] Details: {str(e)[:150]}")
             save_errors.append(f"Critical DB error: {str(e)[:100]}")
         
@@ -162,7 +162,7 @@ async def save_session(state: MentalHealthState) -> dict:
         # Now: single batch_() call (~100-200ms total).
         # ============================================
         
-        print("[NODE: SESSION_SAVER] 📊 Step 3+4: Batched mood log + session phase update...")
+        print("[NODE: SESSION_SAVER]  Step 3+4: Batched mood log + session phase update...")
         
         try:
             from ..db.client import get_prisma_client
@@ -177,7 +177,7 @@ async def save_session(state: MentalHealthState) -> dict:
                     intensity = max(0.0, min(1.0, intensity))  # Clamp to [0, 1]
                 except (ValueError, TypeError):
                     intensity = 0.5
-                    print(f"[NODE: SESSION_SAVER] ⚠️ Invalid intensity, using default")
+                    print(f"[NODE: SESSION_SAVER]  Invalid intensity, using default")
                 
                 # Map emotion to valid Prisma Emotion enum
                 from ..agent.preprocessing import normalize_emotion
@@ -187,7 +187,7 @@ async def save_session(state: MentalHealthState) -> dict:
                     "anger": "ANGER", "disgust": "DISGUST", "fear": "FEAR",
                     "joy": "JOY", "neutral": "NEUTRAL", "sadness": "SADNESS",
                     "surprise": "SURPRISE", "anxiety": "ANXIETY",
-                    # Common LLM outputs → closest Prisma enum
+                    # Common LLM outputs  closest Prisma enum
                     "happy": "JOY", "happiness": "JOY", "excited": "JOY",
                     "grateful": "JOY", "hopeful": "JOY", "content": "JOY",
                     "sad": "SADNESS", "depressed": "SADNESS", "lonely": "SADNESS",
@@ -212,7 +212,7 @@ async def save_session(state: MentalHealthState) -> dict:
                 emotion_lower = normalized.lower().strip()
                 db_emotion = EMOTION_TO_PRISMA.get(emotion_lower, "NEUTRAL")
                 
-                print(f"[NODE: SESSION_SAVER] 🔍 Emotion mapping: '{emotion}' → '{normalized}' → '{db_emotion}'")
+                print(f"[NODE: SESSION_SAVER]  Emotion mapping: '{emotion}'  '{normalized}'  '{db_emotion}'")
                 
                 emotion_to_sentiment = {
                     "JOY": "POSITIVE", "SURPRISE": "POSITIVE",
@@ -239,7 +239,7 @@ async def save_session(state: MentalHealthState) -> dict:
                 }
                 db_phase = PHASE_MAP.get(conversation_phase, "VENTING")
                 
-                # ── BATCHED WRITE: mood log + session phase in one IPC call ──
+                #  BATCHED WRITE: mood log + session phase in one IPC call 
                 try:
                     async with prisma.batch_() as batch:
                         batch.moodlog.create(
@@ -256,15 +256,27 @@ async def save_session(state: MentalHealthState) -> dict:
                                 data={"phase": db_phase}
                             )
                     
-                    print(f"[NODE: SESSION_SAVER] ✅ Batched write complete: mood={db_emotion}, phase={db_phase if should_update_phase else 'skipped'}")
+                    print(f"[NODE: SESSION_SAVER]  Batched write complete: mood={db_emotion}, phase={db_phase if should_update_phase else 'skipped'}")
                     
                 except Exception as batch_err:
-                    print(f"[NODE: SESSION_SAVER] ⚠️ Batched write failed: {str(batch_err)[:100]}")
+                    print(f"[NODE: SESSION_SAVER]  Batched write failed: {str(batch_err)[:100]}")
                     save_errors.append(f"Batched write: {str(batch_err)[:100]}")
                 
-                # Trigger LLM-powered session summary every 5 messages (background task)
+                # Trigger LLM-powered session summary: content-aware condition.
+                # Summarize when: >= 4 messages AND session had real therapeutic/advice content.
+                # This prevents chitchat sessions from generating summaries while ensuring
+                # deep 4-message therapeutic sessions always get one.
                 msg_count = state.get("session_message_count", 0)
-                if session_id and msg_count > 0 and msg_count % 5 == 0:
+                conversation_strategy = state.get("conversation_strategy", "")
+                gate_route = state.get("gate_route", "therapeutic")
+
+                is_meaningful_turn = (
+                    conversation_strategy not in ("", "no_action")
+                    or gate_route in ("therapeutic", "crisis")
+                )
+                should_summarize = session_id and msg_count >= 4 and is_meaningful_turn
+
+                if should_summarize:
                     try:
                         import asyncio
                         from ..memory.session_summarizer import summarize_session
@@ -281,20 +293,20 @@ async def save_session(state: MentalHealthState) -> dict:
                             techniques=tech_list,
                             outcome="neutral"
                         ))
-                        print(f"[NODE: SESSION_SAVER] ✅ LLM session summary scheduled (msg #{msg_count})")
+                        print(f"[NODE: SESSION_SAVER]  LLM session summary scheduled (msg #{msg_count})")
                     except Exception as sum_err:
-                        print(f"[NODE: SESSION_SAVER] ⚠️ Summary task scheduling failed: {str(sum_err)[:80]}")
+                        print(f"[NODE: SESSION_SAVER]  Summary task scheduling failed: {str(sum_err)[:80]}")
                         save_errors.append(f"Summary scheduling: {str(sum_err)[:80]}")
                     
             except Exception as client_err:
-                print(f"[NODE: SESSION_SAVER] ❌ Prisma client error: {str(client_err)[:100]}")
+                print(f"[NODE: SESSION_SAVER]  Prisma client error: {str(client_err)[:100]}")
                 save_errors.append(f"Prisma client: {str(client_err)[:100]}")
                 
         except ImportError as ie:
-            print(f"[NODE: SESSION_SAVER] ⚠️ DB module import error: {str(ie)[:100]}")
+            print(f"[NODE: SESSION_SAVER]  DB module import error: {str(ie)[:100]}")
             save_errors.append("DB module not available")
         except Exception as e:
-            print(f"[NODE: SESSION_SAVER] ❌ CRITICAL stats error: {type(e).__name__}")
+            print(f"[NODE: SESSION_SAVER]  CRITICAL stats error: {type(e).__name__}")
             print(f"[NODE: SESSION_SAVER] Details: {str(e)[:150]}")
             save_errors.append(f"Critical stats error: {str(e)[:100]}")
         
@@ -302,7 +314,7 @@ async def save_session(state: MentalHealthState) -> dict:
         # STEP 5: CLEANUP TEMPORARY FILES
         # ============================================
         
-        print("[NODE: SESSION_SAVER] 🧹 Step 4: Cleaning up temporary files...")
+        print("[NODE: SESSION_SAVER]  Step 4: Cleaning up temporary files...")
         
         temp_audio_path = state.get("temp_audio_path")
         if temp_audio_path:
@@ -311,15 +323,15 @@ async def save_session(state: MentalHealthState) -> dict:
                 if os.path.exists(temp_audio_path):
                     try:
                         os.unlink(temp_audio_path)
-                        print(f"[NODE: SESSION_SAVER] ✅ Cleaned up temp file")
+                        print(f"[NODE: SESSION_SAVER]  Cleaned up temp file")
                     except Exception as del_err:
-                        print(f"[NODE: SESSION_SAVER] ⚠️ File deletion error: {str(del_err)[:100]}")
+                        print(f"[NODE: SESSION_SAVER]  File deletion error: {str(del_err)[:100]}")
                         save_errors.append(f"File cleanup: {str(del_err)[:100]}")
                 else:
-                    print(f"[NODE: SESSION_SAVER] ⚠️ Temp file already gone: {temp_audio_path}")
+                    print(f"[NODE: SESSION_SAVER]  Temp file already gone: {temp_audio_path}")
                     
             except Exception as e:
-                print(f"[NODE: SESSION_SAVER] ❌ Cleanup error: {type(e).__name__}")
+                print(f"[NODE: SESSION_SAVER]  Cleanup error: {type(e).__name__}")
                 print(f"[NODE: SESSION_SAVER] Details: {str(e)[:150]}")
                 save_errors.append(f"Cleanup: {str(e)[:100]}")
         
@@ -328,9 +340,9 @@ async def save_session(state: MentalHealthState) -> dict:
         # ============================================
         
         if not save_errors:
-            print(f"[NODE: SESSION_SAVER] ✅ Session save complete - No errors")
+            print(f"[NODE: SESSION_SAVER]  Session save complete - No errors")
         else:
-            print(f"[NODE: SESSION_SAVER] ⚠️ Session save complete - {len(save_errors)} non-fatal errors")
+            print(f"[NODE: SESSION_SAVER]  Session save complete - {len(save_errors)} non-fatal errors")
             for err in save_errors:
                 print(f"  - {err}")
 
@@ -350,13 +362,13 @@ async def save_session(state: MentalHealthState) -> dict:
                 "session_start_intensity": session_start_intensity,
             }
             print(f"[NODE: SESSION_SAVER] Session baseline captured: "
-                  f"{session_start_emotion} ({session_start_intensity:.0%}) — will be used by OUTCOME_TRACKER")
+                  f"{session_start_emotion} ({session_start_intensity:.0%})  will be used by OUTCOME_TRACKER")
 
         # ============================================
         # FIX 4: CAPTURE TECHNIQUE-DELIVERY MOMENT SNAPSHOT
         # When a technique is delivered THIS turn, record the emotion/intensity
         # at the EXACT moment of delivery. OUTCOME_TRACKER will compare the NEXT
-        # message's emotion against THIS state — not the session-start state.
+        # message's emotion against THIS state  not the session-start state.
         # This measures "did emotions improve after the technique?" accurately.
         # ============================================
         technique_delivery_updates = {}
@@ -369,7 +381,7 @@ async def save_session(state: MentalHealthState) -> dict:
                 "technique_delivery_intensity": float(delivery_intensity),
             }
             print(f"[NODE: SESSION_SAVER] Technique delivery snapshot captured: "
-                  f"{delivery_emotion} ({delivery_intensity:.0%}) — OUTCOME_TRACKER will measure from here")
+                  f"{delivery_emotion} ({delivery_intensity:.0%})  OUTCOME_TRACKER will measure from here")
 
         return {
             "session_saved": session_saved,
@@ -385,7 +397,7 @@ async def save_session(state: MentalHealthState) -> dict:
         If anything goes catastrophically wrong, return error status
         Never crash - always return completion status
         """
-        print(f"\n[NODE: SESSION_SAVER] ❌ CATASTROPHIC ERROR")
+        print(f"\n[NODE: SESSION_SAVER]  CATASTROPHIC ERROR")
         print(f"[NODE: SESSION_SAVER] Error Type: {type(e).__name__}")
         print(f"[NODE: SESSION_SAVER] Error Details: {str(e)[:200]}")
         
@@ -403,7 +415,7 @@ async def save_session(state: MentalHealthState) -> dict:
 def _generate_rule_based_summary(state: dict) -> tuple[str, list[str]]:
     """
     Generate a concise session summary using rule-based extraction.
-    No LLM call — pure string analysis.
+    No LLM call  pure string analysis.
     
     Returns:
         (summary_text, key_themes)

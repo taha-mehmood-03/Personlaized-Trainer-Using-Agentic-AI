@@ -20,8 +20,8 @@ Architecture v7.0 nodes (SentiMind v7 - Pure LLM-First):
 
 v7.0 CHANGES (Complete LLM Integration):
   - All ML models replaced with LLM (except voice feature extraction)
-  - DistilBERT → LLM emotion classification
-  - Keyword patterns → LLM semantic understanding
+  - DistilBERT  LLM emotion classification
+  - Keyword patterns  LLM semantic understanding
   - Cognitive distortions: LLM-only analysis (replaced keyword patterns)
   - Voice features (wav2vec2, MFCC) retained for audio analysis only
 """
@@ -41,13 +41,13 @@ from .trend_analyzer_node import analyze_emotional_trends
 from .conversation_planner_node import conversation_planner_node
 from .outcome_tracker_node import track_outcome
 
-# SentiMind v3.0 — New intelligent subsystems
+# SentiMind v3.0  New intelligent subsystems
 from .cognitive_distortion_node import detect_cognitive_distortions
 from .behavioral_activation_node import activate_behavioral_intervention
 from .psych_profile_updater import update_psych_profile
 from .proactive_monitor import check_and_notify
 
-# SentiMind v6.0 — Fused latency-optimized nodes
+# SentiMind v6.0  Fused latency-optimized nodes
 from .analysis_and_planning import run_analysis_and_planning
 from .response_pipeline import run_response_pipeline
 

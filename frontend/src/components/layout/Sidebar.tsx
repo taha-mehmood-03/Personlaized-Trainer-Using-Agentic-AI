@@ -1,15 +1,36 @@
 'use client'
 
 import { format } from 'date-fns'
-import { Plus, MessageSquare, Menu, LogOut, User as UserIcon } from 'lucide-react'
-import { Session } from '@/types'
+import { Plus, MessageSquare, Menu, LogOut, User as UserIcon, Zap } from 'lucide-react'
+import { Session, Technique } from '@/types'
 import { SessionItem } from '@/components/layout/SessionItem'
-import { useAuth } from '@/components/providers/AuthProvider'
+import { signOut, useSession } from 'next-auth/react'
+
+const CATEGORY_ICON: Record<string, string> = {
+  breathing: '🌬️', meditation: '🧘', mindfulness: '🌿',
+  cbt: '🧠', dbt: '⚖️', journaling: '📝',
+  grounding: '🌍', 'behavioral activation': '⚡', general: '✨',
+  visualization: '🌅',
+}
+
+const CATEGORY_GRADIENT: Record<string, string> = {
+  breathing: 'from-cyan-400 to-blue-500',
+  meditation: 'from-purple-400 to-indigo-500',
+  mindfulness: 'from-green-400 to-teal-500',
+  grounding: 'from-orange-400 to-red-500',
+  cbt: 'from-indigo-400 to-purple-500',
+  journaling: 'from-blue-400 to-cyan-500',
+  dbt: 'from-blue-500 to-indigo-600',
+  'behavioral activation': 'from-green-500 to-emerald-600',
+  visualization: 'from-yellow-400 to-orange-400',
+  general: 'from-purple-400 to-teal-500',
+}
 
 interface SidebarProps {
   sessions: Session[]
   currentSessionId: string | null
   isLoading: boolean
+  activeTechnique?: Technique | null
   onNewSession: () => void
   onSelectSession: (id: string) => void
   onDeleteSession: (id: string) => void
@@ -20,12 +41,17 @@ export function Sidebar({
   sessions,
   currentSessionId,
   isLoading,
+  activeTechnique,
   onNewSession,
   onSelectSession,
   onDeleteSession,
   onRenameSession,
 }: SidebarProps) {
-  const { logout } = useAuth()
+  const { data: session } = useSession()
+
+  const catKey = activeTechnique?.category?.toLowerCase() ?? ''
+  const techIcon = CATEGORY_ICON[catKey] ?? '✨'
+  const techGradient = CATEGORY_GRADIENT[catKey] ?? 'from-purple-400 to-teal-500'
 
   // Group sessions by date
   const grouped = sessions.reduce((acc, session) => {
@@ -116,18 +142,48 @@ export function Sidebar({
         )}
       </div>
 
+      {/* Active Exercise Card — shown when a technique is selected */}
+      {activeTechnique && (
+        <div className="px-3 pb-3 shrink-0">
+          <div className="rounded-xl overflow-hidden border border-slate-200 shadow-sm">
+            {/* Gradient header */}
+            <div className={`bg-gradient-to-r ${techGradient} px-3 py-2 flex items-center gap-2`}>
+              <span className="text-lg">{techIcon}</span>
+              <div className="flex-1 min-w-0">
+                <p className="text-[10px] text-white/70 font-semibold uppercase tracking-wider">Active Exercise</p>
+                <p className="text-xs text-white font-bold truncate leading-tight">{activeTechnique.name}</p>
+              </div>
+              <Zap className="w-3.5 h-3.5 text-white/80 shrink-0 animate-pulse" />
+            </div>
+            {/* Details row */}
+            <div className="bg-white px-3 py-2 flex items-center justify-between gap-2">
+              <span className="text-[10px] text-slate-500 capitalize">{activeTechnique.category}</span>
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] font-semibold text-slate-600">⏱ {activeTechnique.duration_minutes} min</span>
+                {activeTechnique.difficulty && (
+                  <span className="text-[10px] px-1.5 py-0.5 bg-purple-50 text-purple-600 rounded-full font-semibold capitalize">
+                    {activeTechnique.difficulty}
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* User / Settings Footer */}
       <div className="p-3 border-t border-slate-100 shrink-0 bg-white">
         <button
-          onClick={logout}
+          onClick={() => signOut({ callbackUrl: '/' })}
           className="w-full flex items-center justify-between p-2 hover:bg-slate-50 rounded-xl transition-colors group"
         >
           <div className="flex items-center gap-3 overflow-hidden">
-            <div className="w-8 h-8 rounded-full bg-slate-100 flex items-center justify-center shrink-0 border border-slate-200">
-              <UserIcon className="w-4 h-4 text-slate-500" />
+            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-purple-500 to-teal-400 flex items-center justify-center shrink-0 text-white text-xs font-bold">
+              {session?.user?.name?.[0]?.toUpperCase() ?? <UserIcon className="w-4 h-4" />}
             </div>
             <div className="text-left overflow-hidden">
-              <p className="text-sm font-semibold text-slate-700 truncate min-w-[100px]">Sign Out</p>
+              <p className="text-sm font-semibold text-slate-700 truncate">{session?.user?.name ?? 'Account'}</p>
+              <p className="text-xs text-slate-400 truncate">{session?.user?.email ?? ''}</p>
             </div>
           </div>
           <LogOut className="w-4 h-4 text-slate-400 group-hover:text-red-500 transition-colors" />

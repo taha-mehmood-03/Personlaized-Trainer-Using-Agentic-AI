@@ -1,6 +1,6 @@
 """
 Layer 3: Sliding Window Memory
-Current session context management — no DB needed.
+Current session context management  no DB needed.
 
 Keeps a trimmed view of the current session messages within token budget.
 Preserves the first message (context anchor) + most recent messages.

@@ -127,12 +127,12 @@ def handle_crisis(message: str = "", reason: str = "General concern", country_co
         Dictionary containing risk level, action, and country-specific resources.
     """
     try:
-        print(f"[CRISIS_TOOL] 🚨 CRISIS HANDLER CALLED: {reason}")
+        print(f"[CRISIS_TOOL]  CRISIS HANDLER CALLED: {reason}")
         
         # Get country-specific resources (default to US if not provided)
         country = country_code or "US"
         resources = get_crisis_resources(country)
-        print(f"[CRISIS_TOOL] 📍 Using resources for: {country}")
+        print(f"[CRISIS_TOOL]  Using resources for: {country}")
         
         # Add international resource as fallback
         if "international" not in resources:
@@ -156,7 +156,7 @@ def handle_crisis(message: str = "", reason: str = "General concern", country_co
         }
 
     except Exception as e:
-        print(f"[CRISIS_TOOL] ❌ Error in handle_crisis: {str(e)[:100]}")
+        print(f"[CRISIS_TOOL]  Error in handle_crisis: {str(e)[:100]}")
         # Always escalate on error - safety first
         fallback_resources = get_crisis_resources(country_code or "US")
         return {

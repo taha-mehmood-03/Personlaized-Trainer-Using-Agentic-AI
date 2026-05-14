@@ -122,11 +122,11 @@ export function ChatLayout({ userId, initialSessions, initialMessages, initialSe
             sessions={sessions}
             currentSessionId={currentSessionId}
             isLoading={loadingSessions}
+            activeTechnique={displayedTechnique}
             onNewSession={() => { startNewSession(); clearMessages(WELCOME_MESSAGE) }}
             onSelectSession={handleSelectSession}
             onDeleteSession={async (id) => {
               await removeSession(id)
-              // Always clear chat view + show welcome after any deletion
               clearMessages(WELCOME_MESSAGE)
             }}
             onRenameSession={updateSessionName}
@@ -156,10 +156,7 @@ export function ChatLayout({ userId, initialSessions, initialMessages, initialSe
 
           <ChatInput
             isLoading={isStreaming}
-            isRecording={false}
             onSend={handleSend}
-            onStartRecording={() => {}}
-            onStopRecording={() => {}}
           />
         </div>
 

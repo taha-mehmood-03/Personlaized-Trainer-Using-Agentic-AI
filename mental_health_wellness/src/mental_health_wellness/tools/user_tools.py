@@ -100,7 +100,7 @@ async def save_session(
         emotion_lower = emotion.lower().strip() if emotion else "neutral"
         sentiment = emotion_to_sentiment.get(emotion_lower, "NEUTRAL")
         
-        print(f"[TOOL] save_session: Emotion='{emotion}' → Lowercase='{emotion_lower}' → Sentiment='{sentiment}'")
+        print(f"[TOOL] save_session: Emotion='{emotion}'  Lowercase='{emotion_lower}'  Sentiment='{sentiment}'")
         
         # Try to find existing session or create new one
         session = None
@@ -110,9 +110,17 @@ async def save_session(
             existing_session = await prisma.session.find_unique(
                 where={"id": session_id}
             )
-            if existing_session and existing_session.userId == user_id:
-                session = existing_session
-                print(f"[TOOL] save_session: Using session {session.id}")
+            if existing_session:
+                if existing_session.userId == user_id:
+                    session = existing_session
+                    print(f"[TOOL] save_session: Using session {session.id}")
+                else:
+                    # Claim the session for the authenticated user (migrating from anonymous)
+                    session = await prisma.session.update(
+                        where={"id": session_id},
+                        data={"userId": user_id}
+                    )
+                    print(f"[TOOL] save_session: Claimed session {session.id} for user {user_id}")
         
         # Fallback: Create new session if none found (shouldn't happen with new logic)
         if not session:
@@ -173,7 +181,7 @@ async def save_session(
                 }
             )
         
-        # MoodLog creation handled by session_saver_node — do NOT duplicate here
+        # MoodLog creation handled by session_saver_node  do NOT duplicate here
         
         # Update UserStatistics (totalMessages, etc.)
         try:

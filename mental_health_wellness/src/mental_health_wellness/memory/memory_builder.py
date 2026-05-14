@@ -1,5 +1,5 @@
 """
-Memory Builder — Combiner for all 3 memory layers.
+Memory Builder  Combiner for all 3 memory layers.
 
 Builds the complete memory_context string injected into every LLM prompt.
 Combines:
@@ -26,7 +26,7 @@ async def build_full_memory_context(
 
     Returns:
         Single formatted string ready to inject into state['memory_context'].
-        Never raises — returns empty string on any failure.
+        Never raises  returns empty string on any failure.
     """
     try:
         from .explicit_facts import get_user_facts
@@ -40,14 +40,15 @@ async def build_full_memory_context(
         facts_context = await facts_task
         summaries_context = await summaries_task
 
-        # Layer 3: Sliding window (synchronous — no DB)
+        # Layer 3: Sliding window (synchronous  no DB)
         window_context = ""
         if include_window and current_messages:
             trimmed = build_sliding_window(current_messages)
             window_context = format_window_for_prompt(trimmed)
 
         # Combine non-empty sections
-        sections = [s for s in [facts_context, summaries_context, window_context] if s.strip()]
+        # Session summaries FIRST so LLM reads cross-session context before current facts
+        sections = [s for s in [summaries_context, facts_context, window_context] if s.strip()]
 
         if not sections:
             return ""
@@ -58,5 +59,5 @@ async def build_full_memory_context(
         return combined
 
     except Exception as e:
-        print(f"[MEMORY:BUILDER] ⚠️ build_full_memory_context failed (non-fatal): {str(e)[:150]}")
+        print(f"[MEMORY:BUILDER]  build_full_memory_context failed (non-fatal): {str(e)[:150]}")
         return ""

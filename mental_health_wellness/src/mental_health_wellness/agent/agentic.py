@@ -40,7 +40,7 @@ from ..tools import (
 def _count_tokens(text: str) -> int:
     """
     Estimate token count for text using word count as proxy.
-    Rough approximation: 1 token ≈ 4 characters or 0.75 words
+    Rough approximation: 1 token  4 characters or 0.75 words
     For Groq/OpenAI models using BPE tokenization
     """
     if not text:
@@ -110,7 +110,7 @@ async def advanced_agentic_pipeline(state: MentalHealthState) -> dict:
     
     start_time = time.time()
     tracker = get_timing_tracker()
-    print(f"\n[AGENT] 🧠 ULTIMATE AGENTIC PIPELINE v10.0 - Production Perfect")
+    print(f"\n[AGENT]  ULTIMATE AGENTIC PIPELINE v10.0 - Production Perfect")
     
     if state is None:
         return _empty_state("State is None")
@@ -132,7 +132,7 @@ async def advanced_agentic_pipeline(state: MentalHealthState) -> dict:
         if not current_message:
             return _empty_state("No message")
         
-        print(f"[AGENT] 💬 Message: '{current_message[:100]}...'")
+        print(f"[AGENT]  Message: '{current_message[:100]}...'")
         
         # ============================================
         # PRE-CLASSIFICATION (OPTIONAL HINT)
@@ -143,9 +143,9 @@ async def advanced_agentic_pipeline(state: MentalHealthState) -> dict:
         try:
             classification = get_message_classification(current_message)
             classification_hint = _build_classification_hint(classification)
-            print(f"[AGENT] 💡 Classification hint: {classification.get('detected_patterns', [])}")
+            print(f"[AGENT]  Classification hint: {classification.get('detected_patterns', [])}")
         except Exception as e:
-            print(f"[AGENT] ⚠️ Classification failed: {e}")
+            print(f"[AGENT]  Classification failed: {e}")
             classification_hint = ""
         
         # ============================================
@@ -198,12 +198,12 @@ async def advanced_agentic_pipeline(state: MentalHealthState) -> dict:
         # ============================================
         
         token_analysis = _analyze_messages_tokens(llm_messages)
-        print(f"[AGENT] 🔤 TOKEN ANALYSIS:")
-        print(f"  ├─ System Prompt: {token_analysis['system_tokens']:,} tokens")
-        print(f"  ├─ Chat History: {token_analysis['history_tokens']:,} tokens")
-        print(f"  ├─ Current Message: {token_analysis['current_tokens']:,} tokens")
-        print(f"  ├─ Total Tokens: {token_analysis['total_tokens']:,} tokens")
-        print(f"  └─ Message Count: {token_analysis['message_count']} messages")
+        print(f"[AGENT]  TOKEN ANALYSIS:")
+        print(f"   System Prompt: {token_analysis['system_tokens']:,} tokens")
+        print(f"   Chat History: {token_analysis['history_tokens']:,} tokens")
+        print(f"   Current Message: {token_analysis['current_tokens']:,} tokens")
+        print(f"   Total Tokens: {token_analysis['total_tokens']:,} tokens")
+        print(f"   Message Count: {token_analysis['message_count']} messages")
         
         # ============================================
         # EXECUTE LLM WITH TOOLS (ReAct Loop)
@@ -226,12 +226,12 @@ async def advanced_agentic_pipeline(state: MentalHealthState) -> dict:
         processing_time = int((time.time() - start_time) * 1000)
         final_state["processing_time_ms"] = processing_time
         
-        print(f"[AGENT] ✅ Complete in {processing_time}ms - Tools: {final_state.get('tools_used', [])}")
+        print(f"[AGENT]  Complete in {processing_time}ms - Tools: {final_state.get('tools_used', [])}")
         
         return final_state
         
     except Exception as e:
-        print(f"\n[AGENT] ❌ ERROR: {type(e).__name__}: {str(e)[:200]}")
+        print(f"\n[AGENT]  ERROR: {type(e).__name__}: {str(e)[:200]}")
         import traceback
         traceback.print_exc()
         
@@ -253,27 +253,27 @@ def _build_ultimate_system_prompt(
 ) -> str:
     """Build optimized system prompt: concise but complete."""
     
-    voice_section = f"""## 🎤 VOICE MESSAGE
+    voice_section = f"""##  VOICE MESSAGE
 Call `analyze_voice("{audio_path}")` FIRST, then `analyze_mood()`.
-Compare: voice_emotion ≠ text_emotion = user masking feelings""" if has_voice else """## 📝 TEXT MESSAGE ONLY
+Compare: voice_emotion  text_emotion = user masking feelings""" if has_voice else """##  TEXT MESSAGE ONLY
 Do NOT call analyze_voice (no audio available)"""
     
     context_section = ""
     if is_new_user:
-        context_section = "\n🆕 NEW USER - Skip `get_user_history`"
+        context_section = "\n NEW USER - Skip `get_user_history`"
     else:
-        context_section = f"\n🔄 SESSION #{session_count} - Consider `get_user_history`"
+        context_section = f"\n SESSION #{session_count} - Consider `get_user_history`"
     
     if memory_context:
-        context_section += f"\nPAST CONTEXT (background reference only — RESPOND ONLY to the CURRENT MESSAGE, not to past context): {memory_context[:200]}"
+        context_section += f"\nPAST CONTEXT (background reference only  RESPOND ONLY to the CURRENT MESSAGE, not to past context): {memory_context[:200]}"
     
-    hint_section = f"\n💡 HINT: {classification_hint}" if classification_hint else ""
+    hint_section = f"\n HINT: {classification_hint}" if classification_hint else ""
     
     return f"""You are SentiMind's decision engine. SELECT AND CALL tools only. DO NOT write responses.
 
 {voice_section}
 
-═══ 5 AVAILABLE TOOLS ═══
+ 5 AVAILABLE TOOLS 
 
 1. analyze_mood(msg): emotion, sentiment, intensity (0-1)
 2. analyze_voice(path): voice_emotion, arousal, valence [VOICE ONLY]
@@ -281,70 +281,70 @@ Do NOT call analyze_voice (no audio available)"""
 4. recommend_technique(emotion): dict of 6 best techniques per category
 5. get_user_history(user_id): patterns, preferences, emotions
 
-═══ DECISION RULES ═══
+ DECISION RULES 
 
-[GREETING] No emotion words + short message → Call ZERO tools
+[GREETING] No emotion words + short message  Call ZERO tools
   Examples: "Hi", "Hey there", "How are you"
 
 [CRISIS] ONLY call handle_crisis for EXPLICIT self-harm or suicidal intent.
-  ✅ DO call: "I want to kill myself", "I've been cutting myself", "I have a plan to end my life"
-  ❌ NEVER call for: loneliness, exhaustion, worthlessness alone, social media breaks, metaphors
-  ❌ NEVER call for: "I feel worthless at work", "I'm tired of fighting deadlines",
+   DO call: "I want to kill myself", "I've been cutting myself", "I have a plan to end my life"
+   NEVER call for: loneliness, exhaustion, worthlessness alone, social media breaks, metaphors
+   NEVER call for: "I feel worthless at work", "I'm tired of fighting deadlines",
                      "I want to disappear from social media", "nobody understands me",
                      "everything feels heavy", "every day is worse", "I'm the only one who struggles"
-  RULE: If no EXPLICIT mention of dying, suicide, self-harm, or ending life → DO NOT call handle_crisis
+  RULE: If no EXPLICIT mention of dying, suicide, self-harm, or ending life  DO NOT call handle_crisis
 
-[EMOTIONAL] Has emotion words + intensity matters → analyze_mood → (if intensity ≥ 0.5 AND negative) → recommend_technique
-  ✅ Examples: "anxious about job" → analyze_mood → recommend_technique
-              "feeling great" → analyze_mood ONLY (positive, no technique)
-              "little nervous" → analyze_mood ONLY (intensity < 0.5)
+[EMOTIONAL] Has emotion words + intensity matters  analyze_mood  (if intensity  0.5 AND negative)  recommend_technique
+   Examples: "anxious about job"  analyze_mood  recommend_technique
+              "feeling great"  analyze_mood ONLY (positive, no technique)
+              "little nervous"  analyze_mood ONLY (intensity < 0.5)
 
-[EXERCISE] "breathing exercise", "meditation", "technique" → recommend_technique
+[EXERCISE] "breathing exercise", "meditation", "technique"  recommend_technique
 
-═══ TECHNIQUE SELECTION RULES ═══
+ TECHNIQUE SELECTION RULES 
 
 Match technique to the PRIMARY emotion detected by analyze_mood:
-  sadness / grief / depression → recommend_technique("sadness") [Journaling, CBT, Behavioral Activation]
-  anxiety / fear / panic / overwhelmed → recommend_technique("anxiety") [Box Breathing, 4-7-8, Body Scan]
-  anger / frustration / rage → recommend_technique("anger") [DBT Emotion Regulation, PMR]
-  neutral / mild (<0.4 intensity) → NO technique — do NOT call recommend_technique
+  sadness / grief / depression  recommend_technique("sadness") [Journaling, CBT, Behavioral Activation]
+  anxiety / fear / panic / overwhelmed  recommend_technique("anxiety") [Box Breathing, 4-7-8, Body Scan]
+  anger / frustration / rage  recommend_technique("anger") [DBT Emotion Regulation, PMR]
+  neutral / mild (<0.4 intensity)  NO technique  do NOT call recommend_technique
 
-═══ MANDATORY SEQUENCE ═══
+ MANDATORY SEQUENCE 
 
 1. NEVER call recommend_technique WITHOUT analyze_mood first
-2. ALWAYS recommend_technique IF (emotion=negative AND intensity ≥ 0.5)
+2. ALWAYS recommend_technique IF (emotion=negative AND intensity  0.5)
 3. NEVER recommend_technique FOR positive emotions
 4. NEVER call handle_crisis UNLESS explicit self-harm / suicidal language present
 5. NEVER call same tool twice
 6. ZERO tools for pure greetings/thanks
 
-═══ 8 CRITICAL EXAMPLES ═══
+ 8 CRITICAL EXAMPLES 
 
 Ex1: "Really anxious about interview"
-→ analyze_mood → recommend_technique("anxiety") ✅
+ analyze_mood  recommend_technique("anxiety") 
 
 Ex2: "Hey, how are you?"
-→ ZERO tools ✅
+ ZERO tools 
 
 Ex3: "I want to end my life"
-→ handle_crisis ONLY, STOP ✅
+ handle_crisis ONLY, STOP 
 
 Ex4: "My boss is killing me, so stressed"
-→ analyze_mood → recommend_technique("anxiety") (NOT crisis) ✅
+ analyze_mood  recommend_technique("anxiety") (NOT crisis) 
 
 Ex5: "I'm doing great today!"
-→ analyze_mood ONLY (positive emotion) ✅
+ analyze_mood ONLY (positive emotion) 
 
 Ex6: "I feel so lonely, nobody understands me"
-→ analyze_mood → recommend_technique("sadness") (NOT crisis) ✅
+ analyze_mood  recommend_technique("sadness") (NOT crisis) 
 
 Ex7: "I feel worthless at everything"
-→ analyze_mood → recommend_technique("sadness") (NOT crisis — no suicide mention) ✅
+ analyze_mood  recommend_technique("sadness") (NOT crisis  no suicide mention) 
 
 Ex8: "I've been crying all day"
-→ analyze_mood → recommend_technique("sadness") [Journaling/CBT, NOT Breathing] ✅
+ analyze_mood  recommend_technique("sadness") [Journaling/CBT, NOT Breathing] 
 
-═══ QUALITY OVER QUANTITY ═══
+ QUALITY OVER QUANTITY 
 
 Fewer tools > More tools. Accuracy > Coverage.
 When in doubt, call FEWER tools.
@@ -371,7 +371,7 @@ def _build_classification_hint(classification: dict) -> str:
         hints.append("- Preprocessing detected: Exercise request (consider recommend_technique)")
     
     if classification.get("is_emotional_distress"):
-        hints.append("- Preprocessing detected: Emotional distress (consider analyze_mood → recommend_technique)")
+        hints.append("- Preprocessing detected: Emotional distress (consider analyze_mood  recommend_technique)")
     
     if hints:
         return "\n".join(hints)
@@ -410,7 +410,7 @@ async def _execute_react_loop(
     llm_with_tools = llm.bind_tools(tools)
     tracker.checkpoint("Get LLM instance")
     
-    print(f"[AGENT] 🔄 ReAct loop started (max {max_iterations} iterations)")
+    print(f"[AGENT]  ReAct loop started (max {max_iterations} iterations)")
     
     # Track cumulative tokens across iterations
     total_tokens_used = 0
@@ -448,24 +448,24 @@ async def _execute_react_loop(
                 "message_count": len(llm_messages)
             })
             
-            print(f"[AGENT] 📊 Iteration {iteration} - Tokens: {iter_token_count:,} (cumulative: {total_tokens_used:,})")
+            print(f"[AGENT]  Iteration {iteration} - Tokens: {iter_token_count:,} (cumulative: {total_tokens_used:,})")
             
             # Call LLM
             llm_start = time.time()
             response = await _invoke_llm_with_retry(llm_with_tools, llm_messages)
             llm_time = (time.time() - llm_start) * 1000
-            print(f"[TIMING] ⏱️  LLM call (iteration {iteration}): {llm_time:.0f}ms")
+            print(f"[TIMING]   LLM call (iteration {iteration}): {llm_time:.0f}ms")
             
             # Extract tool calls
             tool_calls = response.tool_calls if hasattr(response, 'tool_calls') else []
             
             if not tool_calls:
-                print(f"[AGENT] 🛑 LLM decided no more tools needed")
+                print(f"[AGENT]  LLM decided no more tools needed")
                 break
             
             # Log what LLM wants to call
             tool_names = [tc.get('name') for tc in tool_calls if tc]
-            print(f"[AGENT] 📞 Iteration {iteration}: {', '.join(tool_names)}")
+            print(f"[AGENT]  Iteration {iteration}: {', '.join(tool_names)}")
             
             # ============================================
             # PARALLEL TOOL EXECUTION (OPTIMIZATION)
@@ -486,7 +486,7 @@ async def _execute_react_loop(
                 
                 # Deduplication check
                 if tool_name in tools_called_names:
-                    print(f"[AGENT] ⏭️ Skipping duplicate: {tool_name}")
+                    print(f"[AGENT]  Skipping duplicate: {tool_name}")
                     tool_messages.append(
                         ToolMessage(
                             content=json.dumps({"error": "Tool already called"}),
@@ -510,7 +510,7 @@ async def _execute_react_loop(
                     return_exceptions=True
                 )
                 tools_time = (time.time() - tools_start) * 1000
-                print(f"[TIMING] ⏱️  Parallel tool execution: {tools_time:.0f}ms")
+                print(f"[TIMING]   Parallel tool execution: {tools_time:.0f}ms")
                 
                 # Process results
                 for tool_call, result in zip(independent_tools, parallel_results):
@@ -518,7 +518,7 @@ async def _execute_react_loop(
                     tool_call_id = tool_call.get("id", "")
                     
                     if isinstance(result, Exception):
-                        print(f"[AGENT] ❌ Tool failed: {tool_name} - {str(result)[:50]}")
+                        print(f"[AGENT]  Tool failed: {tool_name} - {str(result)[:50]}")
                         tool_messages.append(
                             ToolMessage(
                                 content=json.dumps({"error": str(result)[:100]}),
@@ -538,11 +538,11 @@ async def _execute_react_loop(
                             "intensity": result.get("intensity", 0.5),
                             "confidence": result.get("confidence", 0.5)
                         }
-                        print(f"[AGENT] 📊 Mood: {emotion_data['emotion']} ({emotion_data['intensity']:.0%})")
+                        print(f"[AGENT]  Mood: {emotion_data['emotion']} ({emotion_data['intensity']:.0%})")
                     
                     elif tool_name == "analyze_voice" and result:
                         voice_data = result
-                        print(f"[AGENT] 🎤 Voice: {result.get('voice_emotion', 'unknown')}")
+                        print(f"[AGENT]  Voice: {result.get('voice_emotion', 'unknown')}")
                     
                     tool_messages.append(
                         ToolMessage(
@@ -568,13 +568,13 @@ async def _execute_react_loop(
                         if isinstance(result, dict) and len(result) > 0:
                             techniques_by_category = result
                             first_category = next(iter(result.values())) if result else {}
-                            print(f"[AGENT] 🎯 Techniques: {len(result)} categories found")
+                            print(f"[AGENT]  Techniques: {len(result)} categories found")
                     
                     elif tool_name == "handle_crisis" and result:
                         crisis_level = result.get("risk_level", "low")
                         crisis_detected = crisis_level in ["medium", "high"]
                         crisis_resources = result.get("resources")
-                        print(f"[AGENT] 🚨 Crisis: {crisis_level}")
+                        print(f"[AGENT]  Crisis: {crisis_level}")
                         
                         # If crisis confirmed, stop immediately
                         if crisis_detected:
@@ -599,7 +599,7 @@ async def _execute_react_loop(
                     )
                     
                 except Exception as e:
-                    print(f"[AGENT] ⚠️ Tool error: {tool_name}: {str(e)[:100]}")
+                    print(f"[AGENT]  Tool error: {tool_name}: {str(e)[:100]}")
                     tool_messages.append(
                         ToolMessage(
                             content=json.dumps({"error": str(e)[:100]}),
@@ -613,20 +613,20 @@ async def _execute_react_loop(
             
             # Stop if crisis detected
             if crisis_detected:
-                print(f"[AGENT] 🚨 Crisis detected - stopping loop")
+                print(f"[AGENT]  Crisis detected - stopping loop")
                 break
                 
         except Exception as e:
-            print(f"[AGENT] ❌ Iteration error: {str(e)[:100]}")
+            print(f"[AGENT]  Iteration error: {str(e)[:100]}")
             break
     
     # Log final token usage summary
-    print(f"\n[AGENT] 💾 TOKEN USAGE SUMMARY:")
-    print(f"  ├─ Total Iterations: {iteration}")
-    print(f"  ├─ Total Tokens Used: {total_tokens_used:,}")
+    print(f"\n[AGENT]  TOKEN USAGE SUMMARY:")
+    print(f"   Total Iterations: {iteration}")
+    print(f"   Total Tokens Used: {total_tokens_used:,}")
     if iteration > 0:
-        print(f"  ├─ Avg Tokens per Iteration: {total_tokens_used // iteration:,}")
-    print(f"  └─ Iteration Log: {iteration_token_logs}")
+        print(f"   Avg Tokens per Iteration: {total_tokens_used // iteration:,}")
+    print(f"   Iteration Log: {iteration_token_logs}")
     
     return {
         "tools_called": tools_called,
@@ -714,7 +714,7 @@ async def _invoke_llm_with_retry(llm_with_tools, messages, max_retries: int = 2)
             # Handle rate limits (429 error)
             if "429" in error_str or "rate" in error_str:
                 if attempt < max_retries:
-                    print(f"[AGENT] 🔄 Rate limited, rotating key")
+                    print(f"[AGENT]  Rate limited, rotating key")
                     manager = get_llm_manager()
                     manager.mark_key_failed()
                     new_llm = manager.get_llm()
@@ -743,7 +743,7 @@ def _post_process_results(result: dict, state: dict) -> dict:
     tools_called = result["tools_called"]
     
     # FIX 4: If crisis was detected but the LLM skipped analyze_mood
-    # (common — LLM jumps straight to handle_crisis), the emotion_data
+    # (common  LLM jumps straight to handle_crisis), the emotion_data
     # remains at the default 'neutral'. Run a quick synchronous fallback
     # to give the API response, dashboard, and analytics a real emotion label.
     if crisis_detected and emotion_data.get("emotion") == "neutral" and state.get("messages"):
@@ -751,12 +751,12 @@ def _post_process_results(result: dict, state: dict) -> dict:
             import asyncio
             raw_message = state["messages"][-1].content if state["messages"] else ""
             if raw_message:
-                print("[AGENT] 🔄 FIX4: Crisis path — forcing mood analysis for emotion label...")
+                print("[AGENT]  FIX4: Crisis path  forcing mood analysis for emotion label...")
                 from ..tools import analyze_mood as _analyze_mood_tool
                 # Run synchronously in an executor to avoid blocking the event loop
                 loop = asyncio.get_event_loop()
                 if loop.is_running():
-                    # We are already inside an async context — invoke directly
+                    # We are already inside an async context  invoke directly
                     import concurrent.futures
                     with concurrent.futures.ThreadPoolExecutor() as pool:
                         future = pool.submit(_analyze_mood_tool.invoke, {"message": raw_message})
@@ -766,7 +766,7 @@ def _post_process_results(result: dict, state: dict) -> dict:
                         _analyze_mood_tool.ainvoke({"message": raw_message})
                     )
                 if mood_result and mood_result.get("emotion") != "neutral":
-                    print(f"[AGENT] ✅ FIX4: Crisis emotion corrected: neutral → {mood_result['emotion']}")
+                    print(f"[AGENT]  FIX4: Crisis emotion corrected: neutral  {mood_result['emotion']}")
                     emotion_data = {
                         "emotion": mood_result.get("emotion", "neutral"),
                         "sentiment": mood_result.get("sentiment", "negative"),
@@ -774,8 +774,8 @@ def _post_process_results(result: dict, state: dict) -> dict:
                         "confidence": mood_result.get("confidence", 0.7),
                     }
         except Exception as e:
-            print(f"[AGENT] ⚠️ FIX4: Fallback mood analysis failed: {e}")
-            # Keep existing emotion_data — still better than crashing
+            print(f"[AGENT]  FIX4: Fallback mood analysis failed: {e}")
+            # Keep existing emotion_data  still better than crashing
     
     # Determine intent
     intent = "casual"

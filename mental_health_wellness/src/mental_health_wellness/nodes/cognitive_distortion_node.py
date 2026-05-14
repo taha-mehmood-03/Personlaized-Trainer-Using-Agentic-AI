@@ -54,7 +54,7 @@ DISTORTION_EXPLANATIONS: dict[str, str] = {
 
 async def detect_cognitive_distortions(state: MentalHealthState) -> dict:
     """
-    COGNITIVE DISTORTION DETECTOR — LLM-Based Analysis (v7.0).
+    COGNITIVE DISTORTION DETECTOR  LLM-Based Analysis (v7.0).
 
     Process:
     1. Extract user's message text
@@ -69,7 +69,7 @@ async def detect_cognitive_distortions(state: MentalHealthState) -> dict:
 
     user_message = messages[-1].content.lower()
 
-    # Skip very short messages — distortions need context
+    # Skip very short messages  distortions need context
     if len(user_message.split()) < 4:
         return _no_distortion_result()
 
@@ -79,10 +79,10 @@ async def detect_cognitive_distortions(state: MentalHealthState) -> dict:
     # CHITCHAT/POSITIVE BYPASS: If emotion is neutral or positive
     # with low intensity, skip the LLM call entirely for efficiency
     if emotion in ["neutral", "joy", "surprise"] and intensity < 0.3:
-        print(f"[NODE: DISTORTION] ⏩ Skipping distortion check (positive/neutral mood: {emotion} {intensity:.0%})")
+        print(f"[NODE: DISTORTION]  Skipping distortion check (positive/neutral mood: {emotion} {intensity:.0%})")
         return _no_distortion_result()
 
-    print(f"\n[NODE: DISTORTION] 🧠 Analyzing for cognitive distortions using LLM...")
+    print(f"\n[NODE: DISTORTION]  Analyzing for cognitive distortions using LLM...")
 
     # ============================================
     # LLM-BASED DISTORTION DETECTION
@@ -90,9 +90,9 @@ async def detect_cognitive_distortions(state: MentalHealthState) -> dict:
     llm_result = await llm_distortion_check(user_message)
     
     if llm_result.get("distortion_type"):
-        print(f"[NODE: DISTORTION] ✅ Detected: {llm_result['distortion_type']} ({llm_result.get('confidence', 0):.0%})")
+        print(f"[NODE: DISTORTION]  Detected: {llm_result['distortion_type']} ({llm_result.get('confidence', 0):.0%})")
         if llm_result.get("all_distortions") and len(llm_result["all_distortions"]) > 1:
-            print(f"[NODE: DISTORTION] 🔍 Also found: {', '.join(llm_result['all_distortions'][1:])}")
+            print(f"[NODE: DISTORTION]  Also found: {', '.join(llm_result['all_distortions'][1:])}")
         
         return {
             "distortion_type":        llm_result.get("distortion_type"),
@@ -101,7 +101,7 @@ async def detect_cognitive_distortions(state: MentalHealthState) -> dict:
             "all_distortions":        llm_result.get("all_distortions", []),
         }
     
-    print(f"[NODE: DISTORTION] ✅ No cognitive distortions detected")
+    print(f"[NODE: DISTORTION]  No cognitive distortions detected")
     return _no_distortion_result()
 
 

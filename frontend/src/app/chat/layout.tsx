@@ -1,10 +1,11 @@
-import { cookies } from 'next/headers'
 import { redirect } from 'next/navigation'
-import { Session, Message } from '@/types'
+import { getServerSession } from 'next-auth'
+import { authOptions } from '@/lib/auth'
+import { Message, Session } from '@/types'
 import { ChatLayout } from '@/components/chat/ChatLayout'
 import { getSessions, getLatestSession } from '@/actions/chat'
 
-// Force dynamic rendering to ensure fresh cookies are read
+// Force dynamic rendering to ensure a fresh session is read on every request
 export const dynamic = 'force-dynamic'
 
 export default async function ChatPageLayout({
@@ -12,13 +13,16 @@ export default async function ChatPageLayout({
 }: {
   children: React.ReactNode
 }) {
-  const cookieStore = cookies()
-  const userId = cookieStore.get('sentimind_user_id')?.value
+  const session = await getServerSession(authOptions)
 
-  // For testing, fallback to anonymous if no cookie
-  const currentUserId = userId || 'anonymous'
+  // Redirect unauthenticated users to login
+  if (!session?.user?.id) {
+    redirect('/login')
+  }
 
-  // Server-side fetch initial data
+  const currentUserId = session.user.id
+
+  // Server-side fetch initial data using the real authenticated user ID
   const [sessions, latest] = await Promise.all([
     getSessions(currentUserId),
     getLatestSession(currentUserId),
@@ -33,8 +37,7 @@ export default async function ChatPageLayout({
     >
       {/* 
         This is where Next.js pushes /chat/page.tsx or /chat/[sessionId]/page.tsx
-        But since ChatLayout manages local state right now to prevent hard reloads
-        on SSE streams, we pass children primarily for Next.js routing structure.
+        ChatLayout manages local state to prevent hard reloads on SSE streams.
       */}
       {children}
     </ChatLayout>

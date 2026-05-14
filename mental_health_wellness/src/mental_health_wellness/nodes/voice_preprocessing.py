@@ -8,10 +8,10 @@ Runs BEFORE the main pipeline if audio is present
 SEQUENTIAL STEPS:
 1. Save Audio to Temp File - Receive blob, write to disk
 2. Speech-to-Text (Transcription) - REUSED from analyze_voice_full (zero double-ASR overhead)
-3. Extract Voice Features - OpenSMILE/Wav2Vec2/torchaudio → emotion + acoustics
+3. Extract Voice Features - OpenSMILE/Wav2Vec2/torchaudio  emotion + acoustics
 
 NEW IN THIS VERSION:
-- Uses the transcription from analyze_voice_full() — no second Whisper call
+- Uses the transcription from analyze_voice_full()  no second Deepgram call
 - Passes distress_index, pause_density, mfcc_vector into state
 - Writes voice_distress_index and voice_pause_density to state for emotion_fusion_node
 
@@ -52,14 +52,14 @@ async def preprocess_voice_input(state: MentalHealthState) -> dict:
         - voice_processed:       bool   True if voice was successfully analyzed
         - temp_audio_path:       str    Path to saved temp file (for cleanup later)
     """
-    print(f"\n[NODE: VOICE_PREPROCESSING] 🎤 Starting voice processing")
+    print(f"\n[NODE: VOICE_PREPROCESSING]  Starting voice processing")
 
     audio_file_path = state.get("audio_file_path", "")
     audio_bytes     = state.get("audio_bytes", None)
     message         = state.get("message", "")
 
     if not audio_file_path and not audio_bytes:
-        print("[NODE: VOICE_PREPROCESSING] ⚠️ No audio input — skipping voice processing")
+        print("[NODE: VOICE_PREPROCESSING]  No audio input  skipping voice processing")
         return {
             "voice_processed": False,
             "voice_features":  None,
@@ -72,7 +72,7 @@ async def preprocess_voice_input(state: MentalHealthState) -> dict:
         # ============================================
         # STEP 1: SAVE AUDIO TO TEMP FILE
         # ============================================
-        print("[NODE: VOICE_PREPROCESSING] 💾 Step 1: Saving audio to temp file")
+        print("[NODE: VOICE_PREPROCESSING]  Step 1: Saving audio to temp file")
 
         if audio_bytes:
             suffix = ".wav"
@@ -82,13 +82,13 @@ async def preprocess_voice_input(state: MentalHealthState) -> dict:
             with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
                 tmp.write(audio_bytes)
                 temp_audio_path = tmp.name
-            print(f"[NODE: VOICE_PREPROCESSING] ✅ Saved audio bytes: {temp_audio_path}")
+            print(f"[NODE: VOICE_PREPROCESSING]  Saved audio bytes: {temp_audio_path}")
         else:
             temp_audio_path = audio_file_path
-            print(f"[NODE: VOICE_PREPROCESSING] ✅ Using provided audio file: {temp_audio_path}")
+            print(f"[NODE: VOICE_PREPROCESSING]  Using provided audio file: {temp_audio_path}")
 
         if not os.path.exists(temp_audio_path):
-            print(f"[NODE: VOICE_PREPROCESSING] ⚠️ Audio file not found: {temp_audio_path}")
+            print(f"[NODE: VOICE_PREPROCESSING]  Audio file not found: {temp_audio_path}")
             return {
                 "voice_processed": False,
                 "voice_features":  None,
@@ -100,23 +100,23 @@ async def preprocess_voice_input(state: MentalHealthState) -> dict:
         # ============================================
         # STEP 2 + 3: FULL VOICE ANALYSIS (one pass)
         # analyze_voice_full() runs:
-        #   a) Acoustic feature extraction (OpenSMILE → torchaudio → librosa)
+        #   a) Acoustic feature extraction (OpenSMILE  torchaudio  librosa)
         #   b) Emotion classification (wav2vec2)
-        #   c) ASR transcription (Whisper-tiny)
-        # We reuse the transcription — NO second ASR call needed.
+        #   c) ASR transcription (Deepgram Nova-2)
+        # We reuse the transcription  NO second ASR call needed.
         # ============================================
-        print("[NODE: VOICE_PREPROCESSING] 🔊 Step 2+3: Running full voice analysis (one pass)")
+        print("[NODE: VOICE_PREPROCESSING]  Step 2+3: Running full voice analysis (one pass)")
 
         full_result = analyze_voice_full(temp_audio_path)
 
-        # ── Extract transcription (from shared ASR call) ──
+        #  Extract transcription (from shared ASR call) 
         transcription = full_result.get("transcription", "")
         if transcription:
-            print(f"[NODE: VOICE_PREPROCESSING] ✅ Transcription: '{transcription[:100]}'")
+            print(f"[NODE: VOICE_PREPROCESSING]  Transcription: '{transcription[:100]}'")
         else:
-            print("[NODE: VOICE_PREPROCESSING] ⚠️ Transcription returned empty — using original message as fallback")
+            print("[NODE: VOICE_PREPROCESSING]  Transcription returned empty  using original message as fallback")
 
-        # ── Build voice_features dict (what emotion_fusion_node expects) ──
+        #  Build voice_features dict (what emotion_fusion_node expects) 
         acoustic = full_result.get("acoustic_features", {})
         voice_features = {
             "emotion":           full_result.get("emotion", "neutral"),
@@ -134,7 +134,7 @@ async def preprocess_voice_input(state: MentalHealthState) -> dict:
         distress_index = voice_features["distress_index"]
         pause_density  = voice_features["pause_density"]
         print(
-            f"[NODE: VOICE_PREPROCESSING] ✅ Voice emotion: {voice_features['emotion']} "
+            f"[NODE: VOICE_PREPROCESSING]  Voice emotion: {voice_features['emotion']} "
             f"(conf={voice_features['confidence']:.2f}) | "
             f"distress_index={distress_index:.2f} | "
             f"pause_density={pause_density:.2f}"
@@ -157,7 +157,7 @@ async def preprocess_voice_input(state: MentalHealthState) -> dict:
         }
 
     except Exception as e:
-        print(f"[NODE: VOICE_PREPROCESSING] ❌ Error: {str(e)}")
+        print(f"[NODE: VOICE_PREPROCESSING]  Error: {str(e)}")
         import traceback
         traceback.print_exc()
 

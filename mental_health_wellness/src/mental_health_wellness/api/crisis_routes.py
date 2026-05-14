@@ -35,16 +35,16 @@ def get_location_from_ip(ip_address: Optional[str] = None) -> Dict[str, Any]:
         # Get client IP if not provided, or if it's localhost
         if not ip_address or ip_address in ['127.0.0.1', 'localhost', '::1']:
             try:
-                print(f"[GEO] 🌐 Detecting public IP (provided: {ip_address})...")
+                print(f"[GEO]  Detecting public IP (provided: {ip_address})...")
                 ip_response = requests.get('https://api.ipify.org?format=json', timeout=3)
                 ip_address = ip_response.json().get('ip')
-                print(f"[GEO] ✅ Detected public IP: {ip_address}")
+                print(f"[GEO]  Detected public IP: {ip_address}")
             except Exception as e:
-                print(f"[GEO] ⚠️ Could not auto-detect IP: {e}")
+                print(f"[GEO]  Could not auto-detect IP: {e}")
                 return {'success': False, 'error': 'Could not detect IP'}
         
         # Use ip-api.com for geolocation (free, no key needed, accurate)
-        print(f"[GEO] 🔍 Looking up location for IP: {ip_address}")
+        print(f"[GEO]  Looking up location for IP: {ip_address}")
         geo_response = requests.get(
             f'http://ip-api.com/json/{ip_address}?fields=status,lat,lon,city,regionName,country,isp',
             timeout=5
@@ -61,19 +61,19 @@ def get_location_from_ip(ip_address: Optional[str] = None) -> Dict[str, Any]:
                     'region': data.get('regionName', 'Unknown'),
                     'country': data.get('country', 'Unknown'),
                     'isp': data.get('isp', 'Unknown'),
-                    'accuracy': '±500 metres',  # Typical IP geolocation accuracy
+                    'accuracy': '500 metres',  # Typical IP geolocation accuracy
                     'method': 'IP-based (automatic, no permission needed)',
                     'ip': ip_address
                 }
                 print(f"[GEO] [OK] Location found: {location['city']}, {location['country']}")
                 return location
         
-        print(f"[GEO] ⚠️ ip-api returned: {data.get('message', 'Unknown error')}")
+        print(f"[GEO]  ip-api returned: {data.get('message', 'Unknown error')}")
         return {'success': False, 'error': 'IP lookup failed'}
         
     except Exception as e:
-        logger.error(f"[GEO] ❌ Error getting IP geolocation: {str(e)}")
-        print(f"[GEO] ❌ Exception: {e}")
+        logger.error(f"[GEO]  Error getting IP geolocation: {str(e)}")
+        print(f"[GEO]  Exception: {e}")
         return {
             'success': False,
             'error': str(e),
@@ -135,7 +135,7 @@ async def get_resources(request: CrisisResourceRequest) -> Dict[str, Any]:
         Crisis resources with hotlines, text lines, and support options
     """
     try:
-        print(f"[API] 📞 Crisis resources request for {request.country_code}")
+        print(f"[API]  Crisis resources request for {request.country_code}")
         
         resources = get_crisis_resources(request.country_code)
         
@@ -159,7 +159,7 @@ async def detect_country(request: CountryDetectionRequest) -> Dict[str, Any]:
         Detected country code
     """
     try:
-        print(f"[API] 🌍 Country detection request")
+        print(f"[API]  Country detection request")
         
         country = CountryDetector.detect(
             phone=request.phone,
@@ -167,7 +167,7 @@ async def detect_country(request: CountryDetectionRequest) -> Dict[str, Any]:
             user_data=request.user_data
         )
         
-        print(f"[API] ✅ Detected country: {country}")
+        print(f"[API]  Detected country: {country}")
         
         return {
             "success": True,
@@ -194,14 +194,14 @@ async def initiate_crisis_call(request: CrisisCallRequest) -> Dict[str, Any]:
         Call status and details
     """
     try:
-        print(f"[API] 📞 Crisis call initiation for user {request.user_id}")
+        print(f"[API]  Crisis call initiation for user {request.user_id}")
         
         # Get primary hotline if not specified
         hotline = request.hotline_number
         if not hotline:
             resources = get_crisis_resources(request.country_code)
             hotline = resources.get("primary_hotline", {}).get("number", "988")
-            print(f"[API] 🔍 Using primary hotline: {hotline}")
+            print(f"[API]  Using primary hotline: {hotline}")
         
         # Initiate call via Twilio
         twilio_service = get_twilio_service()
@@ -238,16 +238,16 @@ async def send_crisis_sms(request: CrisisSMSRequest) -> Dict[str, Any]:
         SMS status
     """
     try:
-        print(f"[API] 📱 Crisis SMS request for user {request.user_id}")
+        print(f"[API]  Crisis SMS request for user {request.user_id}")
         
         # Build SMS message with country-specific resources
         resources = get_crisis_resources(request.country_code)
         hotline = resources.get("primary_hotline", {})
         
-        message = f"""🆘 CRISIS SUPPORT - {request.country_code}
+        message = f""" CRISIS SUPPORT - {request.country_code}
 
 {hotline.get('name', 'Crisis Hotline')}
-📞 {hotline.get('number', 'N/A')} 
+ {hotline.get('number', 'N/A')} 
 
 Available: {hotline.get('available', '24/7')}
 
@@ -285,7 +285,7 @@ async def get_call_status(call_sid: str) -> Dict[str, Any]:
         Call status and details
     """
     try:
-        print(f"[API] 📊 Checking call status: {call_sid}")
+        print(f"[API]  Checking call status: {call_sid}")
         
         twilio_service = get_twilio_service()
         result = twilio_service.get_call_status(call_sid)
@@ -357,7 +357,7 @@ async def alert_pakistan_crisis_center(request: PakistanCrisisAlertRequest) -> D
     """
     try:
         print(f"\n{'='*60}")
-        print(f"[API-CRISIS] 🚨 Pakistan Crisis Alert Request")
+        print(f"[API-CRISIS]  Pakistan Crisis Alert Request")
         print(f"[API-CRISIS] User: {request.user_name} (ID: {request.user_id})")
         print(f"[API-CRISIS] Level: {request.crisis_level}")
         print(f"{'='*60}")
@@ -374,16 +374,16 @@ async def alert_pakistan_crisis_center(request: PakistanCrisisAlertRequest) -> D
         )
         
         if result.get("success"):
-            print(f"[API-CRISIS] ✅ Emergency call to Pakistan crisis center initiated")
+            print(f"[API-CRISIS]  Emergency call to Pakistan crisis center initiated")
             print(f"[API-CRISIS] Call SID: {result.get('call_sid')}")
         else:
-            print(f"[API-CRISIS] ⚠️ Call initiation failed: {result.get('error')}")
+            print(f"[API-CRISIS]  Call initiation failed: {result.get('error')}")
         
         return result
     
     except Exception as e:
         logger.error(f"Error alerting Pakistan crisis center: {str(e)}")
-        print(f"[API-CRISIS] ❌ Exception: {e}")
+        print(f"[API-CRISIS]  Exception: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -404,7 +404,7 @@ async def alert_pakistan_whatsapp(request: PakistanCrisisAlertRequest) -> Dict[s
         WhatsApp message status
     """
     try:
-        print(f"[API-CRISIS] 📱 Sending WhatsApp alert to Pakistan crisis center")
+        print(f"[API-CRISIS]  Sending WhatsApp alert to Pakistan crisis center")
         
         twilio_service = get_twilio_service()
         
@@ -442,7 +442,7 @@ async def handle_twilio_response(request: Request) -> Dict[str, Any]:
         digit_pressed = form_data.get("Digits", "")
         call_sid = form_data.get("CallSid", "")
         
-        print(f"[TWILIO-RESPONSE] 📞 Response from crisis center")
+        print(f"[TWILIO-RESPONSE]  Response from crisis center")
         print(f"[TWILIO-RESPONSE] Call SID: {call_sid}")
         print(f"[TWILIO-RESPONSE] Digit pressed: {digit_pressed}")
         
@@ -460,7 +460,7 @@ async def handle_twilio_response(request: Request) -> Dict[str, Any]:
 async def handle_twilio_status(request: Request) -> Dict[str, Any]:
     """
     Handle Twilio call status callback.
-    Tracks: initiated → ringing → answered → completed/failed
+    Tracks: initiated  ringing  answered  completed/failed
     
     Args:
         request: Twilio webhook request with call status
@@ -474,7 +474,7 @@ async def handle_twilio_status(request: Request) -> Dict[str, Any]:
         call_status = form_data.get("CallStatus", "")
         call_duration = form_data.get("CallDuration", "0")
         
-        print(f"[TWILIO-STATUS] 📊 Call Status Update")
+        print(f"[TWILIO-STATUS]  Call Status Update")
         print(f"[TWILIO-STATUS] Call SID: {call_sid}")
         print(f"[TWILIO-STATUS] Status: {call_status}")
         print(f"[TWILIO-STATUS] Duration: {call_duration}s")
@@ -511,7 +511,7 @@ async def test_whatsapp_alert(request: Dict[str, Any]) -> Dict[str, Any]:
         user_id = request.get("user_id", "test-user")
         crisis_level = request.get("crisis_level", "medium")
         
-        print(f"\n[TEST] 🧪 Testing WhatsApp crisis alert")
+        print(f"\n[TEST]  Testing WhatsApp crisis alert")
         print(f"[TEST] User ID: {user_id}")
         print(f"[TEST] Crisis Level: {crisis_level}")
         
@@ -583,24 +583,24 @@ async def send_location_alert(request: LocationAlertRequest) -> Dict[str, Any]:
         success flag, message_sid, channel used, and maps_link
     """
     try:
-        print(f"\n[CRISIS-LOC] 📍 GPS LOCATION ALERT - Browser Geolocation")
-        print(f"[CRISIS-LOC] 🎯 PRECISE LOCATION FROM USER'S BROWSER GPS")
+        print(f"\n[CRISIS-LOC]  GPS LOCATION ALERT - Browser Geolocation")
+        print(f"[CRISIS-LOC]  PRECISE LOCATION FROM USER'S BROWSER GPS")
         print(f"[CRISIS-LOC]   User:     {request.user_id}")
         print(f"[CRISIS-LOC]   Level:    {request.crisis_level.upper()}")
         print(f"[CRISIS-LOC]   LatLng:   {request.latitude:.5f}, {request.longitude:.5f}")
         print(f"[CRISIS-LOC]   Link:     https://www.google.com/maps?q={request.latitude},{request.longitude}")
         if request.accuracy:
-            print(f"[CRISIS-LOC]   Accuracy: ±{request.accuracy:.0f} m (Precise GPS)")
+            print(f"[CRISIS-LOC]   Accuracy: {request.accuracy:.0f} m (Precise GPS)")
         else:
-            print(f"[CRISIS-LOC]   Accuracy: ±5-20 m (High precision GPS)")
+            print(f"[CRISIS-LOC]   Accuracy: 5-20 m (High precision GPS)")
 
         whatsapp_service = get_crisis_whatsapp_service()
 
         if not whatsapp_service.client:
-            print(f"[CRISIS-LOC] ⚠️  Twilio not configured — skipping location alert")
+            print(f"[CRISIS-LOC]   Twilio not configured  skipping location alert")
             return {
                 "success": False,
-                "error": "WhatsApp service not configured — check Twilio credentials in .env",
+                "error": "WhatsApp service not configured  check Twilio credentials in .env",
                 "configured": False,
             }
 
@@ -614,10 +614,10 @@ async def send_location_alert(request: LocationAlertRequest) -> Dict[str, Any]:
         )
 
         if result.get("success"):
-            print(f"[CRISIS-LOC] ✅ Location alert sent via {result.get('channel')} — SID: {result.get('message_sid')}")
+            print(f"[CRISIS-LOC]  Location alert sent via {result.get('channel')}  SID: {result.get('message_sid')}")
             print(f"[CRISIS-LOC]   Maps link: {result.get('maps_link')}")
         else:
-            print(f"[CRISIS-LOC] ❌ Location alert failed: {result.get('error')}")
+            print(f"[CRISIS-LOC]  Location alert failed: {result.get('error')}")
 
         # Ensure response is properly JSON serializable
         try:
@@ -633,7 +633,7 @@ async def send_location_alert(request: LocationAlertRequest) -> Dict[str, Any]:
             }
             return response
         except Exception as e:
-            print(f"[CRISIS-LOC] ⚠️ Error formatting response: {e}")
+            print(f"[CRISIS-LOC]  Error formatting response: {e}")
             return {
                 "success": result.get("success", False),
                 "error": "Error formatting response",
@@ -643,7 +643,7 @@ async def send_location_alert(request: LocationAlertRequest) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Error sending location alert: {str(e)}")
         import traceback
-        print(f"[CRISIS-LOC] ❌ Exception: {e}")
+        print(f"[CRISIS-LOC]  Exception: {e}")
         traceback.print_exc()
         return {
             "success": False,
@@ -672,7 +672,7 @@ async def send_location_auto(request: AutoLocationRequest, req: Request) -> Dict
       - City, Region, Country
       - Latitude / Longitude
       - Clickable Google Maps link
-      - Accuracy: ±500 metres (typical IP geolocation accuracy)
+      - Accuracy: 500 metres (typical IP geolocation accuracy)
     
     Args:
         request: AutoLocationRequest with user_id, crisis_level, optional ip_address
@@ -689,8 +689,8 @@ async def send_location_auto(request: AutoLocationRequest, req: Request) -> Dict
             client_ip = req.client.host if req.client else None
             ip_to_lookup = client_ip
         
-        print(f"\n[AUTO-LOC] 🔄 IP-BASED FALLBACK LOCATION ALERT")
-        print(f"[AUTO-LOC] ⚠️ GPS PERMISSION DENIED OR UNAVAILABLE - Using IP-based fallback")
+        print(f"\n[AUTO-LOC]  IP-BASED FALLBACK LOCATION ALERT")
+        print(f"[AUTO-LOC]  GPS PERMISSION DENIED OR UNAVAILABLE - Using IP-based fallback")
         print(f"[AUTO-LOC]   User:     {request.user_id}")
         print(f"[AUTO-LOC]   Level:    {request.crisis_level.upper()}")
         print(f"[AUTO-LOC]   IP:       {ip_to_lookup}")
@@ -699,7 +699,7 @@ async def send_location_auto(request: AutoLocationRequest, req: Request) -> Dict
         location = get_location_from_ip(ip_to_lookup)
         
         if not location.get('success'):
-            print(f"[AUTO-LOC] ⚠️ Location lookup failed: {location.get('error')}")
+            print(f"[AUTO-LOC]  Location lookup failed: {location.get('error')}")
             return {
                 "success": False,
                 "error": location.get('error', 'Could not determine location from IP'),
@@ -707,16 +707,16 @@ async def send_location_auto(request: AutoLocationRequest, req: Request) -> Dict
                 "location": location
             }
         
-        print(f"[AUTO-LOC] ✅ Location found: {location['city']}, {location['region']}, {location['country']}")
+        print(f"[AUTO-LOC]  Location found: {location['city']}, {location['region']}, {location['country']}")
         
         # Send WhatsApp with location
         whatsapp_service = get_crisis_whatsapp_service()
         
         if not whatsapp_service.client:
-            print(f"[AUTO-LOC] ⚠️ Twilio not configured")
+            print(f"[AUTO-LOC]  Twilio not configured")
             return {
                 "success": False,
-                "error": "WhatsApp service not configured — check Twilio credentials in .env",
+                "error": "WhatsApp service not configured  check Twilio credentials in .env",
                 "configured": False,
                 "location": location
             }
@@ -734,12 +734,12 @@ async def send_location_auto(request: AutoLocationRequest, req: Request) -> Dict
         )
         
         if result.get("success"):
-            print(f"[AUTO-LOC] ✅ Auto location alert sent via {result.get('channel')} — SID: {result.get('message_sid')}")
+            print(f"[AUTO-LOC]  Auto location alert sent via {result.get('channel')}  SID: {result.get('message_sid')}")
             print(f"[AUTO-LOC]   Location: {location['city']}, {location['country']}")
             print(f"[AUTO-LOC]   LatLng: {location['latitude']}, {location['longitude']}")
             print(f"[AUTO-LOC]   Maps: {result.get('maps_link')}")
         else:
-            print(f"[AUTO-LOC] ❌ WhatsApp send failed: {result.get('error')}")
+            print(f"[AUTO-LOC]  WhatsApp send failed: {result.get('error')}")
         
         return {
             "success": result.get("success", False),
@@ -756,6 +756,6 @@ async def send_location_auto(request: AutoLocationRequest, req: Request) -> Dict
     except Exception as e:
         logger.error(f"Error in send_location_auto: {str(e)}")
         import traceback
-        print(f"[AUTO-LOC] ❌ Exception: {e}")
+        print(f"[AUTO-LOC]  Exception: {e}")
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))

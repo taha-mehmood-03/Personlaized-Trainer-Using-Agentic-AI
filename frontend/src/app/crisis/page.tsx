@@ -5,8 +5,12 @@ import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Phone, ShieldAlert, Loader } from 'lucide-react'
 import { api, CrisisResource, CrisisCallResponse } from '@/lib/api'
+import { BreathingGuide } from '@/components/crisis/BreathingGuide'
+import { useSession } from 'next-auth/react'
 
 export default function CrisisPage() {
+  const { data: session } = useSession()
+  const userId = session?.user?.id ?? 'anonymous'
   const [resources, setResources] = useState<CrisisResource | null>(null)
   const [countryCode, setCountryCode] = useState<string>('US')
   const [loading, setLoading] = useState(true)
@@ -32,7 +36,7 @@ export default function CrisisPage() {
         const country = detectResult.data?.country_code || 'US'
         const resourceResult = await api.post<CrisisResource>('/crisis/resources', {
           country_code: country,
-          user_id: 'anonymous'
+          user_id: userId
         })
         
         if (resourceResult.ok && resourceResult.data) {
@@ -64,7 +68,7 @@ export default function CrisisPage() {
     }
 
     fetchResources()
-  }, [])
+  }, [userId])
 
   const handleDirectCall = async () => {
     try {
@@ -181,7 +185,31 @@ export default function CrisisPage() {
           </div>
         )}
 
-        <div className="pt-8 border-t border-slate-100">
+        {/* Breathing First Aid — Stitch V2 */}
+        <div className="border-t border-slate-100 pt-6">
+          <p className="text-xs font-bold text-slate-500 uppercase tracking-widest text-center mb-4">
+            Breathing First Aid
+          </p>
+          <BreathingGuide autoStart />
+        </div>
+
+        {/* Affirmation pills */}
+        <div className="flex flex-wrap gap-2 justify-center">
+          {[
+            'This feeling is temporary',
+            'Help is available right now',
+            'Your safety matters deeply',
+          ].map((msg) => (
+            <span
+              key={msg}
+              className="px-4 py-2 bg-rose-50 border border-rose-100 text-rose-700 rounded-full text-xs font-semibold"
+            >
+              {msg}
+            </span>
+          ))}
+        </div>
+
+        <div className="pt-4 border-t border-slate-100">
           <Button asChild variant="ghost" className="text-slate-500">
             <Link href="/chat">Return to Chat</Link>
           </Button>

@@ -85,18 +85,18 @@ async def load_user_context(state: MentalHealthState) -> dict:
     voice_features = state.get("voice_features", {})
     intake_errors = []
     
-    print(f"\n[NODE: INTAKE] 👤 Loading context for user: {user_id}, session: {session_id}")
+    print(f"\n[NODE: INTAKE]  Loading context for user: {user_id}, session: {session_id}")
     
     if not user_id:
         error_msg = "user_id is required in state"
-        print(f"[NODE: INTAKE] ❌ FATAL: {error_msg}")
+        print(f"[NODE: INTAKE]  FATAL: {error_msg}")
         raise ValueError(error_msg)
     
     # ============================================
     # STEP 1: LOAD USER STATS & PREFERENCES (CACHED)
     # ============================================
     
-    print("[NODE: INTAKE] 📊 Step 1: Loading user stats & preferences")
+    print("[NODE: INTAKE]  Step 1: Loading user stats & preferences")
     
     # Check cache first (OPTIMIZATION)
     cached_data = _get_cached_user_data(user_id)
@@ -106,16 +106,16 @@ async def load_user_context(state: MentalHealthState) -> dict:
         sessions = cached_data.get("total_sessions", 0)
         emotion = cached_data.get("most_common_emotion", "neutral")
         user_prefs = cached_data.get("preferences", {})
-        print(f"[NODE: INTAKE] ⚡ Using CACHED user data (fresh)")
+        print(f"[NODE: INTAKE]  Using CACHED user data (fresh)")
     else:
         try:
             history = await get_user_history.ainvoke({"user_id": user_id})
             is_new = history.get("is_new_user", True)
             sessions = history.get("total_sessions", 0)
             emotion = history.get("most_common_emotion", "neutral")
-            print(f"[NODE: INTAKE] ✅ User stats: new={is_new}, sessions={sessions}, mood={emotion}")
+            print(f"[NODE: INTAKE]  User stats: new={is_new}, sessions={sessions}, mood={emotion}")
         except Exception as e:
-            print(f"[NODE: INTAKE] ⚠️ Error loading user stats: {str(e)[:80]}")
+            print(f"[NODE: INTAKE]  Error loading user stats: {str(e)[:80]}")
             intake_errors.append(f"Failed to load user stats: {str(e)}")
             is_new = True
             sessions = 0
@@ -123,9 +123,9 @@ async def load_user_context(state: MentalHealthState) -> dict:
         
         try:
             user_prefs = await _load_user_preferences(user_id)
-            print(f"[NODE: INTAKE] ✅ Preferences loaded: {list(user_prefs.keys()) if user_prefs else 'none'}")
+            print(f"[NODE: INTAKE]  Preferences loaded: {list(user_prefs.keys()) if user_prefs else 'none'}")
         except Exception as e:
-            print(f"[NODE: INTAKE] ⚠️ Error loading preferences: {str(e)[:80]}")
+            print(f"[NODE: INTAKE]  Error loading preferences: {str(e)[:80]}")
             intake_errors.append(f"Failed to load preferences: {str(e)}")
             user_prefs = {}
         
@@ -141,18 +141,18 @@ async def load_user_context(state: MentalHealthState) -> dict:
     # STEP 2: MEMORY ARCHITECTURE (Two-Layer)
     # ============================================
     # Layer 1 (Within-session): LangGraph `state["messages"]` accumulates all turns
-    #   via the add_messages reducer — the response generator reads these directly.
+    #   via the add_messages reducer  the response generator reads these directly.
     #   No DB query needed, no token bloat risk.
     # Layer 2 (Cross-session): ChromaDB semantic memory (fetched in STEP 3 below)
     #   provides relevant summaries from past sessions.
-    chat_history = []  # Not used — see response generator for two-layer memory implementation
-    print(f"[NODE:INTAKE] 📝 Step 2: Memory handled via LangGraph state + ChromaDB (no DB history load)")
+    chat_history = []  # Not used  see response generator for two-layer memory implementation
+    print(f"[NODE:INTAKE]  Step 2: Memory handled via LangGraph state + ChromaDB (no DB history load)")
     
     # ============================================
     # STEP 3: RETRIEVE SEMANTIC MEMORIES
     # ============================================
     
-    print("[NODE:INTAKE] 🧠 Step 3: Retrieving memory context (3-layer ChatGPT-style memory)")
+    print("[NODE:INTAKE]  Step 3: Retrieving memory context (3-layer ChatGPT-style memory)")
     memory_context = await _retrieve_semantic_memories(user_id, current_message, session_id)
 
     # Background task: extract facts from user message (non-blocking)
@@ -164,23 +164,23 @@ async def load_user_context(state: MentalHealthState) -> dict:
             message=current_message,
             session_id=session_id
         ))
-        print(f"[NODE:INTAKE] 📝 Fact extraction scheduled (background)")
+        print(f"[NODE:INTAKE]  Fact extraction scheduled (background)")
 
-    print(f"[NODE:INTAKE] ✅ Retrieved {len(memory_context)} chars of memory context")
+    print(f"[NODE:INTAKE]  Retrieved {len(memory_context)} chars of memory context")
     
     # ============================================
     # STEP 4: BUILD FULL CONTEXT
     # ============================================
     
-    print("[NODE: INTAKE] 🔨 Step 4: Building full context object")
+    print("[NODE: INTAKE]  Step 4: Building full context object")
     
     # Context ready flag
     context_ready = True
     
-    print(f"[NODE: INTAKE] ✅ Context ready: {context_ready}")
-    print(f"[NODE: INTAKE] ⚙️ Preferences: {user_prefs}")
+    print(f"[NODE: INTAKE]  Context ready: {context_ready}")
+    print(f"[NODE: INTAKE]  Preferences: {user_prefs}")
     if voice_features:
-        print(f"[NODE: INTAKE] 🎤 Voice features included: emotion={voice_features.get('emotion')}")
+        print(f"[NODE: INTAKE]  Voice features included: emotion={voice_features.get('emotion')}")
     
     # CRITICAL: Pass through messages from state to avoid state corruption in LangGraph
     # LangGraph uses add_messages reducer, so we need to maintain this field
@@ -190,12 +190,12 @@ async def load_user_context(state: MentalHealthState) -> dict:
     # It must NEVER be used as the current-session emotion signal.
     # Stored separately as `historical_mood` so downstream nodes don't confuse it
     # with the current detected emotion. OUTCOME_TRACKER must use session_start_emotion instead.
-    print(f"[NODE: INTAKE] 📋 Historical mood (cross-session): {emotion} → stored as 'historical_mood' (metadata only)")
+    print(f"[NODE: INTAKE]  Historical mood (cross-session): {emotion}  stored as 'historical_mood' (metadata only)")
     return {
         "is_new_user": is_new,
         "session_count": sessions,
         "most_common_emotion": emotion,   # kept for display/context purposes
-        "historical_mood": emotion,        # FIX 1b: explicit quarantine — metadata only, NOT current session emotion
+        "historical_mood": emotion,        # FIX 1b: explicit quarantine  metadata only, NOT current session emotion
         "user_preferences": user_prefs,
         "chat_history": chat_history,
         "memory_context": memory_context,
@@ -223,7 +223,7 @@ async def _retrieve_semantic_memories(user_id: str, current_message: str, sessio
     """
     try:
         from ..memory.memory_builder import build_full_memory_context
-        # Pass empty list for window — the window is managed inside the pipeline via state["messages"]
+        # Pass empty list for window  the window is managed inside the pipeline via state["messages"]
         # Only facts + summaries are needed at intake time
         memory_context = await build_full_memory_context(
             user_id=user_id,
@@ -232,7 +232,7 @@ async def _retrieve_semantic_memories(user_id: str, current_message: str, sessio
         )
         return memory_context
     except Exception as e:
-        print(f"[NODE:INTAKE] ⚠️ Memory builder failed (non-fatal): {str(e)[:120]}")
+        print(f"[NODE:INTAKE]  Memory builder failed (non-fatal): {str(e)[:120]}")
         return ""
 
 
@@ -305,5 +305,5 @@ async def _load_user_preferences(user_id: str) -> dict:
             "preferredCategories": pref.preferredCategories or [],
         }
     except Exception as e:
-        print(f"[NODE: INTAKE] ⚠️ Failed to load preferences: {e}")
+        print(f"[NODE: INTAKE]  Failed to load preferences: {e}")
         return {}

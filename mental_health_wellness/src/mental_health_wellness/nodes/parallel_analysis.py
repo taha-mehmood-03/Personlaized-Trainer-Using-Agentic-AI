@@ -1,5 +1,5 @@
 """
-Parallel Analysis Node — SentiMind v5.1 Latency Optimization
+Parallel Analysis Node  SentiMind v5.1 Latency Optimization
 
 Combines Cognitive Distortion (Node 4) and Trend Analyzer (Node 5) into a single
 LangGraph node that runs both analyses concurrently via asyncio.gather.
@@ -11,12 +11,12 @@ WHY THIS WORKS:
   - Running them in parallel saves ~50-300ms per message
 
 BEFORE (sequential):
-  emotion_fusion → cognitive_distortion → trend_analyzer  (~360ms total)
+  emotion_fusion  cognitive_distortion  trend_analyzer  (~360ms total)
 
 AFTER (parallel):
-  emotion_fusion → parallel_analysis  (~310ms total, saves ~50ms best case)
-                   ├─ cognitive_distortion  (~10-300ms)
-                   └─ trend_analyzer        (~50ms)
+  emotion_fusion  parallel_analysis  (~310ms total, saves ~50ms best case)
+                    cognitive_distortion  (~10-300ms)
+                    trend_analyzer        (~50ms)
 
 Output: merged dict of both nodes' state updates.
 """
@@ -36,7 +36,7 @@ async def run_parallel_analysis(state: MentalHealthState) -> dict:
     
     Returns: merged dict of both nodes' outputs.
     """
-    print("\n[NODE: PARALLEL] ⚡ Running distortion + trend analysis concurrently...")
+    print("\n[NODE: PARALLEL]  Running distortion + trend analysis concurrently...")
 
     # Run both nodes concurrently
     distortion_result, trend_result = await asyncio.gather(
@@ -49,7 +49,7 @@ async def run_parallel_analysis(state: MentalHealthState) -> dict:
     merged = {}
 
     if isinstance(distortion_result, Exception):
-        print(f"[NODE: PARALLEL] ⚠️ Distortion node failed: {str(distortion_result)[:100]}")
+        print(f"[NODE: PARALLEL]  Distortion node failed: {str(distortion_result)[:100]}")
         merged.update({
             "distortion_type": None,
             "distortion_confidence": 0.0,
@@ -60,7 +60,7 @@ async def run_parallel_analysis(state: MentalHealthState) -> dict:
         merged.update(distortion_result)
 
     if isinstance(trend_result, Exception):
-        print(f"[NODE: PARALLEL] ⚠️ Trend node failed: {str(trend_result)[:100]}")
+        print(f"[NODE: PARALLEL]  Trend node failed: {str(trend_result)[:100]}")
         merged.update({
             "emotional_trend": "stable",
             "trend_window": [],
@@ -68,7 +68,7 @@ async def run_parallel_analysis(state: MentalHealthState) -> dict:
     else:
         merged.update(trend_result)
 
-    print(f"[NODE: PARALLEL] ✅ Parallel analysis complete | "
+    print(f"[NODE: PARALLEL]  Parallel analysis complete | "
           f"Distortion: {merged.get('distortion_type', 'none')} | "
           f"Trend: {merged.get('emotional_trend', 'stable')}")
 

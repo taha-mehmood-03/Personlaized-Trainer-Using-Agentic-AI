@@ -15,7 +15,7 @@ LOGIC:
   5. Update BehaviorProfile based on technique acceptance patterns
 
 Output:
-  - (No state changes — pure side-effect node for analytics)
+  - (No state changes  pure side-effect node for analytics)
 """
 
 from ..agent.state import MentalHealthState
@@ -41,11 +41,11 @@ async def track_outcome(state: MentalHealthState) -> dict:
     Process:
     1. Check if a technique was delivered this session
     2. Look for previous emotional state (from trend_window)
-    3. Compare before/after → effectiveness score
+    3. Compare before/after  effectiveness score
     4. Save TechniqueOutcome to database
     5. Update BehaviorProfile
 
-    No LLM call — pure Python/SQL.
+    No LLM call  pure Python/SQL.
     Returns empty dict (side-effect only node).
     """
 
@@ -57,7 +57,7 @@ async def track_outcome(state: MentalHealthState) -> dict:
     trend_window = state.get("trend_window", [])
     strategy = state.get("conversation_strategy", "validate_only")
 
-    print(f"\n[NODE: OUTCOME_TRACKER] 📊 Tracking outcomes for session: "
+    print(f"\n[NODE: OUTCOME_TRACKER]  Tracking outcomes for session: "
           f"{session_id[:20] if session_id else 'UNKNOWN'}...")
 
     # ============================================
@@ -67,14 +67,14 @@ async def track_outcome(state: MentalHealthState) -> dict:
     technique_name = recommended_technique.get("name", "")
 
     if not technique_id or strategy not in ("suggest_technique", "reframe"):
-        print("[NODE: OUTCOME_TRACKER] ℹ️ No technique delivered — skipping")
+        print("[NODE: OUTCOME_TRACKER]  No technique delivered  skipping")
         return {}
 
     # ============================================
     # FIX 5: WITHIN-SESSION BASELINE ONLY
     # Use session_start_emotion/intensity set at the BEGINNING of this session
     # (first turn). NEVER use cross-session historical mood from user_stats.
-    # trend_window[-2] may contain cross-session DB logs — unsafe to rely on.
+    # trend_window[-2] may contain cross-session DB logs  unsafe to rely on.
     # ============================================
 
     # Capture session start emotion on first turn if not already set
@@ -103,7 +103,7 @@ async def track_outcome(state: MentalHealthState) -> dict:
         intensity_before = float(session_start_intensity)
         print("[NODE: OUTCOME_TRACKER] Using session-start baseline (FIX 5 fallback)")
     else:
-        print("[NODE: OUTCOME_TRACKER] No within-session baseline found — skipping outcome record")
+        print("[NODE: OUTCOME_TRACKER] No within-session baseline found  skipping outcome record")
         print("[NODE: OUTCOME_TRACKER] Baseline will be captured next turn")
         return {}
 
@@ -124,7 +124,7 @@ async def track_outcome(state: MentalHealthState) -> dict:
     effectiveness = max(-1.0, min(1.0, effectiveness))  # Clamp
 
     eff_label = "positive" if effectiveness > 0 else "negative" if effectiveness < 0 else "neutral"
-    print(f"[NODE: OUTCOME_TRACKER] 📈 Technique: {technique_name}")
+    print(f"[NODE: OUTCOME_TRACKER]  Technique: {technique_name}")
     print(f"[NODE: OUTCOME_TRACKER]   Before: {emotion_before} ({intensity_before:.0%})")
     print(f"[NODE: OUTCOME_TRACKER]   After:  {emotion_after} ({intensity_after:.0%})")
     print(f"[NODE: OUTCOME_TRACKER]   Effectiveness: {effectiveness:+.0%} ({eff_label})")
@@ -154,10 +154,10 @@ async def track_outcome(state: MentalHealthState) -> dict:
                 "effectiveness": effectiveness,
             }
         )
-        print(f"[NODE: OUTCOME_TRACKER] ✅ TechniqueOutcome saved")
+        print(f"[NODE: OUTCOME_TRACKER]  TechniqueOutcome saved")
 
     except Exception as e:
-        print(f"[NODE: OUTCOME_TRACKER] ⚠️ Failed to save outcome: {str(e)[:100]}")
+        print(f"[NODE: OUTCOME_TRACKER]  Failed to save outcome: {str(e)[:100]}")
 
     # ============================================
     # STEP 4: UPDATE BEHAVIOR PROFILE
@@ -166,7 +166,7 @@ async def track_outcome(state: MentalHealthState) -> dict:
     try:
         await _update_behavior_profile(user_id, strategy, effectiveness)
     except Exception as e:
-        print(f"[NODE: OUTCOME_TRACKER] ⚠️ Failed to update behavior profile: {str(e)[:100]}")
+        print(f"[NODE: OUTCOME_TRACKER]  Failed to update behavior profile: {str(e)[:100]}")
 
     return {}
 
@@ -200,7 +200,7 @@ async def _update_behavior_profile(
                     "avgTechniqueAcceptance": max(0.0, effectiveness),
                 }
             )
-            print(f"[NODE: OUTCOME_TRACKER] ✅ Created new BehaviorProfile for user")
+            print(f"[NODE: OUTCOME_TRACKER]  Created new BehaviorProfile for user")
         else:
             # EMA update: new_avg = 0.7 * old_avg + 0.3 * new_value
             alpha = 0.3
@@ -216,7 +216,7 @@ async def _update_behavior_profile(
                     "prefersListening": strategy == "validate_only",
                 }
             )
-            print(f"[NODE: OUTCOME_TRACKER] ✅ Updated BehaviorProfile (acceptance={new_avg:.0%})")
+            print(f"[NODE: OUTCOME_TRACKER]  Updated BehaviorProfile (acceptance={new_avg:.0%})")
 
     except Exception as e:
-        print(f"[NODE: OUTCOME_TRACKER] ⚠️ Behavior profile error: {str(e)[:100]}")
+        print(f"[NODE: OUTCOME_TRACKER]  Behavior profile error: {str(e)[:100]}")

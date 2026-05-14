@@ -53,7 +53,7 @@ async def close_prisma_client():
 
 async def ensure_user_exists_cached(user_id: str, email: str = None, name: str = None) -> dict:
     """
-    v6.0 FIX 4: Cached ensure_user_exists — skips DB after first successful check.
+    v6.0 FIX 4: Cached ensure_user_exists  skips DB after first successful check.
     Saves ~200-500ms per message for returning users.
     """
     if user_id in _known_users:

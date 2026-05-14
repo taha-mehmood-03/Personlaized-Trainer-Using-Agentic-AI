@@ -30,21 +30,20 @@ python-multipart>=0.0.6
 transformers>=4.36.0
 
 # ============================================
-# Voice Emotion Detection
+# Voice Analysis
 # ============================================
-opensmile>=2.5.0
+# Acoustic features + wav2vec2 emotion classification
 librosa>=0.10.0
 soundfile>=0.12.0
-torch>=2.0.0
-torchaudio>=2.0.0
+# Deepgram SDK — replaces Whisper-tiny for transcription (no local model needed)
+deepgram-sdk>=3.0.0
 
 
 
 # ============================================
-# Checkpointer (PostgreSQL)
+# Database drivers
 # ============================================
 psycopg2-binary>=2.9.9
-langgraph-checkpoint-postgres>=1.0.0
 
 # ============================================
 # SMS/Call Integration

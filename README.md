@@ -1,12 +1,14 @@
 <div align="center">
 
-<img src="https://img.shields.io/badge/version-7.0-6366f1?style=for-the-badge&labelColor=0f0f1a" />
+<img src="https://img.shields.io/badge/version-8.7-6366f1?style=for-the-badge&labelColor=0f0f1a" />
 <img src="https://img.shields.io/badge/python-3.10+-6366f1?style=for-the-badge&logo=python&logoColor=white&labelColor=0f0f1a" />
 <img src="https://img.shields.io/badge/LangGraph-0.2+-6366f1?style=for-the-badge&labelColor=0f0f1a" />
 <img src="https://img.shields.io/badge/FastAPI-0.109+-6366f1?style=for-the-badge&logo=fastapi&logoColor=white&labelColor=0f0f1a" />
 <img src="https://img.shields.io/badge/license-MIT-6366f1?style=for-the-badge&labelColor=0f0f1a" />
 <img src="https://img.shields.io/badge/Voice-Multimodal_Fusion-22c55e?style=for-the-badge&labelColor=0f0f1a" />
-<img src="https://img.shields.io/badge/latency-v7.0_optimized-22c55e?style=for-the-badge&labelColor=0f0f1a" />
+<img src="https://img.shields.io/badge/ASR-Deepgram_Nova--2-22c55e?style=for-the-badge&labelColor=0f0f1a" />
+<img src="https://img.shields.io/badge/Smart_Gate-Pre--Graph_Router-f59e0b?style=for-the-badge&labelColor=0f0f1a" />
+<img src="https://img.shields.io/badge/latency-v8.0_optimized-22c55e?style=for-the-badge&labelColor=0f0f1a" />
 
 <br /><br />
 
@@ -19,9 +21,9 @@
 ╚══════╝╚══════╝╚═╝  ╚═══╝   ╚═╝   ╚═╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚═════╝
 ```
 
-### **Deterministic Hybrid Mental Health Agent — v7.0 (Multimodal Voice Fusion)**
+### **Deterministic Hybrid Mental Health Agent — v8.7 (Priority Routing + DB-First Exercises + Multimodal Voice Fusion)**
 
-*A production-grade AI emotional support system — 5 fused nodes, 3 parallel tiers, true token streaming, multimodal voice + text emotion fusion*
+*A production-grade AI emotional support system — 7-route priority gate before graph, DB-sourced exercises (no LLM steps), 5 fused nodes, 3 parallel tiers, true token streaming, multimodal voice + text emotion fusion*
 
 <br />
 
@@ -39,21 +41,101 @@ SentiMind is a **clinically-informed, multimodal AI mental health agent** built 
 
 ---
 
-## ⚡ Core Philosophy (v7.0)
+## ⚡ Core Philosophy (v8.7)
+
+**PRIORITY ROUTING WITH DATABASE-FIRST EXERCISES**
 
 ```
-               DECISION ROUTING LOGIC
-               ─────────────────────
+           USER MESSAGE
+                 │
+        ┌────────▼────────┐
+        │ SMART GATE v8.7  │  llama-3.1-8b semantic router
+        │ (PRE-GRAPH)      │  LLM-based priority logic
+        │ ~400ms latency   │  (NO keywords)
+        └────────┬────────┘
+                 │
+    ┌────────────┼────────────────────────────────────────┐
+    │                                                     │
+    ▼ Route 1                                             │
+EXPLICIT EXERCISE REQUEST?                                │
+"can i try timeline journal"                              │
+    │                                                     │
+    ├─→ ACCEPT_TECHNIQUE ✅                               │
+    │   • run_full_pipeline = FALSE                       │
+    │   • Fetch exercise_data from DB                     │
+    │   • Send steps (from DB, NOT LLM) to sidebar        │
+    │   • Skip mood re-analysis → respect user choice     │
+    │                                                     │
+    ▼ Route 2                                             │
+CASUAL CHAT?                                              │
+"thanks!" / "hey there"                                   │
+    │                                                     │
+    ├─→ CHITCHAT ✅                                       │
+    │   • run_full_pipeline = FALSE                       │
+    │   • Direct response (~600ms)                        │
+    │   • Skip therapy nodes                              │
+    │                                                     │
+    ▼ Route 3                                             │
+MEMORY QUERY?                                             │
+"what did we discuss last time?"                          │
+    │                                                     │
+    ├─→ MEMORY_QUERY ✅                                   │
+    │   • run_full_pipeline = FALSE                       │
+    │   • DB session lookup                               │
+    │   • Return history                                  │
+    │                                                     │
+    ▼ Route 4                                             │
+WANT EXERCISE LIST?                                       │
+"show me breathing exercises"                             │
+    │                                                     │
+    ├─→ LIST_TECHNIQUES ✅                                │
+    │   • run_full_pipeline = FALSE                       │
+    │   • Fetch all exercises from category               │
+    │   • Return DB-sourced list                          │
+    │                                                     │
+    ▼ Route 5                                             │
+REJECTING HELP?                                           │
+"i don't want exercises"                                  │
+    │                                                     │
+    ├─→ REJECTION ✅                                      │
+    │   • run_full_pipeline = FALSE                       │
+    │   • Acknowledge & respect choice                    │
+    │                                                     │
+    ▼ Route 6                                             │
+CRISIS DETECTED?                                          │
+"i want to hurt myself"                                   │
+    │                                                     │
+    ├─→ CRISIS ⚠️                                         │
+    │   • run_full_pipeline = TRUE                        │
+    │   • Claude 3.5 Sonnet analysis                      │
+    │   • Twilio GPS alerts                               │
+    │                                                     │
+    ▼ Route 7 (DEFAULT)                                   │
+EMOTIONAL/VENTING                                         │
+"i feel sad" / "im anxious"                               │
+    │                                                     │
+    └─→ THERAPEUTIC ✅                                    │
+        • run_full_pipeline = TRUE                        │
+        • FULL 5-node graph pipeline                      │
+        • Mood + context analysis                         │
+        • Technique recommendation                        │
+        • Track feedback/sentiment
 
-   Semantic Understanding?  ──→  LLM (OpenRouter — llama-3.3-70b / claude-3.5-sonnet)
-   Voice Features?          ──→  ML models (wav2vec2, OpenSMILE eGeMAPS, Whisper ASR)
-   Emotion Masking?         ──→  Acoustic Override (distress_index / arousal rules)
-   Crisis Response?         ──→  LLM semantic analysis (claude-3.5-sonnet) + Twilio alerts
+KEY v8.7 CHANGES:
+✅ LLM-based routing (semantic, not keywords)
+✅ Explicit exercise requests BYPASS therapeutic override
+✅ User choice RESPECTED (no mood re-analysis after selection)
+✅ Database-FIRST: exercise steps ALWAYS from DB
+✅ run_full_pipeline flag determines node execution
+✅ Session context informs ALL routing decisions
 ```
 
 | Principle | Implementation |
 |-----------|---------------|
-| **LLM-first** | All semantic decisions use LLM for nuanced understanding |
+| **Priority Routing** | 7-route LLM gate (v8.7) checks explicit requests FIRST |
+| **Database-First** | Exercise steps ALWAYS from DB, NEVER LLM-generated |
+| **User Choice Respected** | Explicit requests bypass mood re-analysis |
+| **LLM Classification** | All routing uses semantic LLM understanding (no keywords) |
 | **Multimodal voice** | wav2vec2 emotion + OpenSMILE acoustic features + Whisper ASR |
 | **Acoustic Override** | Catches emotion masking (happy words + sad voice → sadness) |
 | **Safety by default** | LLM crisis detection + GPS-aware Twilio WhatsApp/SMS alerts |
@@ -64,7 +146,7 @@ SentiMind is a **clinically-informed, multimodal AI mental health agent** built 
 
 ## 🏗️ Architecture
 
-### Full System Diagram (v7.0)
+### Full System Diagram (v8.0)
 
 ```text
 ┌────────────────────────────────────────────────────────────────────┐
@@ -89,15 +171,85 @@ SentiMind is a **clinically-informed, multimodal AI mental health agent** built 
           └──────────────┬──────────────────────────────────────────┘
                          │
 ┌────────────────────────▼───────────────────────────────────────────┐
-│  NODE 1 ── PARALLEL INTAKE                          ⚡ 4-WAY ASYNC │
+│  PRE-GRAPH ── PRIORITY ROUTING GATE             ⚡ v8.7            │
+│  smart_pipeline_gate() — llama-3.1-8b (~400ms) — 7-ROUTE PRIORITY  │
+│                                                                     │
+│  PRIORITY ORDER (check FIRST match, STOP):                         │
+│  ┌─────────────────────────────────────────────┐                   │
+│  │ 1. ACCEPT_TECHNIQUE                         │ User explicitly  │
+│  │    "can i try timeline journal?"            │ requests specific│
+│  │    → run_full_pipeline=FALSE (bypass)       │ exercise by name │
+│  │    → Fetch exercise_data + steps from DB    │                  │
+│  │    → Skip mood re-analysis → respect choice │                  │
+│  └─────────────────────────────────────────────┘                   │
+│  ┌─────────────────────────────────────────────┐                   │
+│  │ 2. CHITCHAT                                 │ Casual social    │
+│  │    "that's nice" / "how are you?"           │ conversation     │
+│  │    → run_full_pipeline=FALSE (skip graph)   │ (≥75% confidence)│
+│  │    → Return quick response in ~600ms        │                  │
+│  └─────────────────────────────────────────────┘                   │
+│  ┌─────────────────────────────────────────────┐                   │
+│  │ 3. MEMORY_QUERY                             │ Asking about     │
+│  │    "what did we discuss?" / "last time"     │ past sessions    │
+│  │    → run_full_pipeline=FALSE (DB query)     │                  │
+│  │    → Retrieve & format session history      │                  │
+│  └─────────────────────────────────────────────┘                   │
+│  ┌─────────────────────────────────────────────┐                   │
+│  │ 4. LIST_TECHNIQUES                          │ User wants       │
+│  │    "show me exercises" / "what can help?"   │ exercise list    │
+│  │    → run_full_pipeline=FALSE (category DB)  │                  │
+│  │    → Fetch all techniques from categories   │                  │
+│  │    → Return formatted exercise list         │                  │
+│  └─────────────────────────────────────────────┘                   │
+│  ┌─────────────────────────────────────────────┐                   │
+│  │ 5. REJECTION                                │ User declines    │
+│  │    "no thanks" / "i don't want help"        │ all support      │
+│  │    → run_full_pipeline=FALSE (respect)      │                  │
+│  │    → Acknowledge & offer future support     │                  │
+│  └─────────────────────────────────────────────┘                   │
+│  ┌─────────────────────────────────────────────┐                   │
+│  │ 6. CRISIS                                   │ Safety threat    │
+│  │    "i want to hurt myself" / "suicidal"     │ detected         │
+│  │    → run_full_pipeline=TRUE (full analysis) │                  │
+│  │    → Claude 3.5 Sonnet semantic detection   │                  │
+│  │    → Twilio GPS alerts                      │                  │
+│  └─────────────────────────────────────────────┘                   │
+│  ┌─────────────────────────────────────────────┐                   │
+│  │ 7. THERAPEUTIC (DEFAULT)                    │ Everything else  │
+│  │    User discussing emotions/feedback        │ (mood, anxiety,  │
+│  │    → run_full_pipeline=TRUE (FULL PIPELINE) │ feedback, etc.)  │
+│  │    → 5-node graph: intake→analysis→response │                  │
+│  │    → Cognitive distortion + techniques      │                  │
+│  └─────────────────────────────────────────────┘                   │
+│                                                                     │
+│  KEY v8.7 CHANGES:                                                 │
+│  ✅ Explicit exercise requests bypass therapeutic re-analysis       │
+│  ✅ User choice respected → no mood re-evaluation after selection   │
+│  ✅ Database-first: steps ALWAYS from DB, never LLM-generated      │
+│  ✅ run_full_pipeline flag controls node execution (T/F)           │
+│  ✅ Session context informs all routing decisions                  │
+│                                                                     │
+│  LLM DECISION TREE (in classifier prompt):                          │
+│  1. User EXPLICITLY NAMES exercise? → accept_technique, skip       │
+│  2. Crisis keywords + semantic check? → crisis, full analysis      │
+│  3. Asking for list of exercises? → list_techniques, DB fetch      │
+│  4. Casual/social tone (≥75% conf)? → chitchat, quick response     │
+│  5. Asking about past? → memory_query, session lookup              │
+│  6. Explicitly rejecting help? → rejection, acknowledge            │
+│  7. Anything else? → therapeutic, run full 5-node pipeline         │
+│                                                                     │
+└────────────────────────┬───────────────────────────────────────────┘
+                         │
+┌────────────────────────▼───────────────────────────────────────────┐
+│  NODE 1 ── PARALLEL INTAKE                        ⚡ 3-WAY ASYNC  │
 │  ┌──────────────────┐ ┌──────────────────┐                         │
 │  │ Crisis Screener  │ │  Context Loader  │                         │
-│  │ claude-3.5-sonnet│ │  DB + ChromaDB   │                         │
+│  │ claude-3.5-sonnet│ │  DB Context      │                         │
 │  └──────────────────┘ └──────────────────┘                         │
-│  ┌──────────────────┐ ┌──────────────────┐                         │
-│  │  Mood Analyzer   │ │  Intent Prefetch │                         │
-│  │  llama-3.3-70b   │ │  llama-3.1-8b    │                         │
-│  └──────────────────┘ └──────────────────┘                         │
+│  ┌──────────────────┐ ┌──────────────────────────────────┐         │
+│  │  Mood Analyzer   │ │  Intent Prefetch                 │         │
+│  │  llama-3.3-70b   │ │  ⏭️ SKIPPED if gate fired       │         │
+│  └──────────────────┘ └──────────────────────────────────┘         │
 └────────────────────────┬───────────────────────────────────────────┘
                          ▼
 ┌────────────────────────────────────────────────────────────────────┐
@@ -106,14 +258,16 @@ SentiMind is a **clinically-informed, multimodal AI mental health agent** built 
 │      → Acoustic Override: distress_index > 0.65 → sadness         │
 │      → Arousal Override:  arousal > 0.75 → anxiety                │
 │      → Pause Boost:       pause_density > 0.40 → +15% intensity   │
-│  • Parallel Analysis (Cognitive Distortion + Trend)                │
+│  • Cognitive Distortion (LLM) — SKIPPED for technique_request,    │
+│    advice_seeking, chitchat intents (saves 100-300ms per request)  │
+│  • Trend Analyzer (DB query — always runs)                         │
 │  • Conversation Planner (Phase & Strategy)                         │
-│  • Behavioral Activation (Micro-actions)                           │
+│  • Behavioral Activation — SKIPPED for no_action/ask_question      │
 └────────────────────────┬───────────────────────────────────────────┘
                          ▼
 ┌────────────────────────────────────────────────────────────────────┐
 │  NODE 3 ── RESPONSE PIPELINE                            🔗 FUSED  │
-│  • Technique Selector (PostgreSQL query)                            │
+│  • Technique Selector — SKIPPED for validate_only/ask_question     │
 │  • Role Selector (Friend / Coach / Trainer / Crisis)               │
 └────────────────────────┬───────────────────────────────────────────┘
                          ▼  (tokens stream to browser via SSE)
@@ -163,17 +317,18 @@ The voice pipeline is fully end-to-end, zero-dependency, and runs entirely acros
 # voice/__init__.py — preload_all_voice_models() called at startup
 
 analyze_voice_full(wav_path) runs 3 steps in one pass:
-  1. extract_acoustic_features()     # OpenSMILE eGeMAPS → pitch, jitter, shimmer, HNR
-                                     # fallback: librosa → pitch, loudness, MFCC
-                                     # + torchaudio MFCC (13-dim + delta + delta-delta)
+  1. extract_acoustic_features()     # librosa → pitch (F0/pyin), loudness (RMS),
+                                     # MFCC (13-dim + delta + delta-delta),
+                                     # spectral flux, jitter/shimmer approximation
                                      # → distress_index (composite psychoacoustic score)
-                                     # → pause_density  (hesitancy / silence ratio)
+                                     # → pause_density  (via voiced-flag from pyin)
+                                     # → arousal / valence  (acoustic estimators)
 
   2. classify_voice_emotion()        # wav2vec2 (r-f/wav2vec-english-speech-emotion-recognition)
                                      # → emotion label + confidence + all_scores
 
-  3. transcribe_audio()              # Whisper-tiny (openai/whisper-tiny)
-                                     # → ASR transcript (reused, no double-call)
+  3. transcribe_audio()              # Deepgram Nova-2 REST API (httpx, no local model)
+                                     # → ASR transcript (no ffmpeg, no Whisper download)
 ```
 
 ### Emotion Fusion Rules (emotion_fusion_node.py)
@@ -217,9 +372,12 @@ All voice ML models load during server boot (not on first request):
 
 | Feature | Implementation |
 |---------|---------------|
+| 🚦 **Priority Routing Gate (v8.7)** | 7-route pre-graph router — accepts explicit exercises, bypasses mood re-analysis |
+| 💾 **Database-First Exercises** | Exercise steps fetched from DB (never LLM-generated) |
+| 👤 **User Choice Respected** | Explicit exercise requests skip therapeutic override — user intent always honored |
 | 🎭 **Multimodal Emotion Detection** | LLM text emotion + wav2vec2 voice emotion + acoustic feature fusion |
 | 🔊 **Acoustic Override** | Catches emotion masking (happy words + sad voice → detects sadness) |
-| 🧠 **Cognitive Distortion Detection** | LLM semantic analysis via llama-3.1-8b |
+| 🧠 **Cognitive Distortion Detection** | LLM semantic analysis — skipped for technique_request/advice_seeking |
 | 📋 **Conversation Phase Awareness** | NEUTRAL → VENTING → REFLECTION → SOLUTION → RECOVERY |
 | 🧬 **Persistent Psychological Profile** | 9-field user profile with EMA smoothing, updated per session |
 | 🎯 **Planner-Gated Technique Selection** | Strategy + readiness score gate technique delivery timing |
@@ -227,24 +385,136 @@ All voice ML models load during server boot (not on first request):
 | 📈 **Longitudinal Trend Detection** | Linear regression over last 5 MoodLogs, requires ≥3 sessions |
 | 🚨 **Crisis Detection** | claude-3.5-sonnet semantic analysis — NO keyword matching |
 | 📍 **GPS Crisis Alerts** | Browser geolocation → Twilio WhatsApp/SMS with Google Maps link |
-| 🧠 **Semantic Memory** | ChromaDB vector store for cross-session context (RAG) |
 | 👤 **Phase-Aware Role Selection** | Friend / Coach / Trainer / Crisis — considers trend, phase, intensity |
 | 🎤 **Browser-Native WAV Encoding** | Web Audio API → 16kHz mono RIFF/WAV, zero system dependencies |
+| 📌 **Active Exercise Sidebar** | Left sidebar shows current technique card — works on all screen sizes |
+
+---
+
+## 🧠 Priority Routing Gate & Session Context (v8.7)
+
+### How Priority Routing Works (v8.7)
+
+The **Priority Routing Gate** is a pre-graph LLM router that runs **before** the expensive 5-node graph. Unlike v8.0-8.2 which only checked for casual chat, v8.7 implements a **7-route priority system** that intelligently directs messages:
+
+1. **Accept Technique** (Highest Priority)  
+   - User explicitly names an exercise: "can i try timeline journal?"
+   - Fetches exercise from DB with full details (steps, duration, difficulty)
+   - Skips mood analysis → respects user choice
+   - `run_full_pipeline=FALSE` (bypasses therapeutic pipeline)
+   - Total latency: **~800-1000ms**
+
+2. **Chitchat** (Fast Path)  
+   - Casual social conversation: "that's nice!", "how are you?"
+   - ≥75% confidence required
+   - Returns quick conversational response
+   - `run_full_pipeline=FALSE` (skips graph)
+   - Total latency: **~600-900ms**
+
+3. **Memory Query** (Context Lookup)  
+   - User asking about past sessions: "what did we discuss?"
+   - DB retrieves session history
+   - `run_full_pipeline=FALSE` (DB-only operation)
+   - Total latency: **~500-700ms**
+
+4. **List Techniques** (Exercise Directory)  
+   - User requests exercise list: "show me all exercises"
+   - DB fetches techniques from multiple categories
+   - Returns formatted exercise catalog
+   - `run_full_pipeline=FALSE` (DB-only operation)
+   - Total latency: **~600-800ms**
+
+5. **Rejection** (User Declines)  
+   - User explicitly declining help: "no thanks", "i don't want support"
+   - Acknowledges & stores preference
+   - `run_full_pipeline=FALSE` (respect user choice)
+   - Total latency: **~400-600ms**
+
+6. **Crisis** (Safety First)  
+   - Crisis keywords + semantic analysis
+   - Runs claude-3.5-sonnet for detailed assessment
+   - Triggers Twilio GPS alerts
+   - `run_full_pipeline=TRUE` (full emergency protocol)
+   - Total latency: **~2-3s** (safety > speed)
+
+7. **Therapeutic** (Default Full Pipeline)  
+   - Everything else: mood discussion, emotional support, feedback
+   - Runs full 5-node graph: intake → analysis → response
+   - Cognitive distortion analysis + technique selection
+   - `run_full_pipeline=TRUE` (complete analysis)
+   - Total latency: **~2-4s**
+
+### Session Context Integration
+
+The priority router has access to **complete session context**:
+
+```json
+{
+  "summary": "User struggling with work anxiety",
+  "description": "Discussed 4-7-8 breathing technique and exercise routine",
+  "facts": [
+    {"fact": "Anxious about presentations", "mention_count": 3},
+    {"fact": "4-7-8 breathing discussed", "mention_count": 1}
+  ]
+}
+```
+
+This enables the router to detect:
+- **Follow-ups**: "That exercise didn't help" → THERAPEUTIC (feedback to suggestion)
+- **Continuations**: "The presentation is happening now" → THERAPEUTIC (anxiety continuation)
+- **Explicit requests**: "Can I try timeline journal?" → ACCEPT_TECHNIQUE (user choice respected)
+
+### Critical v8.7 Behavior
+
+| Scenario | Route | run_full_pipeline | Behavior |
+|----------|-------|------|-----------|
+| User says "can i try timeline journal" | accept_technique | FALSE | Fetch from DB, skip mood re-analysis |
+| User says "that exercise didn't help" | therapeutic | TRUE | Feedback analysis, try alternative |
+| User says "show me exercises" | list_techniques | FALSE | Return exercise catalog |
+| User says "that's nice!" | chitchat | FALSE | Quick social response |
+| User says "what did we discuss?" | memory_query | FALSE | Session history lookup |
+| User says "no thanks" | rejection | FALSE | Acknowledge & respect |
+| User says "i want to hurt myself" | crisis | TRUE | Emergency response + alerts |
+
+### Why v8.7 Solves User Choice Problem
+
+**Before v8.7:**
+```
+User: "can i try timeline journal"
+  → Gate accepts, but full therapeutic pipeline re-runs
+  → Mood analysis: detects sadness
+  → Technique selector: "better option is breathing exercise"
+  ❌ WRONG: Overrode user's explicit choice with AI judgment
+```
+
+**After v8.7:**
+```
+User: "can i try timeline journal"
+  → Gate detects explicit exercise request
+  → route = accept_technique, run_full_pipeline=FALSE
+  → Fetches timeline journal from DB
+  → Returns directly with DB steps (no LLM generation)
+  → Skips mood re-analysis entirely
+  ✅ CORRECT: Respects user choice, no therapeutic override
+```
 
 ---
 
 ## 📦 Pipeline Stages (v7.0)
 
-| Graph Node | Logical Tasks | LLM Provider | Model | Avg Time |
+| Stage | Logical Tasks | LLM Provider | Model | Avg Time |
 |---|------|-------|----------|----------|
-| **Pre-server** | Voice model preload (Whisper + wav2vec2 + OpenSMILE) | ❌ ML only | — | Startup |
-| **API Layer** | WebM decode → WAV → voice feature extraction | ❌ ML only | wav2vec2 / librosa | ~200ms |
-| **1** Parallel Intake | crisis ∥ intake ∥ mood ∥ intent prefetch | ✅ OpenRouter | claude-3.5-sonnet / llama-3.3-70b | ~800ms |
-| **2** Analysis & Planning | emotion fusion + distortion + trend + planner + behavior | ✅ Fallback | llama-3.1-8b | ~60ms |
-| **3** Response Pipeline | technique selector + role selector | ❌ DB only | — | ~100ms |
+| **Pre-server** | Voice model preload (wav2vec2 only — Deepgram is REST API) | ❌ ML only | — | Startup |
+| **API Layer** | WebM decode → WAV → librosa acoustics + wav2vec2 emotion + Deepgram ASR | ❌ ML only | wav2vec2 / librosa + Deepgram Nova-2 | ~200ms |
+| **PRE-GRAPH GATE** ⭐ | chitchat router — bypasses graph if casual | ✅ Groq | llama-3.1-8b | ~400ms |
+| ↳ *Chitchat fast-path* | single casual LLM reply, no graph at all | ✅ Groq | llama-3.3-70b | **~600ms total** |
+| **1** Parallel Intake | crisis ∥ intake ∥ mood (intent SKIPPED if gate fired) | ✅ OpenRouter | claude-3.5-sonnet / llama-3.3-70b | ~800ms |
+| **2** Analysis & Planning | emotion fusion + trend + planner (distortion SKIPPED for technique_request) | ✅ Fallback | llama-3.1-8b | ~60ms |
+| **3** Response Pipeline | technique selector (SKIPPED for validate_only) + role selector | ❌ DB only | — | ~100ms |
 | **4** Response Generator | Empathetic response with voice-aware context | ✅ OpenRouter | llama-3.3-70b | ~1200ms |
 | **5** Parallel Persist | profile ∥ DB saver ∥ outcome tracker (background) | ❌ | — | 0ms (UI) |
-| | **TOTAL (warm, TTFT)** | | | **~2.1s** |
+| | **TOTAL — therapeutic (warm, TTFT)** | | | **~2.1s** |
+| | **TOTAL — chitchat (warm)** | | | **~600ms** |
 
 ---
 
@@ -255,18 +525,17 @@ Frontend                    Backend                    AI / ML
 ──────────────────          ───────────────            ────────────────────────
 Next.js 14 (App Router)     FastAPI                    llama-3.3-70b (OpenRouter)
 React 18 + TypeScript       LangGraph 0.2+             claude-3.5-sonnet (OpenRouter)
-Tailwind CSS                LangChain                  wav2vec2 (voice emotion)
-Web Audio API               Python 3.10+               OpenSMILE eGeMAPS (acoustics)
-MediaRecorder API           Uvicorn                    librosa (acoustic fallback)
-Lucide React                Pydantic                   torchaudio MFCC
-                            asyncio / SSE              Whisper-tiny (ASR)
-                                                       ChromaDB (semantic memory)
+Tailwind CSS                LangChain                  llama-3.1-8b (Groq — gate + intent)
+Web Audio API               Python 3.10+               wav2vec2 (voice emotion, local)
+MediaRecorder API           Uvicorn                    librosa (acoustic features: F0, MFCC)
+Lucide React                Pydantic                   Deepgram Nova-2 (ASR — REST API)
+                            asyncio / SSE              httpx (Deepgram client)
 
 Data                        DevOps
 ──────────────────          ──────────────────────
 PostgreSQL (Supabase)       CORS middleware
 Prisma Client Python        SSE streaming endpoint
-ChromaDB                    Twilio (WhatsApp + SMS)
+                            Twilio (WhatsApp + SMS)
                             bcrypt auth
                             python-dotenv
 ```
@@ -287,7 +556,7 @@ class MentalHealthState(TypedDict):
     # Intake
     is_new_user: bool
     session_count: int
-    memory_context: str           # ChromaDB semantic retrieval
+    memory_context: str           # DB Context retrieval
     user_preferences: dict
 
     # Intent (prefetched in parallel_intake)
@@ -433,7 +702,7 @@ The `audio_data` field is a **base64-encoded 16kHz mono WAV** produced by the br
         │   ├── groq_llm.py             # OpenRouter LLM manager
         │   └── llm_classifier.py       # LLM-based intent, crisis, distortion classifiers
         ├── db/                         # Prisma client
-        └── memory/                     # ChromaDB semantic retrieval
+        └── memory/                     # Semantic retrieval
 ```
 
 ---
@@ -478,9 +747,9 @@ python -m api_server
 #   [SERVER] Database connected
 #   [SERVER] LLM provider ready
 #   [SERVER] Deterministic Agentic Pipeline initialized
-#   [VOICE-PRELOAD] OpenSMILE: ok
+#   [VOICE-PRELOAD] Loading wav2vec2 emotion classifier...
 #   [VOICE-PRELOAD] wav2vec2: ok
-#   [VOICE-PRELOAD] Whisper: ok
+#   [VOICE-PRELOAD] Deepgram: ok
 #   [SERVER] All systems ready
 ```
 
@@ -543,6 +812,9 @@ LangGraph's `MemorySaver` was writing 7–9 checkpoint serialization events per 
 ✅ Add a fallback return {} for every node (never crash the pipeline)
 ✅ Test with crisis messages to verify safety layers still fire
 ✅ Run massive_test_suite.py before any PR (PYTHONUTF8=1 on Windows)
+✅ smart_pipeline_gate must always default to 'therapeutic' on failure — never skip crisis
+✅ Gate confidence threshold for chitchat bypass is 0.75 — lower = too aggressive
+✅ Any new intent category must be added to both smart_pipeline_gate AND llm_intent_check
 ```
 
 ---
@@ -560,7 +832,7 @@ LangGraph's `MemorySaver` was writing 7–9 checkpoint serialization events per 
 
 <div align="center">
 
-**SentiMind v7.0** — Multimodal · Empathetic · Safe · Real-time
+**SentiMind v8.0** — Smart Routing · Multimodal · Empathetic · Safe · Real-time
 
 *Built with ❤️ for accessible mental health support*
 

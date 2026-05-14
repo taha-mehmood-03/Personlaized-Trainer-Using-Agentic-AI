@@ -1,17 +1,17 @@
 """
-Analysis & Planning Fused Node — SentiMind v6.0 Latency Optimization
+Analysis & Planning Fused Node  SentiMind v6.0 Latency Optimization
 
 Merges 4 separate graph nodes into a SINGLE LangGraph node to eliminate
 4 checkpoint serialization events per message (~1-2s total saving).
 
 Sub-nodes called INLINE (not as separate graph nodes):
-  1. emotion_fusion_node     — merge text + voice emotion     (sync, <1ms)
-  2. parallel_analysis_node  — distortion + trend (||)        (async, ~50-300ms)
-  3. conversation_planner    — deterministic strategy          (async, <1ms usually)
-  4. behavioral_activation   — micro-action lookup             (sync, <1ms)
+  1. emotion_fusion_node      merge text + voice emotion     (sync, <1ms)
+  2. parallel_analysis_node   distortion + trend (||)        (async, ~50-300ms)
+  3. conversation_planner     deterministic strategy          (async, <1ms usually)
+  4. behavioral_activation    micro-action lookup             (sync, <1ms)
 
 Each sub-node reads from state + all preceding sub-node outputs (merged).
-All original logging is preserved — you still see [NODE: EMISSION_FUSION] etc.
+All original logging is preserved  you still see [NODE: EMISSION_FUSION] etc.
 
 WHY THIS IS SAFE:
   The sub-nodes were already sequential in the graph (not parallel).
@@ -36,47 +36,83 @@ async def run_analysis_and_planning(state: MentalHealthState) -> dict:
 
     Returns: merged dict of all 4 sub-nodes' outputs.
     """
-    print("\n[NODE: ANALYSIS_AND_PLANNING] ⚡ Running fused pipeline (4 sub-nodes inline)...")
+    print("\n[NODE: ANALYSIS_AND_PLANNING]  Running fused pipeline (4 sub-nodes inline)...")
 
     merged = {}
 
-    # ── 1. Emotion Fusion (sync, <1ms) ──────────────────────────────────
+    #  1. Emotion Fusion (sync, <1ms) 
     # Reads: emotion, intensity, voice_features from state
     # Writes: fused_emotion, fused_intensity
     try:
         fusion_result = fuse_emotions(state)
         merged.update(fusion_result)
     except Exception as e:
-        print(f"[ANALYSIS_AND_PLANNING] ⚠️ Emotion fusion failed: {str(e)[:100]}")
+        print(f"[ANALYSIS_AND_PLANNING]  Emotion fusion failed: {str(e)[:100]}")
         merged.update({"fused_emotion": state.get("emotion", "neutral"), "fused_intensity": state.get("intensity", 0.5)})
 
     # Create merged state view so downstream sub-nodes see fusion results
     state_after_fusion = {**state, **merged}
 
-    # ── 2. Parallel Analysis: distortion + trend (async, ~50-300ms) ─────
+    #  2. Parallel Analysis: distortion + trend (async, ~50-300ms) 
     # Reads: fused_emotion, fused_intensity, user_id, messages
     # Writes: distortion_type, distortion_confidence, emotional_trend, trend_window
-    try:
-        analysis_result = await run_parallel_analysis(state_after_fusion)
-        merged.update(analysis_result)
-    except Exception as e:
-        print(f"[ANALYSIS_AND_PLANNING] ⚠️ Parallel analysis failed: {str(e)[:100]}")
+    #
+    # OPTIMIZATION: Cognitive distortion detection (LLM call) is only useful
+    # when strategy may become "reframe". For technique_request, advice_seeking,
+    # and chitchat intents the planner will NEVER choose "reframe", so skip it.
+    prefetched_intent = state_after_fusion.get("prefetched_intent", {})
+    _intent_val = prefetched_intent.get("intent", "venting") if isinstance(prefetched_intent, dict) else "venting"
+    _skip_distortion_intents = {"technique_request", "advice_seeking", "chitchat", "crisis_signal"}
+    
+    # Get user message count from state or calculate from messages array
+    session_msg_count = state_after_fusion.get("session_message_count", 0)
+    messages = state_after_fusion.get("messages", [])
+    user_msg_count = max(
+        session_msg_count,
+        sum(1 for m in messages if getattr(m, "type", "") == "human")
+    )
+    
+    # Skip distortion if intent doesn't need it, or if it's too early in the conversation
+    # (distortions require context and early turns are purely venting/validation)
+    skip_distortion = (_intent_val in _skip_distortion_intents) or (user_msg_count <= 2)
+
+    if skip_distortion:
+        skip_reason = f"intent={_intent_val}" if _intent_val in _skip_distortion_intents else f"early_turn={user_msg_count}"
+        print(f"[ANALYSIS_AND_PLANNING]   Distortion detection SKIPPED ({skip_reason})")
+        # Still run trend analysis  it's a cheap DB query and always useful
+        try:
+            from .trend_analyzer_node import analyze_emotional_trends
+            trend_result = await analyze_emotional_trends(state_after_fusion)
+            merged.update(trend_result)
+        except Exception as e:
+            print(f"[ANALYSIS_AND_PLANNING]  Trend analysis failed: {str(e)[:100]}")
+            merged.update({"emotional_trend": "stable", "trend_window": []})
         merged.update({
             "distortion_type": None, "distortion_confidence": 0.0,
             "distortion_explanation": None, "all_distortions": [],
-            "emotional_trend": "stable", "trend_window": [],
         })
+    else:
+        try:
+            analysis_result = await run_parallel_analysis(state_after_fusion)
+            merged.update(analysis_result)
+        except Exception as e:
+            print(f"[ANALYSIS_AND_PLANNING]  Parallel analysis failed: {str(e)[:100]}")
+            merged.update({
+                "distortion_type": None, "distortion_confidence": 0.0,
+                "distortion_explanation": None, "all_distortions": [],
+                "emotional_trend": "stable", "trend_window": [],
+            })
 
     state_after_analysis = {**state, **merged}
 
-    # ── 3. Conversation Planner (async, typically <1ms — may call LLM as fallback) ───
+    #  3. Conversation Planner (async, typically <1ms  may call LLM as fallback) 
     # Reads: fused_emotion, fused_intensity, emotional_trend, messages, prefetched_intent
     # Writes: conversation_strategy, conversation_phase, technique_readiness
     try:
         planner_result = await conversation_planner_node(state_after_analysis)
         merged.update(planner_result)
     except Exception as e:
-        print(f"[ANALYSIS_AND_PLANNING] ⚠️ Conversation planner failed: {str(e)[:100]}")
+        print(f"[ANALYSIS_AND_PLANNING]  Conversation planner failed: {str(e)[:100]}")
         merged.update({
             "conversation_strategy": "validate_only",
             "conversation_phase": "venting",
@@ -86,8 +122,8 @@ async def run_analysis_and_planning(state: MentalHealthState) -> dict:
     state_after_planner = {**state, **merged}
     strategy = merged.get("conversation_strategy", "validate_only")
 
-    # ── 4. Behavioral Activation (sync, <1ms) ──────────────────────────
-    # Skipped for no_action (chitchat) — no micro-actions for casual conversation
+    #  4. Behavioral Activation (sync, <1ms) 
+    # Skipped for no_action (chitchat)  no micro-actions for casual conversation
     # Reads: fused_emotion, fused_intensity, conversation_strategy, psych_profile
     # Writes: micro_action, micro_action_rationale, micro_action_category
     if strategy != "no_action":
@@ -95,12 +131,12 @@ async def run_analysis_and_planning(state: MentalHealthState) -> dict:
             activation_result = activate_behavioral_intervention(state_after_planner)
             merged.update(activation_result)
         except Exception as e:
-            print(f"[ANALYSIS_AND_PLANNING] ⚠️ Behavioral activation failed: {str(e)[:100]}")
+            print(f"[ANALYSIS_AND_PLANNING]  Behavioral activation failed: {str(e)[:100]}")
             merged.update({"micro_action": None, "micro_action_rationale": None, "micro_action_category": None})
     else:
         merged.update({"micro_action": None, "micro_action_rationale": None, "micro_action_category": None})
 
-    print(f"[NODE: ANALYSIS_AND_PLANNING] ✅ Fused complete | "
+    print(f"[NODE: ANALYSIS_AND_PLANNING]  Fused complete | "
           f"Emotion: {merged.get('fused_emotion', '?')} | "
           f"Strategy: {merged.get('conversation_strategy', '?')} | "
           f"Trend: {merged.get('emotional_trend', '?')}")

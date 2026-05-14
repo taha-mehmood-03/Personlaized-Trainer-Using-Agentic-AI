@@ -45,7 +45,7 @@ export function MessageBubble({ message }: MessageBubbleProps) {
               {message.emotion && (
                 <Badge variant="emotion" className="capitalize text-[10px] h-5 px-1.5 flex items-center gap-1">
                   <Brain className="w-3 h-3" />
-                  {message.emotion} check
+                  Mood: {message.emotion}
                 </Badge>
               )}
             </div>

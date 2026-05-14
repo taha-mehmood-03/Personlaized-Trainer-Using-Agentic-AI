@@ -3,7 +3,7 @@ Layer 2: Session Summarizer Memory
 ChatGPT-style session summaries with rolling window.
 
 Generates concise summaries of past sessions using Groq LLM and stores them
-in the Prisma SessionSummary table. Max 15 summaries — oldest deleted first.
+in the Prisma SessionSummary table. Max 15 summaries  oldest deleted first.
 """
 
 import asyncio
@@ -23,7 +23,7 @@ async def summarize_session(
 ) -> None:
     """
     Generate a concise session summary using Groq LLM and save to DB.
-    Must always be called via asyncio.create_task() — never awaited directly.
+    Must always be called via asyncio.create_task()  never awaited directly.
 
     Args:
         user_id: User identifier
@@ -90,7 +90,7 @@ Return ONLY valid JSON: {{"title": "...", "summary": "..."}}"""
 
         prisma = await get_prisma_client()
 
-        # Enforce rolling window — delete oldest if at limit
+        # Enforce rolling window  delete oldest if at limit
         current_count = await prisma.sessionsummary.count(where={"userId": user_id})
         if current_count >= MAX_SUMMARIES:
             oldest = await prisma.sessionsummary.find_first(
@@ -99,7 +99,7 @@ Return ONLY valid JSON: {{"title": "...", "summary": "..."}}"""
             )
             if oldest:
                 await prisma.sessionsummary.delete(where={"id": oldest.id})
-                print(f"[MEMORY:SUMMARIES] 🗑️ Deleted oldest summary to make room")
+                print(f"[MEMORY:SUMMARIES]  Deleted oldest summary to make room")
 
         # Save new summary
         tech_names = [str(t) for t in techniques] if techniques else []
@@ -113,10 +113,10 @@ Return ONLY valid JSON: {{"title": "...", "summary": "..."}}"""
             "outcome": outcome,
         })
 
-        print(f"[MEMORY:SUMMARIES] ✅ Saved session summary: '{title}'")
+        print(f"[MEMORY:SUMMARIES]  Saved session summary: '{title}'")
 
     except Exception as e:
-        print(f"[MEMORY:SUMMARIES] ⚠️ summarize_session failed (non-fatal): {str(e)[:150]}")
+        print(f"[MEMORY:SUMMARIES]  summarize_session failed (non-fatal): {str(e)[:150]}")
 
 
 async def get_session_summaries(user_id: str) -> str:
@@ -139,10 +139,10 @@ async def get_session_summaries(user_id: str) -> str:
         if not summaries:
             return ""
 
-        lines = ["RECENT SESSION HISTORY:"]
-        for s in reversed(summaries):  # Oldest first for chronological reading
+        lines = ["RECENT SESSION HISTORY (most recent first):"]
+        for s in summaries:  # Already ordered desc (newest first) from the DB query
             date_str = s.createdAt.strftime("%b %d") if s.createdAt else "Recent"
-            lines.append(f"• {date_str} — {s.title}")
+            lines.append(f" {date_str}  {s.title}")
             lines.append(f"  {s.summary}")
             parts = [f"Emotion: {s.emotion}"]
             if s.techniques:
@@ -153,5 +153,5 @@ async def get_session_summaries(user_id: str) -> str:
         return "\n".join(lines)
 
     except Exception as e:
-        print(f"[MEMORY:SUMMARIES] ⚠️ get_session_summaries failed (non-fatal): {str(e)[:120]}")
+        print(f"[MEMORY:SUMMARIES]  get_session_summaries failed (non-fatal): {str(e)[:120]}")
         return ""

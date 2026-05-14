@@ -16,7 +16,7 @@ try:
     from twilio.twiml.voice_response import VoiceResponse
     TWILIO_AVAILABLE = True
 except ImportError:
-    print("[TWILIO] ⚠️ Twilio package not installed. Install with: pip install twilio")
+    print("[TWILIO]  Twilio package not installed. Install with: pip install twilio")
     Client = None
     VoiceResponse = None
     TWILIO_AVAILABLE = False
@@ -55,17 +55,17 @@ class TwilioService:
         )
         
         if not TWILIO_AVAILABLE:
-            print("[TWILIO] ⚠️ Warning: Twilio is not installed. Please install with: pip install twilio")
+            print("[TWILIO]  Warning: Twilio is not installed. Please install with: pip install twilio")
             self.client = None
             return
         
         if not all([self.account_sid, self.auth_token, self.phone_number]):
-            print("[TWILIO] ⚠️ Warning: Twilio credentials not configured")
+            print("[TWILIO]  Warning: Twilio credentials not configured")
             self.client = None
         else:
             self.client = Client(self.account_sid, self.auth_token)
-            print(f"[TWILIO] ✅ Initialized with phone: {self.phone_number}")
-            print(f"[TWILIO] 🇵🇰 Pakistan Crisis Center: {self.pakistan_crisis_center_name}")
+            print(f"[TWILIO]  Initialized with phone: {self.phone_number}")
+            print(f"[TWILIO]  Pakistan Crisis Center: {self.pakistan_crisis_center_name}")
     
     async def call_pakistan_crisis_center(
         self,
@@ -97,7 +97,7 @@ class TwilioService:
 
         try:
             print(f"\n{'='*60}")
-            print(f"[TWILIO-CALL] 🚨 INITIATING EMERGENCY CALL TO PAKISTAN CRISIS CENTER")
+            print(f"[TWILIO-CALL]  INITIATING EMERGENCY CALL TO PAKISTAN CRISIS CENTER")
             print(f"[TWILIO-CALL] User ID: {user_id}")
             print(f"[TWILIO-CALL] User Name: {user_name}")
             print(f"[TWILIO-CALL] Crisis Level: {crisis_level}")
@@ -155,7 +155,7 @@ class TwilioService:
                 )
             )
 
-            print(f"[TWILIO-CALL] ✅ Call initiated successfully")
+            print(f"[TWILIO-CALL]  Call initiated successfully")
             print(f"[TWILIO-CALL] Call SID: {call.sid}")
             print(f"[TWILIO-CALL] Status: {call.status}")
             print(f"[TWILIO-CALL] To: {call.to}")
@@ -174,7 +174,7 @@ class TwilioService:
             }
 
         except Exception as e:
-            print(f"[TWILIO-CALL] ❌ Error initiating emergency call: {e}")
+            print(f"[TWILIO-CALL]  Error initiating emergency call: {e}")
             import traceback
             traceback.print_exc()
             
@@ -211,7 +211,7 @@ class TwilioService:
 
         try:
             alert_text = (
-                f"🚨 CRISIS ALERT from SentiMind:\n"
+                f" CRISIS ALERT from SentiMind:\n"
                 f"User: {user_name} (ID: {user_id})\n"
                 f"Level: {crisis_level.upper()}\n"
                 f"Message: {message_excerpt[:50]}...\n"
@@ -228,7 +228,7 @@ class TwilioService:
                 )
             )
 
-            print(f"[TWILIO-SMS] ✅ Alert SMS sent to {crisis_center_number}")
+            print(f"[TWILIO-SMS]  Alert SMS sent to {crisis_center_number}")
             print(f"[TWILIO-SMS] Message SID: {message.sid}")
 
             return {
@@ -239,7 +239,7 @@ class TwilioService:
             }
 
         except Exception as e:
-            print(f"[TWILIO-SMS] ❌ Error sending SMS: {e}")
+            print(f"[TWILIO-SMS]  Error sending SMS: {e}")
             return {"success": False, "error": str(e)}
 
     async def send_crisis_alert_whatsapp(
@@ -268,11 +268,11 @@ class TwilioService:
 
         try:
             alert_text = (
-                f"🚨 CRISIS ALERT from SentiMind:\n\n"
-                f"👤 User: {user_name} (ID: {user_id})\n"
-                f"🔴 Level: {crisis_level.upper()}\n"
-                f"💬 Message: {message_excerpt[:50]}...\n"
-                f"🕐 Time: {datetime.utcnow().strftime('%H:%M:%S UTC')}\n\n"
+                f" CRISIS ALERT from SentiMind:\n\n"
+                f" User: {user_name} (ID: {user_id})\n"
+                f" Level: {crisis_level.upper()}\n"
+                f" Message: {message_excerpt[:50]}...\n"
+                f" Time: {datetime.utcnow().strftime('%H:%M:%S UTC')}\n\n"
                 f"Please review and respond immediately if possible."
             )
 
@@ -286,7 +286,7 @@ class TwilioService:
                 )
             )
 
-            print(f"[TWILIO-WHATSAPP] ✅ WhatsApp alert sent to {crisis_center_number}")
+            print(f"[TWILIO-WHATSAPP]  WhatsApp alert sent to {crisis_center_number}")
             print(f"[TWILIO-WHATSAPP] Message SID: {message.sid}")
 
             return {
@@ -297,7 +297,7 @@ class TwilioService:
             }
 
         except Exception as e:
-            print(f"[TWILIO-WHATSAPP] ❌ Error sending WhatsApp: {e}")
+            print(f"[TWILIO-WHATSAPP]  Error sending WhatsApp: {e}")
             return {"success": False, "error": str(e)}
 
     def initiate_crisis_call(
@@ -327,7 +327,7 @@ class TwilioService:
             }
         
         try:
-            print(f"[TWILIO] 📞 Initiating crisis call for user {user_id} to {hotline_number}")
+            print(f"[TWILIO]  Initiating crisis call for user {user_id} to {hotline_number}")
             
             # Create TwiML for call flow
             twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -348,7 +348,7 @@ class TwilioService:
                 status_callback_method="POST"
             )
             
-            print(f"[TWILIO] ✅ Call initiated: {call.sid}")
+            print(f"[TWILIO]  Call initiated: {call.sid}")
             
             return {
                 "success": True,
@@ -360,7 +360,7 @@ class TwilioService:
         
         except Exception as e:
             error_msg = str(e)
-            print(f"[TWILIO] ❌ Error initiating call: {error_msg}")
+            print(f"[TWILIO]  Error initiating call: {error_msg}")
             return {
                 "success": False,
                 "error": error_msg,
@@ -392,7 +392,7 @@ class TwilioService:
             }
         
         try:
-            print(f"[TWILIO] 📱 Sending crisis SMS to {user_phone}")
+            print(f"[TWILIO]  Sending crisis SMS to {user_phone}")
             
             sms = self.client.messages.create(
                 body=message,
@@ -400,7 +400,7 @@ class TwilioService:
                 to=user_phone
             )
             
-            print(f"[TWILIO] ✅ SMS sent: {sms.sid}")
+            print(f"[TWILIO]  SMS sent: {sms.sid}")
             
             return {
                 "success": True,
@@ -411,7 +411,7 @@ class TwilioService:
         
         except Exception as e:
             error_msg = str(e)
-            print(f"[TWILIO] ❌ Error sending SMS: {error_msg}")
+            print(f"[TWILIO]  Error sending SMS: {error_msg}")
             return {
                 "success": False,
                 "error": error_msg
@@ -454,7 +454,7 @@ class TwilioService:
         Returns:
             Status dict with response handling result
         """
-        print(f"[TWILIO-RESPONSE] 📞 Handling response for call {call_sid}, digit={digit_pressed}")
+        print(f"[TWILIO-RESPONSE]  Handling response for call {call_sid}, digit={digit_pressed}")
         
         if digit_pressed == "1":
             return {

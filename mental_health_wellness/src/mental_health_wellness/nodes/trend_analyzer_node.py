@@ -8,13 +8,13 @@ Runs AFTER emotion_fusion, BEFORE conversation_planner
 No LLM call - pure Python linear regression on intensity
 
 TREND CLASSIFICATION:
-  slope > +0.05  → "worsening"  (intensity rising = more distressed)
-  slope < -0.05  → "improving"  (intensity falling = calming down)
-  else           → "stable"
+  slope > +0.05   "worsening"  (intensity rising = more distressed)
+  slope < -0.05   "improving"  (intensity falling = calming down)
+  else            "stable"
 
 Output:
   - emotional_trend: str ("improving" | "worsening" | "stable")
-  - trend_window: list[dict] — last N {emotion, intensity, timestamp} snapshots
+  - trend_window: list[dict]  last N {emotion, intensity, timestamp} snapshots
 """
 
 from ..agent.state import MentalHealthState
@@ -30,17 +30,17 @@ async def analyze_emotional_trends(state: MentalHealthState) -> dict:
     3. Classify trend: improving / worsening / stable
     4. Return trend + window for downstream decision-making
 
-    No LLM call — pure Python/SQL.
+    No LLM call  pure Python/SQL.
     """
 
     user_id = state.get("user_id", "")
     current_emotion = state.get("fused_emotion", state.get("emotion", "neutral"))
     current_intensity = state.get("fused_intensity", state.get("intensity", 0.5))
 
-    print(f"\n[NODE: TREND_ANALYZER] 📈 Analyzing trend for user: {user_id[:20] if user_id else 'UNKNOWN'}...")
+    print(f"\n[NODE: TREND_ANALYZER]  Analyzing trend for user: {user_id[:20] if user_id else 'UNKNOWN'}...")
 
     if not user_id:
-        print("[NODE: TREND_ANALYZER] ⚠️ No user_id — returning stable")
+        print("[NODE: TREND_ANALYZER]  No user_id  returning stable")
         return {
             "emotional_trend": "stable",
             "trend_window": [],
@@ -51,11 +51,11 @@ async def analyze_emotional_trends(state: MentalHealthState) -> dict:
     # making trend analysis unreliable. Require at least 3 real sessions.
     session_count = state.get("session_count", 0)
     if user_id == "anonymous" or session_count < 3:
-        trend_reason = "anonymous user" if user_id == "anonymous" else f"only {session_count} session(s) (need ≥3)"
-        print(f"[NODE: TREND_ANALYZER] ⚠️ Insufficient data for trend ({trend_reason}) — returning stable")
+        trend_reason = "anonymous user" if user_id == "anonymous" else f"only {session_count} session(s) (need 3)"
+        print(f"[NODE: TREND_ANALYZER]  Insufficient data for trend ({trend_reason})  returning stable")
         # Still append current data point so trend_window has at least 1 entry
         return {
-            "emotional_trend": "stable",  # Safe default — don't escalate intervention on guessed trend
+            "emotional_trend": "stable",  # Safe default  don't escalate intervention on guessed trend
             "trend_window": [{
                 "emotion": current_emotion,
                 "intensity": current_intensity,
@@ -86,10 +86,10 @@ async def analyze_emotional_trends(state: MentalHealthState) -> dict:
                 "intensity": float(log.intensity) if hasattr(log, "intensity") else 0.5,
             })
 
-        print(f"[NODE: TREND_ANALYZER] 📊 Retrieved {len(trend_window)} mood logs")
+        print(f"[NODE: TREND_ANALYZER]  Retrieved {len(trend_window)} mood logs")
 
     except Exception as e:
-        print(f"[NODE: TREND_ANALYZER] ⚠️ DB query failed: {str(e)[:80]}")
+        print(f"[NODE: TREND_ANALYZER]  DB query failed: {str(e)[:80]}")
         # Continue with just the current data point
 
     # Append current message's emotion as the latest data point
@@ -103,7 +103,7 @@ async def analyze_emotional_trends(state: MentalHealthState) -> dict:
     # ============================================
 
     if len(trend_window) < 2:
-        print("[NODE: TREND_ANALYZER] ⚠️ Not enough data for trend — returning stable")
+        print("[NODE: TREND_ANALYZER]  Not enough data for trend  returning stable")
         return {
             "emotional_trend": "stable",
             "trend_window": trend_window,
@@ -123,8 +123,8 @@ async def analyze_emotional_trends(state: MentalHealthState) -> dict:
     else:
         trend = "stable"
 
-    trend_emoji = {"worsening": "📉", "improving": "📈", "stable": "➡️"}
-    print(f"[NODE: TREND_ANALYZER] {trend_emoji.get(trend, '➡️')} Trend: {trend.upper()} "
+    trend_emoji = {"worsening": "", "improving": "", "stable": ""}
+    print(f"[NODE: TREND_ANALYZER] {trend_emoji.get(trend, '')} Trend: {trend.upper()} "
           f"(slope={slope:+.3f}, points={len(intensities)})")
 
     return {

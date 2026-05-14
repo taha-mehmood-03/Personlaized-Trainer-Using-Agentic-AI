@@ -17,7 +17,7 @@ async def select_technique(state: MentalHealthState) -> dict:
     TECHNIQUE SELECTOR NODE - Deterministic technique selection.
 
     Process:
-    1. Check planner strategy — skip if user not ready
+    1. Check planner strategy  skip if user not ready
     2. Get detected emotion + intensity from state (prefers fused values)
     3. Query database for top-3 techniques (intensity-routed, unused-first)
     4. primary = top 1, alternatives = items 2 & 3
@@ -32,7 +32,7 @@ async def select_technique(state: MentalHealthState) -> dict:
     """
 
     try:
-        # ── Planner gating ───────────────────────────────────────────────────
+        #  Planner gating 
         strategy = state.get("conversation_strategy", "validate_only")
         readiness = state.get("technique_readiness", 0.0)
 
@@ -44,27 +44,27 @@ async def select_technique(state: MentalHealthState) -> dict:
 
         skip_strategies = {"validate_only", "ask_question", "encourage_reflection"}
         if strategy in skip_strategies:
-            print(f"[TECHNIQUE] ⏭️ Skipping (strategy: {strategy}, readiness: {readiness:.0%})")
+            print(f"[TECHNIQUE]  Skipping (strategy: {strategy}, readiness: {readiness:.0%})")
             return _empty
 
         if strategy == "no_action":
-            print(f"[TECHNIQUE] ⏭️ Skipping (strategy: no_action — casual conversation)")
+            print(f"[TECHNIQUE]  Skipping (strategy: no_action  casual conversation)")
             return _empty
 
         if strategy in ["validate_only", "ask_question"] and readiness < 0.6:
-            print(f"[TECHNIQUE] ⏭️ Skipping (not ready, readiness={readiness:.0%})")
+            print(f"[TECHNIQUE]  Skipping (not ready, readiness={readiness:.0%})")
             return _empty
 
-        # ── Inputs ───────────────────────────────────────────────────────────
+        #  Inputs 
         emotion   = state.get("fused_emotion", state.get("emotion", "neutral"))
         intensity = state.get("fused_intensity", state.get("intensity", 0.5))
         user_id   = state.get("user_id", "")
 
-        print(f"\n[TECHNIQUE] 🎯 emotion={emotion.upper()} intensity={intensity:.0%} strategy={strategy}")
+        print(f"\n[TECHNIQUE]  emotion={emotion.upper()} intensity={intensity:.0%} strategy={strategy}")
 
         start_time = time.time()
 
-        # ── Fetch top-3 (list) ───────────────────────────────────────────────
+        #  Fetch top-3 (list) 
         top3: list = await recommend_technique.ainvoke({
             "emotion":   emotion,
             "intensity": intensity,
@@ -74,14 +74,14 @@ async def select_technique(state: MentalHealthState) -> dict:
         elapsed_ms = int((time.time() - start_time) * 1000)
 
         if not top3:
-            print(f"[TECHNIQUE] ⚠️ No techniques found for {emotion} | Time: {elapsed_ms}ms")
+            print(f"[TECHNIQUE]  No techniques found for {emotion} | Time: {elapsed_ms}ms")
             return _empty
 
         primary      = top3[0]
         alternatives = top3[1:]          # 0, 1, or 2 items
 
         cat_name = primary.get("category", "Recommended")
-        print(f"[TECHNIQUE] ✅ Primary: {primary.get('name')} ({cat_name}) "
+        print(f"[TECHNIQUE]  Primary: {primary.get('name')} ({cat_name}) "
               f"| Alternatives: {[t.get('name') for t in alternatives]} "
               f"| Time: {elapsed_ms}ms")
 
@@ -92,7 +92,7 @@ async def select_technique(state: MentalHealthState) -> dict:
         }
 
     except Exception as e:
-        print(f"[TECHNIQUE] ❌ Error: {str(e)[:80]}")
+        print(f"[TECHNIQUE]  Error: {str(e)[:80]}")
         return {
             "recommended_technique": {},
             "recommended_techniques_by_category": {},

@@ -15,8 +15,8 @@ KEY PRINCIPLES:
 
 AGENT ROLES (from role_selector):
 - "friend" (intensity < 0.4): Listen and validate only, NO exercises
-- "coach" (0.4 ≤ intensity < 0.7): Validate + advise + optional exercise
-- "trainer" (intensity ≥ 0.7): Validate + strongly recommend + guide
+- "coach" (0.4  intensity < 0.7): Validate + advise + optional exercise
+- "trainer" (intensity  0.7): Validate + strongly recommend + guide
 - "crisis_support" (crisis detected): Emergency resources + immediate help
 """
 
@@ -49,7 +49,7 @@ async def response_generator_node(state: MentalHealthState) -> dict:
     ARCHITECTURE FLOW:
     Input: Agentic decisions + emotion analysis + agent_role
     Process: LLM generates role-appropriate response
-    Output: If technique recommended → append programmatically
+    Output: If technique recommended  append programmatically
     
     KEY PRINCIPLES:
     1. Agent role determines communication style (friend/coach/trainer/crisis_support)
@@ -84,7 +84,7 @@ async def response_generator_node(state: MentalHealthState) -> dict:
         existing_response = state.get("final_response", "")
         crisis_detected = state.get("crisis_detected", False)
         if existing_response and not crisis_detected:
-            print("[NODE: RESPONSE_GENERATOR] ✅ Response already set — passing through")
+            print("[NODE: RESPONSE_GENERATOR]  Response already set  passing through")
             return {"final_response": existing_response}
         
         # ============================================
@@ -92,7 +92,13 @@ async def response_generator_node(state: MentalHealthState) -> dict:
         # ============================================
         
         messages = state.get("messages", [])
-        chat_history = state.get("chat_history", [])
+        # Reconstruct chat_history from messages since v6.0 pipeline stores all history in the messages list
+        chat_history = []
+        if len(messages) > 1:
+            for m in messages[:-1]:  # Exclude the current user message
+                role = "user" if getattr(m, "type", "") == "human" else "assistant"
+                chat_history.append({"role": role, "content": getattr(m, "content", "")})
+                
         intent = state.get("intent", "casual")
         emotion = state.get("emotion", "neutral")
         is_new_user = state.get("is_new_user", False)
@@ -106,11 +112,11 @@ async def response_generator_node(state: MentalHealthState) -> dict:
         # Track if this was a voice message
         is_voice_message = bool(audio_file_path)
         
-        print(f"\n[NODE: RESPONSE_GENERATOR] 💬 Generating response")
+        print(f"\n[NODE: RESPONSE_GENERATOR]  Generating response")
         print(f"[NODE: RESPONSE_GENERATOR] Agent Role: {agent_role}, Intent: {intent}, Emotion: {emotion}, New user: {is_new_user}")
         print(f"[NODE: RESPONSE_GENERATOR] Chat history: {len(chat_history)} previous messages")
         if is_voice_message:
-            print(f"[NODE: RESPONSE_GENERATOR] 🎤 This was a VOICE MESSAGE")
+            print(f"[NODE: RESPONSE_GENERATOR]  This was a VOICE MESSAGE")
         print(f"[NODE: RESPONSE_GENERATOR] Preferences: {user_prefs}")
         
         if recommended_technique:
@@ -143,7 +149,7 @@ async def response_generator_node(state: MentalHealthState) -> dict:
         role_prompt = get_role_based_prompt(agent_role)
         system_prompt = role_prompt + "\n\n--- BASE INSTRUCTIONS ---\n" + system_prompt
         
-        print(f"[NODE: RESPONSE_GENERATOR] 🎭 Using role-based prompt: {agent_role.upper()}")
+        print(f"[NODE: RESPONSE_GENERATOR]  Using role-based prompt: {agent_role.upper()}")
         
         # ============================================
         # PREPEND CRITICAL SYSTEM INSTRUCTION
@@ -179,7 +185,7 @@ async def response_generator_node(state: MentalHealthState) -> dict:
         
         # USER REQUEST: DISABLED FALLBACK - Agent must select technique itself
         # if not recommended_technique and emotion in ["anxiety", "sadness", "anger", "fear", "stress"]:
-        #     print(f"[NODE: RESPONSE_GENERATOR] ⚠️ Agent didn't select technique for {emotion} - fetching fallback...")
+        #     print(f"[NODE: RESPONSE_GENERATOR]  Agent didn't select technique for {emotion} - fetching fallback...")
         #     try:
         #         from ..tools.technique_tools import recommend_technique
         #         # Manually invoke tool to get fallback technique
@@ -187,9 +193,9 @@ async def response_generator_node(state: MentalHealthState) -> dict:
         #         if fallback_result and isinstance(fallback_result, list) and len(fallback_result) > 0:
         #             recommended_technique = fallback_result[0]
         #             state["recommended_technique"] = recommended_technique # Update state
-        #             print(f"[NODE: RESPONSE_GENERATOR] ✅ Fallback technique found: {recommended_technique.get('name')}")
+        #             print(f"[NODE: RESPONSE_GENERATOR]  Fallback technique found: {recommended_technique.get('name')}")
         #     except Exception as fb_err:
-        #         print(f"[NODE: RESPONSE_GENERATOR] ❌ Fallback fetch failed: {fb_err}")
+        #         print(f"[NODE: RESPONSE_GENERATOR]  Fallback fetch failed: {fb_err}")
 
         # ============================================
         # BUILD CONTEXT FOR LLM
@@ -212,7 +218,7 @@ async def response_generator_node(state: MentalHealthState) -> dict:
         
         # Voice message context
         if is_voice_message:
-            context_parts.append("""🎤 VOICE MESSAGE: The user spoke this message (transcribed to text).
+            context_parts.append(""" VOICE MESSAGE: The user spoke this message (transcribed to text).
 Acknowledge their voice naturally: "Thank you for sharing..." NOT "I read your message..."
 Their spoken word is a valid way to communicate with you.""")
         
@@ -227,11 +233,11 @@ Their spoken word is a valid way to communicate with you.""")
             tech_rating = recommended_technique.get("avg_rating", 0)
             tech_why = recommended_technique.get("why_it_works", "")
             
-            print(f"[NODE: RESPONSE_GENERATOR] 🎯 Will add technique: '{tech_name}' (rating: {tech_rating})")
+            print(f"[NODE: RESPONSE_GENERATOR]  Will add technique: '{tech_name}' (rating: {tech_rating})")
             
             # Tell LLM to generate ONLY empathy - NO technique mention
             context_parts.append(f"""
-📝 YOUR TASK:
+ YOUR TASK:
 Generate a warm, empathetic response to the user's situation.
 - Validate their feelings about: "{user_message}"
 - Show understanding for their {emotion} emotion
@@ -320,7 +326,7 @@ Generate a warm, empathetic response to the user's situation.
         # Add current user message
         llm_messages.append(HumanMessage(content=user_message))
         
-        print(f"[NODE: RESPONSE_GENERATOR] 🤖 Calling LLM with {len(llm_messages)} messages (history limit: 10)...")
+        print(f"[NODE: RESPONSE_GENERATOR]  Calling LLM with {len(llm_messages)} messages (history limit: 10)...")
         
         # ============================================
         # GENERATE RESPONSE
@@ -350,16 +356,16 @@ Generate a warm, empathetic response to the user's situation.
             # Combine: Empathy + Technique Intro + Invitation
             final_response = f"{empathy_text}\n\n{technique_intro}\n\n{invitation}"
             
-            print(f"[NODE: RESPONSE_GENERATOR] ✅ Response with EXACT technique: {tech_name}")
+            print(f"[NODE: RESPONSE_GENERATOR]  Response with EXACT technique: {tech_name}")
             
         else:
             # Regular response (no technique)
             response = await llm.ainvoke(llm_messages)
             final_response = response.content.strip()
             
-            print(f"[NODE: RESPONSE_GENERATOR] ✅ Regular response generated")
+            print(f"[NODE: RESPONSE_GENERATOR]  Regular response generated")
         
-        print(f"[NODE: RESPONSE_GENERATOR] ✅ Final response ready ({len(final_response)} chars)")
+        print(f"[NODE: RESPONSE_GENERATOR]  Final response ready ({len(final_response)} chars)")
         
         return {"final_response": final_response}
         
@@ -369,7 +375,7 @@ Generate a warm, empathetic response to the user's situation.
         If anything goes wrong above, return sensible fallback
         Never crash - always return a response
         """
-        print(f"\n[NODE: RESPONSE_GENERATOR] ❌ CRITICAL ERROR in response generation")
+        print(f"\n[NODE: RESPONSE_GENERATOR]  CRITICAL ERROR in response generation")
         print(f"[NODE: RESPONSE_GENERATOR] Error Type: {type(e).__name__}")
         print(f"[NODE: RESPONSE_GENERATOR] Error Details: {str(e)[:200]}")
         
@@ -392,7 +398,7 @@ Generate a warm, empathetic response to the user's situation.
             "Please take a moment to breathe and share what's on your mind."
         )
         
-        print(f"[NODE: RESPONSE_GENERATOR] 🔄 Returning fallback response")
+        print(f"[NODE: RESPONSE_GENERATOR]  Returning fallback response")
         
         return {
             "final_response": fallback_response,

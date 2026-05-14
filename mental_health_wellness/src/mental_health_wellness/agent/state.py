@@ -38,8 +38,12 @@ class MentalHealthState(TypedDict):
     # ============================================
     # INTENT CLASSIFICATION (from agentic pipeline)
     # ============================================
+    # DEPRECATED: `intent` is never written by any current node.
+    # Use `prefetched_intent` (dict) from parallel_intake / smart_gate instead.
     intent: str  # "casual", "emotional", "crisis", "technique_request", "check_in"
-    skip_intervention: bool  # FIX 3: set True by INTENT_CLASSIFIER for chitchat bypass
+    # DEPRECATED: `skip_intervention` is never set to True by any current node.
+    # Gate-aware chitchat bypass is handled via prefetched_intent.source == "smart_gate".
+    skip_intervention: bool
     
     # ============================================
     # MOOD ANALYSIS (from agentic pipeline tools)
@@ -162,7 +166,15 @@ class MentalHealthState(TypedDict):
     # ============================================
     # Intent pre-check runs concurrently with crisis screening + intake + mood.
     # conversation_planner reads this and skips its own LLM call when available.
-    prefetched_intent: Optional[dict]   # {"intent": str, "confidence": float} or None
+    prefetched_intent: Optional[dict]   # {"intent": str, "confidence": float, "source": str} or None
+
+    # ============================================
+    # v5.4: GATE ROUTE (from smart_pipeline_gate in graph.py)
+    # ============================================
+    # Set before the graph runs. Allows nodes (e.g., parallel_intake) to skip
+    # expensive LLM calls that the gate has already made redundant.
+    # Values: "chitchat" | "therapeutic" | "" (not yet set)
+    gate_route: str
 
 
 def get_initial_state() -> MentalHealthState:
@@ -275,4 +287,7 @@ def get_initial_state() -> MentalHealthState:
 
         # v5.3: Prefetched intent from parallel_intake (None on first turn until prefetch completes)
         prefetched_intent=None,
+
+        # v5.4: Gate route set before graph runs by smart_pipeline_gate
+        gate_route="",
     )

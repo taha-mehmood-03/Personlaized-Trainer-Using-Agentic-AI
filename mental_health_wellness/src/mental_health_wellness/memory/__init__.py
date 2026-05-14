@@ -21,16 +21,16 @@ def _get_embeddings():
         try:
             from langchain_huggingface import HuggingFaceEmbeddings
             
-            print("[MEMORY] 🧠 Loading embedding model (all-MiniLM-L6-v2)...")
+            print("[MEMORY]  Loading embedding model (all-MiniLM-L6-v2)...")
             _embeddings = HuggingFaceEmbeddings(
                 model_name="sentence-transformers/all-MiniLM-L6-v2",
                 model_kwargs={'device': 'cpu'},
                 encode_kwargs={'normalize_embeddings': True}
             )
-            print("[MEMORY] ✅ Embedding model loaded")
+            print("[MEMORY]  Embedding model loaded")
             
         except ImportError:
-            print("[MEMORY] ⚠️ langchain-huggingface not installed, falling back to sentence-transformers")
+            print("[MEMORY]  langchain-huggingface not installed, falling back to sentence-transformers")
             from langchain_community.embeddings import HuggingFaceEmbeddings
             
             _embeddings = HuggingFaceEmbeddings(
@@ -103,7 +103,7 @@ async def store_conversation_memory(
         # Create a combined document for the conversation turn
         timestamp = datetime.now().isoformat()
         
-        # Store ONLY user message — clean text, no prefix (no "User said:")
+        # Store ONLY user message  clean text, no prefix (no "User said:")
         user_doc = user_message  # Clean text for best embedding quality
         user_metadata = {
             "role": "user",
@@ -112,17 +112,17 @@ async def store_conversation_memory(
             "session_id": session_id or "unknown"
         }
         
-        # Add only user message (assistant responses never retrieved — no point storing them)
+        # Add only user message (assistant responses never retrieved  no point storing them)
         vectorstore.add_texts(
             texts=[user_doc],
             metadatas=[user_metadata]
         )
         
-        print(f"[MEMORY] 💾 Stored user message in ChromaDB for user {user_id[:8]}...")
+        print(f"[MEMORY]  Stored user message in ChromaDB for user {user_id[:8]}...")
         return True
         
     except Exception as e:
-        print(f"[MEMORY] ⚠️ store_conversation_memory failed (non-fatal): {str(e)[:100]}")
+        print(f"[MEMORY]  store_conversation_memory failed (non-fatal): {str(e)[:100]}")
         return False
 
 
@@ -200,11 +200,11 @@ async def retrieve_relevant_memories(
                 if len(memories) >= k:  # Cap at requested count
                     break
         
-        print(f"[MEMORY] 🔍 Retrieved {len(memories)} relevant memories for query")
+        print(f"[MEMORY]  Retrieved {len(memories)} relevant memories for query")
         return memories
         
     except Exception as e:
-        print(f"[MEMORY] ⚠️ retrieve_relevant_memories failed (non-fatal): {str(e)[:100]}")
+        print(f"[MEMORY]  retrieve_relevant_memories failed (non-fatal): {str(e)[:100]}")
         return []
 
 
@@ -237,7 +237,7 @@ async def get_memory_context_for_prompt(
         return ""
     
     # Format memories for prompt
-    context_parts = ["APPROXIMATE PAST CONTEXT (may not be exact — use as gentle reference only):"]
+    context_parts = ["APPROXIMATE PAST CONTEXT (may not be exact  use as gentle reference only):"]
     
     # Sort by relevance score descending
     memories.sort(key=lambda m: m.get("relevance_score", 0), reverse=True)

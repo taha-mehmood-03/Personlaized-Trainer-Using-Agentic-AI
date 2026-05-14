@@ -68,7 +68,7 @@ class MessagePreprocessor:
         # to avoid false positives on innocent messages like "I always exercise"
         self.cognitive_distortion_patterns = [
             # Overgeneralization with negative self-reference
-            # "I always mess up" ✓  but NOT "I always go for walks" ✗
+            # "I always mess up"   but NOT "I always go for walks" 
             r"(i\s+(always|never|constantly)\s+(mess|fail|screw|ruin|forget|lose|get\s+it\s+wrong))",
             # Catch "I feel like I fail at everything"
             r"(i\s+feel\s+(like|that)\s+i\s+(fail|am\s+a\s+failure|can't\s+do\s+anything))",
@@ -77,12 +77,12 @@ class MessagePreprocessor:
             # Catastrophizing (strong words only)
             r"\b(worst\s+thing|disaster|my\s+life\s+is\s+ruined|everything\s+is\s+(ruined|over|falling\s+apart))\b",
             r"\b(i'll\s+never\s+(recover|get\s+better|succeed|be\s+happy|find))\b",
-            # Self-blame / Self-criticism (kept — already self-referential)
+            # Self-blame / Self-criticism (kept  already self-referential)
             r"(i'm\s+(a|such\s+a)\s+(failure|stupid|worthless|broken|incompetent|useless))",
             r"(it's\s+all\s+my\s+fault|i\s+messed\s+up|i\s+ruined\s+(everything|it|this))",
             # Black-and-white thinking (tightened)
             r"(i'm\s+either).{0,20}(perfect|failure|good|bad|success|nothing)",
-            # Mind reading (kept — already contextual)
+            # Mind reading (kept  already contextual)
             r"(they\s+(think|know|believe)\s+(i'm|that\s+i'm))",
             r"(everyone\s+(thinks|knows|hates|judges)\s+(i'm|me|that))",
         ]
@@ -101,7 +101,7 @@ class MessagePreprocessor:
             # like "Should I be worried about my panic attacks?"
         ]
         
-        # ── FIX 1: Crisis markers — TIGHTENED ──────────────────────────
+        #  FIX 1: Crisis markers  TIGHTENED 
         # These patterns must be SPECIFIC enough to avoid false positives.
         # Rules:
         #   1. Require self-referential constructions (myself, my life, I)
@@ -122,7 +122,7 @@ class MessagePreprocessor:
             r"\bno\s+reason\s+to\s+(keep\s+going|live|continue|go\s+on)\b",
             r"\bno\s+point\s+in\s+(living|continuing|going\s+on|existing)\b",
             r"\bcan't\s+go\s+on\s+(like\s+this|anymore|any\s+longer)\b",
-            # Passive ideation — burden / others better off
+            # Passive ideation  burden / others better off
             r"\beveryone\s+(would\s+be|is)\s+better\s+off\s+without\s+me\b",
             r"\b(world|everyone|family|friends)\s+better\s+without\s+me\b",
             r"\bi\s+am\s+a\s+burden\b",
@@ -141,35 +141,35 @@ class MessagePreprocessor:
             r"\bnobody\s+would\s+(notice|care|miss)\s+if\s+i\s+(disappeared|was\s+gone|died)\b",
         ]
         
-        # ── FIX 1: False-positive blocklist ────────────────────────────
+        #  FIX 1: False-positive blocklist 
         # If a message MATCHES a crisis_marker BUT ALSO matches one of these
-        # patterns, it is NOT a crisis — it's figurative/metaphorical language.
+        # patterns, it is NOT a crisis  it's figurative/metaphorical language.
         self.false_positive_crisis_patterns = [
-            # Figurative "kill" — academic or hyperbolic frustration
+            # Figurative "kill"  academic or hyperbolic frustration
             r"(kill|killing|killed)\s+(this|the|my|an|it|them).{0,30}(assignment|exam|test|quiz|project|paper|task|interview|deadline|homework)",
             r"(kill|killing|killed).{0,40}(stress|boredom|time|it|the game)",
-            # Figurative "dying" — clear positive/humor context
+            # Figurative "dying"  clear positive/humor context
             r"(dying|die).{0,30}(laugh|laughter|lol|haha|funny|hilarious|cute|adorable|cringe)",
-            r"(i'm|im)\s+(dying|dead).{0,20}(lol|haha|😂|lmao|😭|funniest)",
-            # "Disappear from" — digital detox, social context
+            r"(i'm|im)\s+(dying|dead).{0,20}(lol|haha||lmao||funniest)",
+            # "Disappear from"  digital detox, social context
             r"disappear\s+from\s+(social\s+media|instagram|twitter|tiktok|facebook|the\s+internet|online)",
             r"(take|taking)\s+a\s+(break|step\s+back)\s+from\s+(social\s+media|the\s+internet|online)",
-            # "Sleep forever" — clearly tiredness/relief context
+            # "Sleep forever"  clearly tiredness/relief context
             r"(sleep|could\s+sleep).{0,20}forever.{0,30}(week|work|day|tired|exhausted|long\s+day)",
             r"(after\s+(this|that|a|the)).{0,30}(sleep|sleeping).{0,20}forever",
             # Metaphorical "fighting" without self-harm context  
             r"(tired|exhausted)\s+of\s+fighting.{0,30}(for|against|with|my|the|this)",
             # "Worthless" in distortion/self-criticism context (not suicidal)
             r"(feel|feeling).{0,20}worthless.{0,30}(at|in|with).{0,30}(everything|anything|work|school|life)",
-            # "Only one" — cognitive distortion, not crisis  
+            # "Only one"  cognitive distortion, not crisis  
             r"(only|the\s+only)\s+one\s+who\s+(struggles|feels|has|seems)",
-            # "Lonely, nobody understands" — social isolation, not crisis
+            # "Lonely, nobody understands"  social isolation, not crisis
             r"(lonely|alone).{0,30}(nobody|no\s+one).{0,30}(understand|gets|cares|listens)",
-            # "Heavy" — vague emotional weight, not crisis
+            # "Heavy"  vague emotional weight, not crisis
             r"(feel|feels|feeling).{0,15}heavy.{0,30}(lately|today|these\s+days|recently)",
-            # "Every day is worse" — worsening mood, needs trainer not hotlines
+            # "Every day is worse"  worsening mood, needs trainer not hotlines
             r"every\s+day\s+is\s+worse\s+than\s+the\s+last",
-            # Context: "must be perfect or worthless" — cognitive distortion pattern
+            # Context: "must be perfect or worthless"  cognitive distortion pattern
             r"(must|have\s+to)\s+be\s+perfect.{0,30}(or|otherwise).{0,30}(worthless|failure|nothing)",
         ]
         
@@ -238,20 +238,20 @@ class MessagePreprocessor:
             )
             
             if is_false_positive:
-                print(f"[PREPROCESSOR] 🛡️ Crisis keyword found but matched false-positive blocklist — NOT flagging crisis")
+                print(f"[PREPROCESSOR]  Crisis keyword found but matched false-positive blocklist  NOT flagging crisis")
                 # Fall through to normal distress classification
             else:
                 results["has_crisis_markers"] = True
                 results["detected_patterns"].append("crisis_marker")
                 results["suggested_tools"].append("handle_crisis")
-                # Crisis takes absolute priority — return immediately
+                # Crisis takes absolute priority  return immediately
                 return results
         
         # ============================================
         # STEP 2: Check for greeting (but only if message is PURELY a greeting)
         # ============================================
-        # "Hi!" → greeting ✓
-        # "Hi, I'm feeling really down" → NOT a greeting (has emotional content)
+        # "Hi!"  greeting 
+        # "Hi, I'm feeling really down"  NOT a greeting (has emotional content)
         has_emotion_content = any(
             re.search(pattern, msg_lower, re.IGNORECASE)
             for pattern in self.emotion_override_keywords
@@ -261,15 +261,15 @@ class MessagePreprocessor:
             for pattern in self.greeting_patterns:
                 if re.search(pattern, msg_lower, re.IGNORECASE):
                     # Additional check: short messages are more likely pure greetings
-                    # "Hello!" (6 chars) → greeting
-                    # "Hello, I've been struggling with anxiety lately" → NOT greeting
+                    # "Hello!" (6 chars)  greeting
+                    # "Hello, I've been struggling with anxiety lately"  NOT greeting
                     words = msg_lower.split()
                     if len(words) <= 8:
                         results["is_greeting"] = True
                         results["detected_patterns"].append("greeting")
                         results["tools_to_skip"] = ["handle_crisis", "analyze_mood", "recommend_technique"]
                         return results
-                    break  # Matched greeting pattern but too long — fall through
+                    break  # Matched greeting pattern but too long  fall through
         
         # ============================================
         # STEP 3: Check for exercise request (MUST trigger mindfulness_exercise)
@@ -365,7 +365,7 @@ def get_message_classification(message: str) -> Dict[str, any]:
 # Emotion mapping normalization
 # FIX 2: All anxiety/fear variants standardized to 'anxiety'
 EMOTION_NORMALIZATION_MAP = {
-    # All fear/anxiety variants → 'anxiety'
+    # All fear/anxiety variants  'anxiety'
     "fear": "anxiety",
     "worry": "anxiety",
     "nervous": "anxiety",
@@ -496,11 +496,11 @@ Output ONLY valid JSON, no markdown."""
         if classification.get("has_crisis_markers"):
             classification["detected_patterns"].append("crisis_marker")
         
-        print(f"[PREPROCESSOR] 🤖 LLM Classification: {classification.get('reasoning', 'N/A')}")
+        print(f"[PREPROCESSOR]  LLM Classification: {classification.get('reasoning', 'N/A')}")
         return classification
         
     except Exception as e:
-        print(f"[PREPROCESSOR] ⚠️ LLM classification failed: {e}")
+        print(f"[PREPROCESSOR]  LLM classification failed: {e}")
         # Fallback to keyword-based if LLM fails
         return get_message_classification_fallback(message)
 

@@ -7,9 +7,9 @@ Runs AFTER agentic agent analysis
 
 Decision:
   - If crisis_detected = True AND crisis_risk in ["medium", "high"]
-    → Route to Crisis Handler node
+     Route to Crisis Handler node
   - Else
-    → Route to Response Generator node
+     Route to Response Generator node
 """
 
 from ..agent.state import MentalHealthState
@@ -35,7 +35,7 @@ async def route_crisis(state: MentalHealthState) -> dict:
         - route_to: Either "crisis_handler" or "response_generator"
         - crisis_routing_info: Debug info about routing decision
     """
-    print(f"\n[NODE: CRISIS_ROUTER] 🚦 Evaluating crisis routing")
+    print(f"\n[NODE: CRISIS_ROUTER]  Evaluating crisis routing")
     
     # Extract crisis information from state
     crisis_detected = state.get("crisis_detected", False)
@@ -53,10 +53,10 @@ async def route_crisis(state: MentalHealthState) -> dict:
     
     if crisis_detected and crisis_level in ["medium", "high"]:
         route_to = "crisis_handler"
-        print(f"[NODE: CRISIS_ROUTER] 🚨 ROUTING TO CRISIS HANDLER")
+        print(f"[NODE: CRISIS_ROUTER]  ROUTING TO CRISIS HANDLER")
     else:
         route_to = "response_generator"
-        print(f"[NODE: CRISIS_ROUTER] ✅ Routing to response generator (low risk)")
+        print(f"[NODE: CRISIS_ROUTER]  Routing to response generator (low risk)")
     
     return {
         "route_to": route_to,

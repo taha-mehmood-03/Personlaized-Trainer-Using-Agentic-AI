@@ -5,7 +5,7 @@ ARCHITECTURE NODE 5b:
 Purpose: Update the user's persistent PsychProfile after every conversation turn.
          Builds a cumulative psychological model that personalizes all future interactions.
          Runs AFTER response_generator_node, BEFORE session_saver_node.
-         No LLM call — pure stat accumulation and DB writes.
+         No LLM call  pure stat accumulation and DB writes.
 
 PROFILE FIELDS UPDATED:
   - coping_style:         avoidant | proactive | mixed (from technique acceptance rate)
@@ -40,7 +40,7 @@ _REFLECTION_KEYWORDS = {
 
 async def update_psych_profile(state: MentalHealthState) -> dict:
     """
-    PSYCHOLOGICAL PROFILE UPDATER — Persistent behavioral model update.
+    PSYCHOLOGICAL PROFILE UPDATER  Persistent behavioral model update.
 
     Process:
     1. Read current profile from state (loaded by Intake)
@@ -63,7 +63,7 @@ async def update_psych_profile(state: MentalHealthState) -> dict:
     messages = state.get("messages", [])
 
     current_profile = state.get("psych_profile", {})
-    print(f"\n[NODE: PROFILE] 🧬 Updating psychological profile for user: {user_id}")
+    print(f"\n[NODE: PROFILE]  Updating psychological profile for user: {user_id}")
 
     # ============================================
     # FIX 9: PROFILE UPDATE THRESHOLDS
@@ -75,11 +75,11 @@ async def update_psych_profile(state: MentalHealthState) -> dict:
 
     session_count = state.get("session_count", 0)
     if session_count < _PROFILE_MIN_SESSIONS:
-        print(f"[NODE: PROFILE] ⏭️  Skipping update — insufficient session history ({session_count} < {_PROFILE_MIN_SESSIONS})")
+        print(f"[NODE: PROFILE]   Skipping update  insufficient session history ({session_count} < {_PROFILE_MIN_SESSIONS})")
         return {}
 
     if intensity < _PROFILE_MIN_INTENSITY and not all_distortions:
-        print(f"[NODE: PROFILE] ⏭️  Skipping update — low-signal message (intensity={intensity:.0%} < {_PROFILE_MIN_INTENSITY:.0%}, no distortions)")
+        print(f"[NODE: PROFILE]   Skipping update  low-signal message (intensity={intensity:.0%} < {_PROFILE_MIN_INTENSITY:.0%}, no distortions)")
         return {}
 
     try:
@@ -96,7 +96,7 @@ async def update_psych_profile(state: MentalHealthState) -> dict:
         elif emotion_delta == "worsening":
             new_resilience = max(0.0, old_resilience - 0.01)
         else:
-            new_resilience = old_resilience  # stable → no change
+            new_resilience = old_resilience  # stable  no change
 
         # 2. Anxiety Baseline: rolling average
         old_baseline = current_profile.get("anxiety_baseline", 0.5)
@@ -133,7 +133,7 @@ async def update_psych_profile(state: MentalHealthState) -> dict:
         old_acc_rate = current_profile.get("technique_acc_rate", 0.5)
         if technique_offered:
             # We'll track this more precisely using TechniqueOutcome, but here
-            # we approximate: if technique was offered AND emotion improved → acceptance
+            # we approximate: if technique was offered AND emotion improved  acceptance
             if emotion_delta == "improving":
                 new_acc_rate = round(0.1 * 1.0 + 0.9 * old_acc_rate, 4)
             else:
@@ -173,10 +173,10 @@ async def update_psych_profile(state: MentalHealthState) -> dict:
                     "create": {"userId": user_id, **update_data},
                 }
             )
-            print(f"[NODE: PROFILE] ✅ Profile updated | Coping: {coping_style} | Resilience: {new_resilience:.2f} | Anxiety baseline: {new_baseline:.2f}")
+            print(f"[NODE: PROFILE]  Profile updated | Coping: {coping_style} | Resilience: {new_resilience:.2f} | Anxiety baseline: {new_baseline:.2f}")
         except Exception as db_err:
-            # Table may not exist yet — fail silently
-            print(f"[NODE: PROFILE] ⚠️  DB update skipped (PsychProfile table may not exist): {str(db_err)[:60]}")
+            # Table may not exist yet  fail silently
+            print(f"[NODE: PROFILE]   DB update skipped (PsychProfile table may not exist): {str(db_err)[:60]}")
 
         # Return updated profile into state for next intake
         updated_profile = {**current_profile, **{k: v for k, v in {
@@ -194,5 +194,5 @@ async def update_psych_profile(state: MentalHealthState) -> dict:
         return {"psych_profile": updated_profile}
 
     except Exception as e:
-        print(f"[NODE: PROFILE] ❌ Error updating profile: {str(e)[:80]}")
+        print(f"[NODE: PROFILE]  Error updating profile: {str(e)[:80]}")
         return {}

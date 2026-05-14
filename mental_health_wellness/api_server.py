@@ -171,7 +171,7 @@ async def lifespan(app: FastAPI):
 
     # ── Voice ML Models (preload to avoid first-request delay) ────────────
     try:
-        print("[SERVER] 🔄 Preloading voice ML models (Whisper + wav2vec2 + OpenSMILE)...")
+        print("[SERVER] 🔄 Preloading voice ML models (wav2vec2) & verifying Deepgram API...")
         import asyncio
         from src.mental_health_wellness.voice import preload_all_voice_models
         # Run blocking model loads in a thread pool so we don't block the event loop
@@ -430,7 +430,9 @@ async def pipeline_complete(request: PipelineRequest):
     start_time = time.time()
     
     try:
-        user_id = request.user_id or "anonymous"
+        user_id = request.user_id
+        if not user_id:
+            raise HTTPException(status_code=400, detail="user_id is required")
         
         result = await chat_with_agent(
             user_id=user_id,
@@ -841,16 +843,13 @@ async def delete_session(session_id: str):
 
 
 @app.get("/api/user/{user_id}/stats")
-async def get_user_stats(user_id: str):
-    """Get user statistics"""
+async def get_user_stats_legacy(user_id: str):
+    """Get user statistics (legacy endpoint)"""
     try:
         prisma = await get_prisma_client()
-        
         stats = await prisma.userstatistics.find_unique(where={"userId": user_id})
-        
         if not stats:
             return {"message": "No statistics found"}
-        
         return {
             "total_sessions": stats.totalSessions,
             "total_messages": stats.totalMessages,
@@ -859,7 +858,397 @@ async def get_user_stats(user_id: str):
             "average_mood": stats.averageMoodRating,
             "techniques_used": stats.totalTechniquesUsed
         }
-        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─── New comprehensive dashboard endpoint ─────────────────────────────────────
+
+class UserSettingsRequest(BaseModel):
+    user_id: str
+    settings: dict
+
+class OnboardingRequest(BaseModel):
+    user_id: Optional[str] = None
+    initial_mood: Optional[str] = None
+    goals: List[str] = []
+    notifications_enabled: bool = True
+
+
+@app.get("/api/dashboard/stats")
+async def get_dashboard_stats(user_id: str):
+    """
+    Comprehensive dashboard stats endpoint.
+    Computes mood timeline, emotion distribution, top techniques, recent sessions,
+    and psychological profile from real database records.
+    """
+    from collections import Counter
+    from datetime import timedelta
+
+    try:
+        prisma = await get_prisma_client()
+
+        # ── Verify user exists ────────────────────────────────────────────────
+        user = await prisma.user.find_unique(where={"id": user_id})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # ── UserStatistics ────────────────────────────────────────────────────
+        user_stats = await prisma.userstatistics.find_unique(where={"userId": user_id})
+        total_sessions = user_stats.totalSessions if user_stats else 0
+        streak = user_stats.currentCheckInStreak if user_stats else 0
+        techniques_tried = user_stats.totalTechniquesUsed if user_stats else 0
+        avg_mood_rating = user_stats.averageMoodRating if user_stats else 5.0
+
+        # ── Sessions (last 30 days) ───────────────────────────────────────────
+        thirty_days_ago = datetime.now() - timedelta(days=30)
+        sessions = await prisma.session.find_many(
+            where={"userId": user_id, "startedAt": {"gte": thirty_days_ago}},
+            order={"startedAt": "desc"},
+            include={"messages": True, "summaries": True},
+        )
+
+        # Sessions this week
+        one_week_ago = datetime.now() - timedelta(days=7)
+        sessions_this_week = sum(1 for s in sessions if s.startedAt and s.startedAt >= one_week_ago)
+
+        # ── MoodLogs (last 7 days for timeline) ───────────────────────────────
+        mood_logs = await prisma.moodlog.find_many(
+            where={"userId": user_id, "createdAt": {"gte": one_week_ago}},
+            order={"createdAt": "asc"},
+        )
+
+        # Build 7-day mood timeline (one data point per day, avg intensity)
+        from collections import defaultdict
+        day_mood: dict = defaultdict(list)
+        day_emotion: dict = defaultdict(list)
+        DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        for log in mood_logs:
+            if log.createdAt:
+                day_name = log.createdAt.strftime("%a")
+                day_mood[day_name].append(log.intensity)
+                day_emotion[day_name].append(str(log.emotion).lower() if log.emotion else "neutral")
+
+        mood_timeline = []
+        for day in DAYS:
+            if day in day_mood:
+                avg_intensity = sum(day_mood[day]) / len(day_mood[day])
+                score = round(avg_intensity * 100)
+                # Most common emotion of the day
+                emotion_counts = Counter(day_emotion[day])
+                top_emotion = emotion_counts.most_common(1)[0][0] if emotion_counts else "neutral"
+                mood_timeline.append({"date": day, "score": score, "emotion": top_emotion})
+            # If no mood log for this day, omit it (don't invent data)
+
+        # ── Emotion Distribution (all time) ───────────────────────────────────
+        all_mood_logs = await prisma.moodlog.find_many(where={"userId": user_id})
+        emotion_counter = Counter(
+            str(ml.emotion).lower() for ml in all_mood_logs if ml.emotion
+        )
+        total_logs = sum(emotion_counter.values()) or 1
+        emotion_distribution = [
+            {
+                "emotion": emotion,
+                "count": count,
+                "percentage": round((count / total_logs) * 100),
+            }
+            for emotion, count in emotion_counter.most_common(6)
+        ]
+
+        # Top emotion
+        top_emotion = emotion_counter.most_common(1)[0][0] if emotion_counter else "neutral"
+
+        # ── Mood trend (compare last 7 days to previous 7 days) ──────────────
+        two_weeks_ago = datetime.now() - timedelta(days=14)
+        prev_week_logs = await prisma.moodlog.find_many(
+            where={"userId": user_id, "createdAt": {"gte": two_weeks_ago, "lt": one_week_ago}},
+        )
+        curr_avg = sum(l.intensity for l in mood_logs) / len(mood_logs) if mood_logs else 0
+        prev_avg = sum(l.intensity for l in prev_week_logs) / len(prev_week_logs) if prev_week_logs else 0
+        if curr_avg > prev_avg + 0.05:
+            mood_trend = "up"
+        elif curr_avg < prev_avg - 0.05:
+            mood_trend = "down"
+        else:
+            mood_trend = "stable"
+
+        # Average mood as percentage (intensity is 0-1 scale, convert to 0-100)
+        avg_mood_pct = round(curr_avg * 100) if mood_logs else round((avg_mood_rating / 10) * 100)
+
+        # ── Top Techniques ────────────────────────────────────────────────────
+        technique_ratings = await prisma.usertechniquerating.find_many(
+            where={"userId": user_id},
+            include={"technique": {"include": {"category": True}}},
+        )
+        tech_counter: dict = defaultdict(lambda: {"count": 0, "name": "", "category": ""})
+        for rating in technique_ratings:
+            if rating.technique:
+                t = rating.technique
+                tid = t.id
+                tech_counter[tid]["count"] += 1
+                tech_counter[tid]["name"] = t.name
+                tech_counter[tid]["category"] = t.category.name.lower() if t.category else "general"
+        top_techniques = [
+            {"name": v["name"], "category": v["category"], "usage_count": v["count"]}
+            for v in sorted(tech_counter.values(), key=lambda x: x["count"], reverse=True)[:5]
+        ]
+
+        # ── Recent Sessions ───────────────────────────────────────────────────
+        recent_sessions_raw = await prisma.session.find_many(
+            where={"userId": user_id},
+            order={"startedAt": "desc"},
+            take=5,
+            include={"messages": True, "summaries": True},
+        )
+        recent_sessions = []
+        for s in recent_sessions_raw:
+            # Find dominant emotion from user messages in this session
+            user_emotions = [
+                str(m.emotion).lower()
+                for m in (s.messages or [])
+                if m.role and str(m.role) == "USER" and m.emotion
+            ]
+            dominant = Counter(user_emotions).most_common(1)[0][0] if user_emotions else "neutral"
+
+            # Duration from first to last message
+            if s.messages:
+                sorted_msgs = sorted(s.messages, key=lambda m: m.createdAt)
+                if len(sorted_msgs) >= 2:
+                    delta = sorted_msgs[-1].createdAt - sorted_msgs[0].createdAt
+                    duration = max(1, round(delta.total_seconds() / 60))
+                else:
+                    duration = 1
+            else:
+                duration = 0
+
+            # Technique used
+            technique_name = None
+            if s.summaries:
+                techniques_list = s.summaries[-1].techniques if s.summaries[-1].techniques else []
+                if techniques_list:
+                    technique_name = techniques_list[0]
+
+            recent_sessions.append({
+                "id": s.id,
+                "title": s.title or "Untitled Session",
+                "date": s.startedAt.strftime("%Y-%m-%d") if s.startedAt else "",
+                "dominant_emotion": dominant,
+                "duration_minutes": duration,
+                "technique_used": technique_name,
+            })
+
+        # ── Psychological Profile ─────────────────────────────────────────────
+        psych = await prisma.psychprofile.find_unique(where={"userId": user_id})
+
+        if psych:
+            coping_raw = psych.copingStyle.lower()
+            coping_map = {"avoidant": "Avoidant", "proactive": "Active", "mixed": "Mixed"}
+            coping_style = coping_map.get(coping_raw, "Active")
+
+            resilience = round(psych.resilienceScore * 100)
+
+            anx_val = psych.anxietyBaseline
+            if anx_val < 0.35:
+                anxiety_baseline = "Low"
+            elif anx_val < 0.65:
+                anxiety_baseline = "Moderate"
+            else:
+                anxiety_baseline = "High"
+
+            # Generate a short insight from available data
+            if mood_trend == "up":
+                ai_insight = f"Your mood has been improving this week. Your dominant coping style is {coping_style.lower()}. Keep using the techniques that work for you 💙"
+            elif mood_trend == "down":
+                ai_insight = f"This week has been challenging. Remember: reaching out is a form of strength. Your resilience score is {resilience}% 💙"
+            else:
+                ai_insight = f"You've been consistent this week. Your {coping_style.lower()} coping style is serving you well. Keep going 💙"
+        else:
+            # No psych profile yet — provide neutral defaults
+            coping_style = "Active"
+            resilience = 50
+            anxiety_baseline = "Moderate"
+            ai_insight = "Keep chatting with SentiMind to build your personalized psychological profile 💙"
+
+        return {
+            "total_sessions": total_sessions,
+            "sessions_this_week": sessions_this_week,
+            "avg_mood": avg_mood_pct,
+            "streak": streak,
+            "top_emotion": top_emotion,
+            "mood_trend": mood_trend,
+            "techniques_tried": techniques_tried,
+            "mood_timeline": mood_timeline,
+            "emotion_distribution": emotion_distribution,
+            "top_techniques": top_techniques,
+            "recent_sessions": recent_sessions,
+            "psychological_profile": {
+                "coping_style": coping_style,
+                "resilience": resilience,
+                "anxiety_baseline": anxiety_baseline,
+                "ai_insight": ai_insight,
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[DASHBOARD] ❌ Error computing dashboard stats for {user_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/user/{user_id}/profile")
+async def get_user_profile(user_id: str):
+    """Return user profile: name, email, plan, createdAt, and preferences."""
+    try:
+        prisma = await get_prisma_client()
+        user = await prisma.user.find_unique(
+            where={"id": user_id},
+            include={"preference": True, "statistics": True},
+        )
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        return {
+            "id": user.id,
+            "name": user.name,
+            "email": user.email,
+            "created_at": user.createdAt.isoformat() if user.createdAt else None,
+            "settings": {
+                "dailyReminderEnabled": user.preference.dailyCheckInEnabled if user.preference else True,
+                "weeklyEmailEnabled": user.preference.moodRemindersEnabled if user.preference else True,
+                "sessionAutoSave": True,
+                "anonymousMode": False,
+                "shareLocationInCrisis": True,
+                "theme": user.preference.theme if user.preference else "light",
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/user/settings")
+async def save_user_settings(request: UserSettingsRequest):
+    """Save user preferences / settings."""
+    try:
+        prisma = await get_prisma_client()
+        user = await prisma.user.find_unique(where={"id": request.user_id})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        settings = request.settings
+        pref = await prisma.userpreference.find_unique(where={"userId": request.user_id})
+        update_data: dict = {}
+        if "dailyReminderEnabled" in settings:
+            update_data["dailyCheckInEnabled"] = bool(settings["dailyReminderEnabled"])
+        if "weeklyEmailEnabled" in settings:
+            update_data["moodRemindersEnabled"] = bool(settings["weeklyEmailEnabled"])
+        if "theme" in settings:
+            update_data["theme"] = str(settings["theme"])
+
+        if update_data:
+            if pref:
+                await prisma.userpreference.update(
+                    where={"userId": request.user_id}, data=update_data
+                )
+            else:
+                update_data["userId"] = request.user_id
+                await prisma.userpreference.create(data=update_data)
+
+        return {"status": "success", "message": "Settings saved"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/user/onboarding")
+async def save_onboarding(request: OnboardingRequest):
+    """
+    Persist onboarding selections: initial mood → MoodLog,
+    goals → UserFact, notifications → UserPreference.
+    """
+    try:
+        prisma = await get_prisma_client()
+        user_id = request.user_id or "anonymous"
+
+        user = await prisma.user.find_unique(where={"id": user_id})
+        if not user:
+            return {"status": "skipped", "message": "User not found — onboarding data not saved"}
+
+        MOOD_TO_EMOTION = {
+            "great": "JOY",
+            "good": "JOY",
+            "okay": "NEUTRAL",
+            "low": "SADNESS",
+            "awful": "SADNESS",
+        }
+        MOOD_TO_INTENSITY = {
+            "great": 0.9,
+            "good": 0.75,
+            "okay": 0.5,
+            "low": 0.3,
+            "awful": 0.1,
+        }
+
+        # Save initial mood as MoodLog
+        if request.initial_mood:
+            emotion = MOOD_TO_EMOTION.get(request.initial_mood, "NEUTRAL")
+            intensity = MOOD_TO_INTENSITY.get(request.initial_mood, 0.5)
+            await prisma.moodlog.create(
+                data={
+                    "userId": user_id,
+                    "emotion": emotion,
+                    "intensity": intensity,
+                    "sentiment": "POSITIVE" if intensity >= 0.6 else "NEGATIVE" if intensity <= 0.35 else "NEUTRAL",
+                    "context": "onboarding_initial_mood",
+                    "method": "self_report",
+                }
+            )
+
+        # Save goals as UserFacts
+        for goal in request.goals:
+            await prisma.userfact.create(
+                data={
+                    "userId": user_id,
+                    "fact": f"User wellness goal: {goal}",
+                    "category": "goal",
+                }
+            )
+
+        # Update notification preference
+        pref = await prisma.userpreference.find_unique(where={"userId": user_id})
+        if pref:
+            await prisma.userpreference.update(
+                where={"userId": user_id},
+                data={"dailyCheckInEnabled": request.notifications_enabled},
+            )
+        else:
+            await prisma.userpreference.create(
+                data={"userId": user_id, "dailyCheckInEnabled": request.notifications_enabled}
+            )
+
+        return {"status": "success", "message": "Onboarding data saved"}
+    except Exception as e:
+        print(f"[ONBOARDING] Error: {e}")
+        # Non-critical — don't crash the user flow
+        return {"status": "error", "message": str(e)}
+
+
+@app.delete("/api/user/{user_id}")
+async def delete_user_account(user_id: str):
+    """Delete user account and all associated data (GDPR erasure)."""
+    try:
+        prisma = await get_prisma_client()
+        user = await prisma.user.find_unique(where={"id": user_id})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        await prisma.user.delete(where={"id": user_id})
+        return {"status": "success", "message": "Account permanently deleted"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -42,12 +42,12 @@ async def analyze_mood(state: MentalHealthState) -> dict:
 
         current_message = messages[-1].content if messages else ""
 
-        # ---- Always run DistilBERT — no keyword gate ----
+        # ---- Always run DistilBERT  no keyword gate ----
         # v7.0 CHANGE: Removed keyword-based emotional markers check.
         # DistilBERT is accurate enough for all message types, including short messages.
         # This ensures consistent emotion detection regardless of message length or keywords.
 
-        print(f"[NODE:MOOD] 🎤 Analyzing: '{current_message[:60]}...'")
+        print(f"[NODE:MOOD]  Analyzing: '{current_message[:60]}...'")
         start_time = time.time()
 
         mood_result = await tool_analyze_mood.ainvoke({"message": current_message})
@@ -59,10 +59,10 @@ async def analyze_mood(state: MentalHealthState) -> dict:
         intensity = mood_result.get("intensity", 0.5)
         confidence = mood_result.get("confidence", 0.0)
 
-        print(f"[NODE:MOOD] ✅ {emotion.upper()} | Intensity: {intensity:.0%} | Confidence: {confidence:.0%} | Time: {elapsed_ms}ms")
+        print(f"[NODE:MOOD]  {emotion.upper()} | Intensity: {intensity:.0%} | Confidence: {confidence:.0%} | Time: {elapsed_ms}ms")
 
         return {"emotion": emotion, "sentiment": sentiment, "intensity": intensity, "confidence": confidence}
 
     except Exception as e:
-        print(f"[NODE:MOOD] ❌ Error: {str(e)[:80]}")
+        print(f"[NODE:MOOD]  Error: {str(e)[:80]}")
         return {"emotion": "neutral", "sentiment": "neutral", "intensity": 0.5, "confidence": 0.0}

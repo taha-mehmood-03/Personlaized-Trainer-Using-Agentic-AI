@@ -4,8 +4,8 @@ Proactive Mental Health Monitor (Node 7 / Background Service) - SentiMind v3.0
 ARCHITECTURE NODE 7 (Background / Scheduled):
 Purpose: Analyze historical MoodLog data to detect proactive warning signs.
          Runs as a scheduled background task or can be called per-request in intake.
-         NOT part of the live message pipeline — runs asynchronously.
-         No LLM call — pure analytics on historical data.
+         NOT part of the live message pipeline  runs asynchronously.
+         No LLM call  pure analytics on historical data.
 
 DETECTION RULES:
   1. gradual_mood_decline:     Intensity rising > 0.15 over last 7 mood logs
@@ -17,7 +17,7 @@ DETECTION RULES:
 INTEGRATION:
   - Call check_and_notify(user_id) from the Intake node after loading context
   - Places ProactiveNotification record in DB if triggered
-  - Intake node reads pending notifications → passes hint to LLM payload
+  - Intake node reads pending notifications  passes hint to LLM payload
 """
 
 from datetime import datetime, timezone, timedelta
@@ -105,7 +105,7 @@ async def check_and_notify(user_id: str) -> str | None:
             }
         )
         if recent:
-            print(f"[PROACTIVE] ℹ️  Alert '{chosen_alert}' already sent within 48h — skipping")
+            print(f"[PROACTIVE]   Alert '{chosen_alert}' already sent within 48h  skipping")
             return None
 
         # Save notification
@@ -118,12 +118,12 @@ async def check_and_notify(user_id: str) -> str | None:
             }
         )
 
-        print(f"[PROACTIVE] 🔔 Alert triggered: {chosen_alert} | Severity: {ALERT_MESSAGES[chosen_alert]['severity']}")
+        print(f"[PROACTIVE]  Alert triggered: {chosen_alert} | Severity: {ALERT_MESSAGES[chosen_alert]['severity']}")
         return hint
 
     except Exception as e:
-        # Fail silently — proactive monitoring is optional
-        print(f"[PROACTIVE] ⚠️  Monitor error (non-fatal): {str(e)[:80]}")
+        # Fail silently  proactive monitoring is optional
+        print(f"[PROACTIVE]   Monitor error (non-fatal): {str(e)[:80]}")
         return None
 
 
@@ -136,19 +136,19 @@ def _detect_alerts(mood_logs: list) -> list[str]:
     sentiments = [log.sentiment for log in mood_logs]
     most_recent_at = mood_logs[0].createdAt if mood_logs else None
 
-    # Rule 1: Gradual Decline — compare oldest vs newest in last 7 logs
+    # Rule 1: Gradual Decline  compare oldest vs newest in last 7 logs
     if len(intensities) >= 7:
         drift = intensities[0] - intensities[6]  # newest - oldest (desc order)
         if drift > 0.15:  # intensity worsened by > 15% over 7 logs
             alerts.append("gradual_mood_decline")
 
-    # Rule 2: Repeated Anxiety Spikes — 3+ high-intensity in last 5 entries
+    # Rule 2: Repeated Anxiety Spikes  3+ high-intensity in last 5 entries
     recent_5 = intensities[:5]
     high_intensity_count = sum(1 for i in recent_5 if i >= 0.65)
     if high_intensity_count >= 3:
         alerts.append("repeated_anxiety_spikes")
 
-    # Rule 3: Disengagement — no log in 3+ days
+    # Rule 3: Disengagement  no log in 3+ days
     if most_recent_at:
         # Handle timezone-naive datetimes
         if most_recent_at.tzinfo is None:
@@ -157,13 +157,13 @@ def _detect_alerts(mood_logs: list) -> list[str]:
         if days_since >= 3:
             alerts.append("disengagement_risk")
 
-    # Rule 4: Persistent Negative Mood — 80%+ negative in last 10
+    # Rule 4: Persistent Negative Mood  80%+ negative in last 10
     if sentiments:
         negative_ratio = sum(1 for s in sentiments if str(s).upper() == "NEGATIVE") / len(sentiments)
         if negative_ratio >= 0.8:
             alerts.append("persistent_negative_mood")
 
-    # Rule 5: Crisis Escalation — 2+ intensity >= 0.8 in last 7 logs
+    # Rule 5: Crisis Escalation  2+ intensity >= 0.8 in last 7 logs
     crisis_count = sum(1 for i in intensities[:7] if i >= 0.8)
     if crisis_count >= 2:
         alerts.append("crisis_escalation_pattern")
@@ -177,7 +177,7 @@ def _detect_alerts(mood_logs: list) -> list[str]:
 
 async def run_proactive_monitor_for_all_users():
     """
-    Batch runner — call this from a scheduled job (e.g., nightly cron).
+    Batch runner  call this from a scheduled job (e.g., nightly cron).
     Checks all active users and creates notifications as needed.
     """
     try:
@@ -188,6 +188,6 @@ async def run_proactive_monitor_for_all_users():
             result = await check_and_notify(user.id)
             if result:
                 triggered += 1
-        print(f"[PROACTIVE BATCH] ✅ Checked {len(users)} users | {triggered} alerts triggered")
+        print(f"[PROACTIVE BATCH]  Checked {len(users)} users | {triggered} alerts triggered")
     except Exception as e:
-        print(f"[PROACTIVE BATCH] ❌ Error: {e}")
+        print(f"[PROACTIVE BATCH]  Error: {e}")
