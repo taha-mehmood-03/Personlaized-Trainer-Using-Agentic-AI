@@ -2,21 +2,15 @@
 Nodes Package - All pipeline nodes for the mental health agent
 
 Architecture v7.0 nodes (SentiMind v7 - Pure LLM-First):
-  1.  intake_node                    - Load user context & history + psych profile
-  2.  mood_analyzer_node             - LLM emotion detection
-  3.  emotion_fusion_node            - Merge text + voice emotion
-  4.  cognitive_distortion_node      - LLM semantic distortion analysis
-  5.  trend_analyzer_node            - Emotional trajectory tracking
-  6.  conversation_planner_node      - Strategic decision-maker
-  7.  behavioral_activation_node     - Real-world micro-action recommender
-  8.  technique_selector_node        - Database technique selection
-  9.  crisis_handler_node            - LLM-based crisis detection & response
-  10. role_selector_node             - Communication style selection
-  11. optimized_response_generator_node - Single LLM response
-  12. psych_profile_updater_node     - Persistent psychology model updater
-  13. session_saver_node             - Persist conversation data
-  14. outcome_tracker_node           - Technique effectiveness
-  15. proactive_monitor              - Background mood trend analyser
+  1.  parallel_intake                - Runs crisis, context, mood, and intent work concurrently
+  2.  analysis_and_planning          - Fused emotion, cognitive, trend, planner, activation work
+  3.  response_pipeline              - Fused technique and role selection
+  4.  optimized_response_generator   - Single LLM response
+  5.  crisis_handler                 - Safety response with resources
+  6.  parallel_persist               - Background profile/session/outcome persistence
+
+Helper modules:
+  - context_loader                   - Loads user preferences and semantic memory for parallel_intake
 
 v7.0 CHANGES (Complete LLM Integration):
   - All ML models replaced with LLM (except voice feature extraction)
@@ -26,7 +20,7 @@ v7.0 CHANGES (Complete LLM Integration):
   - Voice features (wav2vec2, MFCC) retained for audio analysis only
 """
 
-from .intake import load_user_context
+from .context_loader import load_user_context
 from .crisis_handler import handle_crisis
 from .role_selector import select_agent_role
 from .session_saver import save_session

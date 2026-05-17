@@ -3,8 +3,8 @@ LLM-Assisted Classifier Module  SentiMind v8.7 FIXED
 
 Provides structured JSON classification helpers for sensitive pipeline nodes.
 Each function:
-  - Sends a minimal, focused prompt to OpenRouter (first priority) or Groq (fallback)
-    using meta-llama/llama-3.3-70b-instruct for crisis AND gate, meta-llama/llama-3.1-8b-instruct for lighter tasks
+  - Sends a minimal, focused prompt to OpenRouter using the single working model:
+    meta-llama/llama-3.3-70b-instruct
   - Expects ONLY a valid JSON response
   - Returns a safe fallback dict on any failure (never crashes the pipeline)
 
@@ -14,7 +14,7 @@ CRISIS NODE: OpenRouter meta-llama/llama-3.3-70b-instruct is the SOLE authoritat
 GATE NODE: OpenRouter meta-llama/llama-3.3-70b-instruct (FIXED from 8b - 7-route classification needs 70b power)
 
 v8.7 FIXES vs v6.1:
-  - smart_pipeline_gate  : UPGRADED llama-3.1-8b -> llama-3.3-70b-instruct (was causing misrouting)
+  - smart_pipeline_gate  : uses llama-3.3-70b-instruct for stable routing
   - llm_crisis_check     : FIXED model mismatch - prompt said 70b but code called 8b (safety-critical bug)
   - Gate prompt          : Fully rewritten with numbered steps, expanded examples, ambiguous edge cases covered
   - Crisis prompt        : Sharpened 3-step dimensional reasoning, added more non-crisis examples
@@ -38,8 +38,9 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────
 #  MODEL CONSTANTS  change once here, applies everywhere below
 # ─────────────────────────────────────────────────────────────
-MODEL_HEAVY = "meta-llama/llama-3.3-70b-instruct"   # gate + crisis (safety-critical & complex routing)
-MODEL_LIGHT = "meta-llama/llama-3.1-8b-instruct"    # distortion + intent (lightweight pattern matching)
+MODEL_HEAVY = os.getenv("SENTIMIND_LLM_MODEL", "meta-llama/llama-3.3-70b-instruct")
+MODEL_CRISIS = MODEL_HEAVY
+MODEL_LIGHT = MODEL_HEAVY
 
 
 # ============================================
@@ -174,7 +175,7 @@ def _get_crisis_classifier():
 
     #  LOCAL MODEL DISABLED 
     # The sentinet/suicidality ELECTRA model is commented out.
-    # OpenRouter LLM handles crisis detection as sole authoritative decision maker.
+    # OpenRouter Llama 3.3 70B handles crisis detection as sole authoritative decision maker.
     #
     # try:
     #     from transformers import pipeline as hf_pipeline
@@ -194,7 +195,7 @@ def _get_crisis_classifier():
 
     print("[CLASSIFIER] ")
     print("[CLASSIFIER]   LOCAL ELECTRA MODEL  DISABLED                    ")
-    print("[CLASSIFIER]   Crisis detection: OpenRouter llama-3.3-70b-instruct ")
+    print(f"[CLASSIFIER]   Crisis detection: OpenRouter {MODEL_CRISIS} ")
     print("[CLASSIFIER] ")
     _crisis_classifier = "unavailable"
     return _crisis_classifier
@@ -222,8 +223,7 @@ async def _call_groq_async(prompt: str, model: str = MODEL_LIGHT, temperature: f
     Make an ASYNC OpenRouter LLM call via the unified LLM manager.
     Returns raw content string or None on failure.
 
-    v8.7: Default model is MODEL_LIGHT (llama-3.1-8b-instruct) for fast classification.
-          Heavy tasks (crisis, gate) explicitly pass MODEL_HEAVY (llama-3.3-70b-instruct).
+    v8.7: All LLM classification calls use MODEL_HEAVY (llama-3.3-70b-instruct).
     """
     try:
         manager = get_llm_manager()
@@ -257,21 +257,19 @@ def _call_groq(prompt: str, model: str = MODEL_LIGHT, temperature: float = 0.0, 
 
 
 # ============================================
-# CRISIS CLASSIFIER  OpenRouter Llama-70b (sole decision maker)
-# FIX v8.7: Code was calling 8b despite prompt saying 70b. Now correctly uses MODEL_HEAVY.
+# CRISIS CLASSIFIER  OpenRouter Llama 3.3 70B (sole decision maker)
 # ============================================
 
 async def llm_crisis_check(message: str) -> dict:
     """
-    Semantic crisis detection  OpenRouter meta-llama/llama-3.3-70b-instruct as the authoritative decision maker.
+    Semantic crisis detection  OpenRouter llama-3.3-70b-instruct as the authoritative decision maker.
 
     ARCHITECTURE (v8.7  LLM-Only, Fully Async):
       Step 1: Keyword gate handled upstream (graph.py screen_for_crisis Layer 1).
       Step 2: llama-3.3-70b-instruct runs async (await ainvoke)  best empathy + clinical reasoning.
               Local ELECTRA model is DISABLED (always returned 'unavailable').
 
-    FIX v8.7: Previous code was calling llama-3.1-8b-instruct despite docstring saying 70b.
-              Crisis detection is safety-critical  MUST use MODEL_HEAVY (70b).
+    FIX v8.7: Crisis detection is safety-critical and uses MODEL_HEAVY (70b).
 
     Returns:
       {
@@ -281,10 +279,10 @@ async def llm_crisis_check(message: str) -> dict:
         "source": "llm" | "fallback"
       }
     """
-    # ELECTRA disabled  OpenRouter llama-3.3-70b is the sole decision maker
+    # ELECTRA disabled  OpenRouter Llama 3.3 70B is the sole decision maker
 
-    # ---- CRISIS ANALYSIS: OpenRouter llama-3.3-70b ----
-    print("[CLASSIFIER]   CRISIS CHECK    llama-3.3-70b-instruct (MODEL_HEAVY) ")
+    # ---- CRISIS ANALYSIS: OpenRouter Llama 3.3 70B ----
+    print(f"[CLASSIFIER]   CRISIS CHECK    {MODEL_CRISIS} (MODEL_CRISIS) ")
     print("[CLASSIFIER]   3-step dimensional reasoning (desire/context/lethality) ")
     print("[CLASSIFIER]   for accurate mental health safety detection              ")
     print("[CLASSIFIER] ")
@@ -389,7 +387,6 @@ Message to classify: "{message}"
 JSON:"""
 
     try:
-        # FIX: Was incorrectly calling MODEL_LIGHT (8b). Crisis is safety-critical  must use MODEL_HEAVY (70b).
         content = await _call_groq_async(prompt, model=MODEL_HEAVY, temperature=0.0, max_tokens=150)
         if content:
             parsed = _parse_json_from_llm(content)
@@ -473,7 +470,7 @@ Message: "{message}"
 JSON:"""
 
         print(f"[CLASSIFIER]  DISTORTION CHECK  {MODEL_LIGHT}")
-        content = await _call_groq_async(prompt, model=MODEL_LIGHT, temperature=0.0, max_tokens=100)
+        content = await _call_groq_async(prompt, model=MODEL_HEAVY, temperature=0.0, max_tokens=100)
         if content:
             parsed = _parse_json_from_llm(content)
             if parsed and "distortion_type" in parsed:
@@ -490,6 +487,122 @@ JSON:"""
         "confidence": 0.0,
         "all_distortions": [],
         "explanation": "Classification unavailable"
+    }
+
+
+# ============================================
+# v9.0: CLINICAL SEVERITY CHECK  PHQ-9 + GAD-7
+# Uses MODEL_HEAVY  clinical assessment is safety-adjacent
+# ============================================
+
+async def clinical_severity_check(
+    message: str,
+    recent_context: str = "",
+    emotion: str = "neutral",
+    intensity: float = 0.5,
+    emotional_trend: str = "stable",
+) -> dict:
+    """
+    Clinical severity assessment using PHQ-9 and GAD-7 criteria.
+
+    The LLM evaluates conversational cues against standardized clinical
+    instrument criteria to estimate severity level.
+
+    Returns:
+      {
+        "severity": "minimal" | "mild" | "moderate" | "moderately_severe" | "severe",
+        "phq9_scores": {"q1":0,...,"q9":0},
+        "gad7_scores": {"g1":0,...,"g7":0},
+        "phq9_total": int (0-27),
+        "gad7_total": int (0-21),
+        "clinical_indicators": ["anhedonia", "sleep_disturbance", ...],
+        "confidence": float (0.0-1.0),
+        "reasoning": str
+      }
+    """
+    try:
+        prompt = f"""You are a clinical screening assistant. Evaluate conversational cues against PHQ-9 and GAD-7.
+
+IMPORTANT: This is NOT a formal questionnaire unless the user explicitly answers
+PHQ-9/GAD-7 frequency questions. Treat normal chat as clinical EVIDENCE for the
+current turn. The system will aggregate this result with prior sessions.
+
+━━━ PHQ-9: PATIENT HEALTH QUESTIONNAIRE (Depression) ━━━
+Score each item 0-3 based on evidence in the conversation:
+  0=Not at all  1=Several days  2=More than half the days  3=Nearly every day
+
+Q1. Little interest or pleasure in doing things (anhedonia)
+Q2. Feeling down, depressed, or hopeless (depressed_mood)
+Q3. Trouble falling/staying asleep, or sleeping too much (sleep_disturbance)
+Q4. Feeling tired or having little energy (fatigue)
+Q5. Poor appetite or overeating (appetite_change)
+Q6. Feeling bad about yourself — failure, let family down (worthlessness)
+Q7. Trouble concentrating on things (concentration)
+Q8. Moving/speaking slowly OR being fidgety/restless (psychomotor)
+Q9. Thoughts of being better off dead or hurting yourself (suicidal_ideation)
+
+PHQ-9 TOTAL → SEVERITY:
+  0-4=MINIMAL  5-9=MILD  10-14=MODERATE  15-19=MODERATELY_SEVERE  20-27=SEVERE
+
+━━━ GAD-7: GENERALIZED ANXIETY DISORDER SCALE ━━━
+G1. Feeling nervous, anxious, or on edge (nervousness)
+G2. Not being able to stop or control worrying (uncontrollable_worry)
+G3. Worrying too much about different things (excessive_worry)
+G4. Trouble relaxing (restlessness)
+G5. Being so restless it's hard to sit still (motor_restlessness)
+G6. Becoming easily annoyed or irritable (irritability)
+G7. Feeling afraid, as if something awful might happen (dread)
+
+GAD-7 TOTAL → SEVERITY:
+  0-4=MINIMAL  5-9=MILD  10-14=MODERATE  15-21=SEVERE
+
+━━━ RULES ━━━
+1. Score ONLY items with conversational evidence. No evidence = 0.
+2. If a symptom is clearly present but frequency/duration is unclear, score 1.
+3. Use score 2 or 3 ONLY when the user states frequency/duration or wording strongly implies persistence.
+4. Overall severity = MAX(PHQ-9 severity, GAD-7 severity) for THIS TURN'S evidence only.
+5. List indicators for items scoring >= 2.
+6. If Q9 >= 2 then flag suicidal_ideation regardless of total.
+7. Do not inflate totals to match emotional intensity. Prefer conservative scoring.
+4. If Q9 >= 2 → flag suicidal_ideation regardless of total.
+
+━━━ CONTEXT ━━━
+Detected emotion: {emotion} at {intensity:.0%} intensity
+Emotional trend: {emotional_trend}
+Recent conversation:
+{recent_context}
+Current message: "{message}"
+
+━━━ OUTPUT — JSON ONLY ━━━
+{{"severity":"minimal|mild|moderate|moderately_severe|severe","phq9_scores":{{"q1":0,"q2":0,"q3":0,"q4":0,"q5":0,"q6":0,"q7":0,"q8":0,"q9":0}},"gad7_scores":{{"g1":0,"g2":0,"g3":0,"g4":0,"g5":0,"g6":0,"g7":0}},"phq9_total":0,"gad7_total":0,"clinical_indicators":[],"confidence":0.0,"reasoning":"one sentence justification"}}
+
+JSON:"""
+
+        print(f"[CLASSIFIER] 🏥 CLINICAL SEVERITY CHECK → {MODEL_HEAVY}")
+        content = await _call_groq_async(prompt, model=MODEL_HEAVY, temperature=0.0, max_tokens=300)
+        if content:
+            parsed = _parse_json_from_llm(content)
+            if parsed and "severity" in parsed:
+                severity = parsed.get("severity", "minimal")
+                phq9 = parsed.get("phq9_total", 0)
+                gad7 = parsed.get("gad7_total", 0)
+                indicators = parsed.get("clinical_indicators", [])
+                confidence = parsed.get("confidence", 0.0)
+                print(f"[CLASSIFIER] CLINICAL: severity={severity.upper()} phq9={phq9} gad7={gad7} indicators={len(indicators)} confidence={confidence:.0%}")
+                return parsed
+
+    except Exception as e:
+        logger.warning(f"[CLASSIFIER] 🏥 Clinical severity check FAILED: {e}")
+
+    return {
+        "severity": "minimal",
+        "phq9_scores": {"q1":0,"q2":0,"q3":0,"q4":0,"q5":0,"q6":0,"q7":0,"q8":0,"q9":0},
+        "gad7_scores": {"g1":0,"g2":0,"g3":0,"g4":0,"g5":0,"g6":0,"g7":0},
+        "phq9_total": 0,
+        "gad7_total": 0,
+        "clinical_indicators": [],
+        "confidence": 0.0,
+        "reasoning": "Assessment unavailable - using safe default"
     }
 
 
@@ -598,7 +711,7 @@ User's Latest Message: "{message}"
 JSON:"""
 
         print(f"[CLASSIFIER] 💬 INTENT CHECK → {MODEL_LIGHT}")
-        content = await _call_groq_async(prompt, model=MODEL_LIGHT, temperature=0.0, max_tokens=64)
+        content = await _call_groq_async(prompt, model=MODEL_HEAVY, temperature=0.0, max_tokens=64)
         if content:
             parsed = _parse_json_from_llm(content)
             if parsed and "intent" in parsed:
@@ -641,7 +754,7 @@ async def smart_pipeline_gate(message: str, recent_context: str = "", user_conte
     """
     v8.7 PRIORITY ROUTING: LLM decides route BEFORE therapeutic analysis.
 
-    FIX v8.7: Upgraded model from llama-3.1-8b-instruct → llama-3.3-70b-instruct.
+    FIX v8.7: Uses llama-3.3-70b-instruct.
     8b was misrouting chitchat→therapeutic, accept_technique→therapeutic,
     and failing to respect the priority order consistently.
 
@@ -702,17 +815,21 @@ async def smart_pipeline_gate(message: str, recent_context: str = "", user_conte
         prompt = (
             "You are a STRICT message router for a mental health chatbot.\n"
             "Your ONLY job: read the user's latest message and pick EXACTLY ONE route.\n"
-            "Follow the DECISION TREE below from top to bottom. STOP at the FIRST match.\n\n"
+            "Follow the DECISION TREE below from top to bottom. STOP at the FIRST match.\n"
+            "SAFETY OVERRIDE: If the latest message contains self-harm, suicidal intent,\n"
+            "or immediate danger, route = crisis even if the user also asks for a technique.\n\n"
 
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             "DECISION TREE — follow top to bottom, stop at first match\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
-            "STEP 1 → accept_technique (HIGHEST PRIORITY — check this FIRST)\n"
-            "  Does the user EXPLICITLY name or request a specific exercise?\n"
+            "STEP 1 → accept_technique (HIGHEST NON-CRISIS PRIORITY — check after the safety override)\n"
+            "  Does the user EXPLICITLY name/request a specific stored exercise, OR give a short yes/okay\n"
+            "  immediately after the assistant named one specific exercise/technique from the database?\n"
             "  → YES: route = accept_technique. STOP. Ignore mood, sadness, everything else.\n"
             "  Key signals: exercise name mentioned, 'can I try X', 'I want X',\n"
-            "               'show me X', 'give me X exercise', 'yes' when AI just named a technique.\n\n"
+            "               'show me X', 'give me X exercise', 'yes' ONLY when AI just named a specific technique.\n"
+            "  Generic agreement after advice/reframing/exploring an idea is NOT accept_technique.\n\n"
             "  ✅ MUST be accept_technique:\n"
             "    'can i try timeline journal'                 → accept_technique (user chose it)\n"
             "    'i want breathing exercise'                  → accept_technique (user asked for it)\n"
@@ -727,9 +844,11 @@ async def smart_pipeline_gate(message: str, recent_context: str = "", user_conte
             "    'im sad' alone                               → therapeutic (no exercise mentioned)\n"
             "    'show me exercises' (general/plural)         → list_techniques\n"
             "    'what exercises help anxiety?' (browsing)    → list_techniques or therapeutic\n"
-            "    'the exercise helped a little'               → therapeutic (feedback, not request)\n\n"
-            "  Metadata: accepted_technique = exact exercise name from user OR from AI's last message if user said 'yes'\n\n"
-
+            "    'the exercise helped a little'               → therapeutic (feedback, not request)\n"
+            "    'yes i do' after AI said 'explore this idea' → therapeutic (not a named DB technique)\n"
+            "    'yes' after AI offered a reframe/perspective → therapeutic (not a technique acceptance)\n\n"
+            "  Metadata: accepted_technique = exact exercise name from user OR exact technique name from AI's last message.\n"
+            "  If no exact technique name exists, do NOT use accept_technique.\n\n"
             "STEP 2 → crisis (OVERRIDES all non-technique routes)\n"
             "  Does the message contain self-harm, suicidal ideation, or immediate danger?\n"
             "  → YES: route = crisis. STOP.\n"
@@ -756,7 +875,7 @@ async def smart_pipeline_gate(message: str, recent_context: str = "", user_conte
             "  Metadata: technique_category = the category they asked about (Breathing/Mindfulness/CBT/DBT/Journaling/Behavioral Activation) or null if general\n\n"
 
             "STEP 4 → chitchat\n"
-            "  Is this casual/social with NO emotional distress? (confidence must be ≥ 0.75)\n"
+            "  Is this casual/social with NO emotional distress and NO significant life event?\n"
             "  → YES: route = chitchat. STOP.\n"
             "  Key signals: greetings, thanks, bye, lol, jokes, name corrections, small talk.\n\n"
             "  ✅ MUST be chitchat:\n"
@@ -767,7 +886,11 @@ async def smart_pipeline_gate(message: str, recent_context: str = "", user_conte
             "    'call me Ali not Ahmed'                      → chitchat (name correction — ALWAYS chitchat)\n"
             "    'good morning'                               → chitchat\n"
             "    'haha yeah'                                  → chitchat\n\n"
-            "  ❌ NOT chitchat (route to therapeutic instead):\n"
+            "  ❌ NEVER chitchat — ALWAYS route to therapeutic:\n"
+            "    'my friend was killed'                       → therapeutic (death/trauma — never chitchat)\n"
+            "    'someone close to me passed away'            → therapeutic (grief — never chitchat)\n"
+            "    'i was attacked / assaulted'                 → therapeutic (trauma — never chitchat)\n"
+            "    ANY disclosure of death, loss, violence, abuse, or trauma → therapeutic, no exceptions\n"
             "    'im feeling a bit low today'                 → therapeutic\n"
             "    'that didnt really help me'                  → therapeutic (emotional weight)\n"
             "    'im ok i guess' (uncertain/hesitant)         → therapeutic\n\n"
@@ -844,7 +967,7 @@ async def smart_pipeline_gate(message: str, recent_context: str = "", user_conte
         print(f"[GATE v8.7] LLM-based priority routing starting ({MODEL_HEAVY})...")
         content = await _call_groq_async(
             prompt,
-            model=MODEL_HEAVY,      # ← FIXED: was "meta-llama/llama-3.1-8b-instruct", now MODEL_HEAVY (70b)
+            model=MODEL_HEAVY,
             temperature=0.0,
             max_tokens=250,
         )
@@ -856,6 +979,23 @@ async def smart_pipeline_gate(message: str, recent_context: str = "", user_conte
                 confidence = parsed.get("confidence", 0.5)
                 reasoning  = parsed.get("reasoning", "")
                 metadata   = parsed.get("metadata") or {}
+                valid_routes = {
+                    "accept_technique", "chitchat", "memory_query",
+                    "list_techniques", "rejection", "crisis", "therapeutic",
+                }
+                if route not in valid_routes:
+                    print(f"[GATE] Invalid route '{route}' from LLM; defaulting to therapeutic")
+                    route = "therapeutic"
+
+                try:
+                    confidence = float(confidence)
+                except Exception:
+                    confidence = 0.5
+                confidence = max(0.0, min(1.0, confidence))
+
+                if route == "accept_technique" and not metadata.get("accepted_technique"):
+                    print("[GATE] accept_technique missing exact technique name; downgrading to therapeutic")
+                    route = "therapeutic"
 
                 # NEW v8.7: Fetch DB data based on route (BEFORE therapeutic analysis)
                 if route == "accept_technique" and metadata.get("accepted_technique"):

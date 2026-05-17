@@ -85,9 +85,11 @@ def normalize_target_emotions(emotions: list) -> list:
     return normalized if normalized else ["NEUTRAL"]
 
 
-# Import techniques from seed_new_techniques.py
 import sys
-sys.path.insert(0, '.')
+from pathlib import Path
+
+# Import techniques from the sibling seed_new_techniques.py file.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     from seed_new_techniques import (
         advanced_breathing_techniques,

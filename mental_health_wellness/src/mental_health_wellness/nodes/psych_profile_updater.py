@@ -4,7 +4,7 @@ Psychological Profile Updater Node (Node 5b) - SentiMind v3.0
 ARCHITECTURE NODE 5b:
 Purpose: Update the user's persistent PsychProfile after every conversation turn.
          Builds a cumulative psychological model that personalizes all future interactions.
-         Runs AFTER response_generator_node, BEFORE session_saver_node.
+         Runs after optimized_response_generator and before session_saver_node.
          No LLM call  pure stat accumulation and DB writes.
 
 PROFILE FIELDS UPDATED:

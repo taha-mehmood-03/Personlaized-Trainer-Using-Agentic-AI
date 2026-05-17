@@ -153,6 +153,30 @@ async def save_session(state: MentalHealthState) -> dict:
             print(f"[NODE: SESSION_SAVER]  CRITICAL DB error: {type(e).__name__}")
             print(f"[NODE: SESSION_SAVER] Details: {str(e)[:150]}")
             save_errors.append(f"Critical DB error: {str(e)[:100]}")
+
+        # ============================================
+        # STEP 2: SAVE TO SEMANTIC VECTOR MEMORY
+        # ============================================
+
+        print("[NODE: SESSION_SAVER]  Step 2: Saving semantic memory...")
+        try:
+            if user_message and final_response:
+                from ..memory import store_conversation_memory
+
+                stored = await store_conversation_memory(
+                    user_id=user_id,
+                    user_message=user_message,
+                    assistant_response=final_response,
+                    emotion=emotion,
+                    session_id=session_id or saved_session_id,
+                )
+                if not stored:
+                    save_errors.append("Vector memory save returned false")
+            else:
+                print("[NODE: SESSION_SAVER]  Semantic memory skipped (missing user/assistant text)")
+        except Exception as mem_err:
+            print(f"[NODE: SESSION_SAVER]  Vector memory save failed: {str(mem_err)[:100]}")
+            save_errors.append(f"Vector memory: {str(mem_err)[:100]}")
         
 
         # ============================================
@@ -297,6 +321,40 @@ async def save_session(state: MentalHealthState) -> dict:
                     except Exception as sum_err:
                         print(f"[NODE: SESSION_SAVER]  Summary task scheduling failed: {str(sum_err)[:80]}")
                         save_errors.append(f"Summary scheduling: {str(sum_err)[:80]}")
+
+                # ============================================
+                # v9.0: CLINICAL ASSESSMENT LOG WRITER
+                # Persist PHQ-9/GAD-7 severity for longitudinal tracking
+                # Only writes when severity > minimal (avoids noise)
+                # ============================================
+                clinical_severity = state.get("clinical_severity", "minimal")
+                if clinical_severity and clinical_severity != "minimal" and session_id:
+                    try:
+                        # Map severity string to Prisma ClinicalSeverity enum
+                        _SEVERITY_MAP = {
+                            "mild": "MILD",
+                            "moderate": "MODERATE",
+                            "moderately_severe": "MODERATELY_SEVERE",
+                            "severe": "SEVERE",
+                        }
+                        db_severity = _SEVERITY_MAP.get(clinical_severity, "MILD")
+
+                        await prisma.clinicalassessmentlog.create(data={
+                            "sessionId": session_id,
+                            "userId": user_id,
+                            "severity": db_severity,
+                            "phq9Score": state.get("clinical_phq9_score", 0),
+                            "gad7Score": state.get("clinical_gad7_score", 0),
+                            "indicators": state.get("clinical_indicators", []),
+                            "confidence": state.get("clinical_confidence", 0.0),
+                            "justification": None,  # reasoning stored in state, not duplicated here
+                        })
+                        print(f"[NODE: SESSION_SAVER] 🏥 Clinical log saved: {db_severity} "
+                              f"(PHQ-9={state.get('clinical_phq9_score', 0)}, "
+                              f"GAD-7={state.get('clinical_gad7_score', 0)})")
+                    except Exception as clin_err:
+                        print(f"[NODE: SESSION_SAVER]  Clinical log write failed: {str(clin_err)[:100]}")
+                        save_errors.append(f"Clinical log: {str(clin_err)[:100]}")
                     
             except Exception as client_err:
                 print(f"[NODE: SESSION_SAVER]  Prisma client error: {str(client_err)[:100]}")

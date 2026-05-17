@@ -26,7 +26,7 @@ class MentalHealthState(TypedDict):
     session_id: str
     
     # ============================================
-    # USER CONTEXT (from intake_node)
+    # USER CONTEXT (from context_loader inside parallel_intake)
     # ============================================
     is_new_user: bool
     session_count: int
@@ -36,7 +36,7 @@ class MentalHealthState(TypedDict):
     memory_context: str  # Semantically retrieved relevant memories
     
     # ============================================
-    # INTENT CLASSIFICATION (from agentic pipeline)
+    # INTENT CLASSIFICATION (from smart gate / parallel intake)
     # ============================================
     # DEPRECATED: `intent` is never written by any current node.
     # Use `prefetched_intent` (dict) from parallel_intake / smart_gate instead.
@@ -46,7 +46,7 @@ class MentalHealthState(TypedDict):
     skip_intervention: bool
     
     # ============================================
-    # MOOD ANALYSIS (from agentic pipeline tools)
+    # MOOD ANALYSIS (from parallel intake)
     # ============================================
     emotion: str        # anger, fear, sadness, joy, neutral, surprise, disgust, anxiety
     sentiment: str      # positive, negative, neutral
@@ -73,7 +73,7 @@ class MentalHealthState(TypedDict):
     alternative_techniques: list[dict]        # Top 2 alternatives for escape hatch
     
     # ============================================
-    # RESPONSE (from response_generator_node)
+    # RESPONSE (from optimized_response_generator)
     # ============================================
     final_response: str
     
@@ -176,6 +176,15 @@ class MentalHealthState(TypedDict):
     # Values: "chitchat" | "therapeutic" | "" (not yet set)
     gate_route: str
 
+    # ============================================
+    # v9.0: CLINICAL SEVERITY (PHQ-9/GAD-7)
+    # ============================================
+    clinical_severity: str            # "minimal"|"mild"|"moderate"|"moderately_severe"|"severe"
+    clinical_phq9_score: int          # estimated PHQ-9 total (0-27)
+    clinical_gad7_score: int          # estimated GAD-7 total (0-21)
+    clinical_indicators: list[str]    # detected clinical indicators (items scoring >= 2)
+    clinical_confidence: float        # 0.0-1.0 confidence in clinical assessment
+
 
 def get_initial_state() -> MentalHealthState:
     """
@@ -193,7 +202,7 @@ def get_initial_state() -> MentalHealthState:
         session_count=0,
         most_common_emotion="neutral",
         user_preferences={},
-        chat_history=[],  # Will be populated by intake_node
+        chat_history=[],  # Populated by context_loader inside parallel_intake
         memory_context="",  # Semantically retrieved memories
         
         # Intent
@@ -290,4 +299,11 @@ def get_initial_state() -> MentalHealthState:
 
         # v5.4: Gate route set before graph runs by smart_pipeline_gate
         gate_route="",
+
+        # v9.0: Clinical Severity (PHQ-9/GAD-7)
+        clinical_severity="minimal",
+        clinical_phq9_score=0,
+        clinical_gad7_score=0,
+        clinical_indicators=[],
+        clinical_confidence=0.0,
     )

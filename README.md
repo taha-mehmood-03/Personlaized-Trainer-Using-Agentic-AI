@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://img.shields.io/badge/version-8.7-6366f1?style=for-the-badge&labelColor=0f0f1a" />
+<img src="https://img.shields.io/badge/version-9.0-6366f1?style=for-the-badge&labelColor=0f0f1a" />
 <img src="https://img.shields.io/badge/python-3.10+-6366f1?style=for-the-badge&logo=python&logoColor=white&labelColor=0f0f1a" />
 <img src="https://img.shields.io/badge/LangGraph-0.2+-6366f1?style=for-the-badge&labelColor=0f0f1a" />
 <img src="https://img.shields.io/badge/FastAPI-0.109+-6366f1?style=for-the-badge&logo=fastapi&logoColor=white&labelColor=0f0f1a" />
@@ -8,6 +8,7 @@
 <img src="https://img.shields.io/badge/Voice-Multimodal_Fusion-22c55e?style=for-the-badge&labelColor=0f0f1a" />
 <img src="https://img.shields.io/badge/ASR-Deepgram_Nova--2-22c55e?style=for-the-badge&labelColor=0f0f1a" />
 <img src="https://img.shields.io/badge/Smart_Gate-Pre--Graph_Router-f59e0b?style=for-the-badge&labelColor=0f0f1a" />
+<img src="https://img.shields.io/badge/Clinical-PHQ--9_+_GAD--7-ef4444?style=for-the-badge&labelColor=0f0f1a" />
 <img src="https://img.shields.io/badge/latency-v8.0_optimized-22c55e?style=for-the-badge&labelColor=0f0f1a" />
 
 <br /><br />
@@ -21,9 +22,9 @@
 ╚══════╝╚══════╝╚═╝  ╚═══╝   ╚═╝   ╚═╝╚═╝     ╚═╝╚═╝╚═╝  ╚═══╝╚═════╝
 ```
 
-### **Deterministic Hybrid Mental Health Agent — v8.7 (Priority Routing + DB-First Exercises + Multimodal Voice Fusion)**
+### **Deterministic Hybrid Mental Health Agent — v9.0 (Priority Routing + Clinical Severity Validation + DB-First Exercises + Multimodal Voice Fusion)**
 
-*A production-grade AI emotional support system — 7-route priority gate before graph, DB-sourced exercises (no LLM steps), 5 fused nodes, 3 parallel tiers, true token streaming, multimodal voice + text emotion fusion*
+*A production-grade AI emotional support system — 7-route priority gate, **PHQ-9/GAD-7 clinical severity assessment**, severity-gated DB exercises, 5 fused nodes, 3 parallel tiers, true token streaming, multimodal voice + text emotion fusion*
 
 <br />
 
@@ -41,9 +42,9 @@ SentiMind is a **clinically-informed, multimodal AI mental health agent** built 
 
 ---
 
-## ⚡ Core Philosophy (v8.7)
+## ⚡ Core Philosophy (v9.0)
 
-**PRIORITY ROUTING WITH DATABASE-FIRST EXERCISES**
+**PRIORITY ROUTING + CLINICAL SEVERITY VALIDATION + DATABASE-FIRST EXERCISES**
 
 ```
            USER MESSAGE
@@ -128,12 +129,21 @@ KEY v8.7 CHANGES:
 ✅ Database-FIRST: exercise steps ALWAYS from DB
 ✅ run_full_pipeline flag determines node execution
 ✅ Session context informs ALL routing decisions
+
+KEY v9.0 CHANGES:
+🏥 PHQ-9 + GAD-7 clinical severity assessment on every therapeutic turn
+🏥 Severity-gated DB queries (minPhq9/maxPhq9/safeAtSeverity per technique)
+🏥 Contraindication filtering (blocks unsafe exercises per clinical indicators)
+🏥 ClinicalAssessmentLog for longitudinal severity tracking
+🏥 Severity-aware strategy overrides (SEVERE → crisis pathway)
 ```
 
 | Principle | Implementation |
 |-----------|---------------|
 | **Priority Routing** | 7-route LLM gate (v8.7) checks explicit requests FIRST |
+| **Clinical Validation** | PHQ-9 + GAD-7 in LLM prompt → severity band → DB exercise filter |
 | **Database-First** | Exercise steps ALWAYS from DB, NEVER LLM-generated |
+| **Severity-Gated Exercises** | Each technique tagged with minPhq9/maxPhq9/safeAtSeverity/contraindicatedFlags |
 | **User Choice Respected** | Explicit requests bypass mood re-analysis |
 | **LLM Classification** | All routing uses semantic LLM understanding (no keywords) |
 | **Multimodal voice** | wav2vec2 emotion + OpenSMILE acoustic features + Whisper ASR |
@@ -261,13 +271,23 @@ KEY v8.7 CHANGES:
 │  • Cognitive Distortion (LLM) — SKIPPED for technique_request,    │
 │    advice_seeking, chitchat intents (saves 100-300ms per request)  │
 │  • Trend Analyzer (DB query — always runs)                         │
-│  • Conversation Planner (Phase & Strategy)                         │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │ 🏥 Clinical Severity (PHQ-9 + GAD-7 in LLM prompt)  v9.0  │   │
+│  │    → severity band → DB exercise filter                    │   │
+│  │    → llama-3.3-70b (MODEL_HEAVY) · parallel with above     │   │
+│  │    → SKIPPED for chitchat/technique_request (same as above) │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│  • Conversation Planner (Phase & Strategy + severity overrides)    │
 │  • Behavioral Activation — SKIPPED for no_action/ask_question      │
 └────────────────────────┬───────────────────────────────────────────┘
                          ▼
 ┌────────────────────────────────────────────────────────────────────┐
 │  NODE 3 ── RESPONSE PIPELINE                            🔗 FUSED  │
-│  • Technique Selector — SKIPPED for validate_only/ask_question     │
+│  • Technique Selector — severity-gated DB query (v9.0)             │
+│      → WHERE minPhq9 <= score AND maxPhq9 >= score                 │
+│      → AND safeAtSeverity HAS current_severity                     │
+│      → Contraindication filter (exclude flagged exercises)         │
+│      → SKIPPED for validate_only/ask_question                      │
 │  • Role Selector (Friend / Coach / Trainer / Crisis)               │
 └────────────────────────┬───────────────────────────────────────────┘
                          ▼  (tokens stream to browser via SSE)
@@ -280,6 +300,10 @@ KEY v8.7 CHANGES:
 ┌────────────────────────────────────────────────────────────────────┐
 │  NODE 5 ── PARALLEL PERSIST                         ⚡ 3-WAY ASYNC │
 │  Psych Profile Updater || Session Saver (Prisma) || Outcome Tracker│
+│  ┌───────────────────────────────────────────────────────────────┐ │
+│  │ 🏥 ClinicalLog Writer (v9.0) — saves PHQ-9/GAD-7/severity   │ │
+│  │    to ClinicalAssessmentLog table (only when severity>minimal)│ │
+│  └───────────────────────────────────────────────────────────────┘ │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -373,6 +397,9 @@ All voice ML models load during server boot (not on first request):
 | Feature | Implementation |
 |---------|---------------|
 | 🚦 **Priority Routing Gate (v8.7)** | 7-route pre-graph router — accepts explicit exercises, bypasses mood re-analysis |
+| 🏥 **Clinical Severity (v9.0)** | PHQ-9 + GAD-7 in LLM prompt → severity band → DB exercise filter |
+| 🏥 **Severity-Gated Exercises (v9.0)** | Each technique has minPhq9/maxPhq9/safeAtSeverity/contraindicatedFlags |
+| 🏥 **Clinical Logging (v9.0)** | ClinicalAssessmentLog table for longitudinal PHQ-9/GAD-7 tracking |
 | 💾 **Database-First Exercises** | Exercise steps fetched from DB (never LLM-generated) |
 | 👤 **User Choice Respected** | Explicit exercise requests skip therapeutic override — user intent always honored |
 | 🎭 **Multimodal Emotion Detection** | LLM text emotion + wav2vec2 voice emotion + acoustic feature fusion |
@@ -380,7 +407,7 @@ All voice ML models load during server boot (not on first request):
 | 🧠 **Cognitive Distortion Detection** | LLM semantic analysis — skipped for technique_request/advice_seeking |
 | 📋 **Conversation Phase Awareness** | NEUTRAL → VENTING → REFLECTION → SOLUTION → RECOVERY |
 | 🧬 **Persistent Psychological Profile** | 9-field user profile with EMA smoothing, updated per session |
-| 🎯 **Planner-Gated Technique Selection** | Strategy + readiness score gate technique delivery timing |
+| 🎯 **Planner-Gated Technique Selection** | Strategy + readiness + **clinical severity** gate technique delivery |
 | 💡 **Behavioral Activation** | Emotion × intensity_band × time-of-day matrix |
 | 📈 **Longitudinal Trend Detection** | Linear regression over last 5 MoodLogs, requires ≥3 sessions |
 | 🚨 **Crisis Detection** | claude-3.5-sonnet semantic analysis — NO keyword matching |
@@ -388,6 +415,88 @@ All voice ML models load during server boot (not on first request):
 | 👤 **Phase-Aware Role Selection** | Friend / Coach / Trainer / Crisis — considers trend, phase, intensity |
 | 🎤 **Browser-Native WAV Encoding** | Web Audio API → 16kHz mono RIFF/WAV, zero system dependencies |
 | 📌 **Active Exercise Sidebar** | Left sidebar shows current technique card — works on all screen sizes |
+
+---
+
+## 🏥 Clinical Severity Assessment (v9.0)
+
+### PHQ-9 + GAD-7 in LLM Prompt
+
+Every therapeutic turn runs a **clinical severity check** using the full PHQ-9 (9 items) and GAD-7 (7 items) instruments embedded in the LLM prompt. The LLM scores each item 0-3 based on conversational evidence only — no questionnaire is presented to the user.
+
+```text
+┌─────────────────────────────────────────────────────────────────┐
+│  User message: "I can't sleep, I feel worthless, nothing       │
+│  interests me anymore and I can't concentrate at work"         │
+│                                                                 │
+│  → LLM Clinical Classifier (llama-3.3-70b, temp=0.0)          │
+│                                                                 │
+│  PHQ-9 Scoring:                                                 │
+│    Q1 (anhedonia)       = 2  ← "nothing interests me"          │
+│    Q3 (sleep)           = 2  ← "can't sleep"                   │
+│    Q6 (worthlessness)   = 2  ← "feel worthless"                │
+│    Q7 (concentration)   = 2  ← "can't concentrate"             │
+│    Total: 8/27 → MILD                                           │
+│                                                                 │
+│  GAD-7 Scoring:                                                 │
+│    All items = 0  (no anxiety evidence)                         │
+│    Total: 0/21 → MINIMAL                                        │
+│                                                                 │
+│  Overall Severity: MAX(MILD, MINIMAL) = MILD                    │
+│  Clinical Indicators: [anhedonia, sleep_disturbance,            │
+│                        worthlessness, concentration]             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Severity Bands
+
+| PHQ-9 Score | Severity Level | Pipeline Behavior |
+|:-----------:|:--------------|:------------------|
+| 0-4 | **MINIMAL** | Validate only, no technique push |
+| 5-9 | **MILD** | Standard technique selection |
+| 10-14 | **MODERATE** | Structured techniques prioritized, professional support mentioned |
+| 15-19 | **MODERATELY SEVERE** | Techniques pushed earlier, professional support recommended |
+| 20-27 | **SEVERE** | Crisis-adjacent pathway, professional referral in every response |
+
+### Severity-Gated DB Queries
+
+Each technique in the database has clinical fields:
+
+```prisma
+model Technique {
+  // ...existing fields...
+  minPhq9              Int       @default(0)      // min PHQ-9 score appropriate
+  maxPhq9              Int       @default(27)     // max PHQ-9 score appropriate  
+  safeAtSeverity       String[]  @default(["MINIMAL", "MILD", "MODERATE", "MODERATELY_SEVERE"])
+  contraindicatedFlags String[]  @default([])     // e.g. ["suicidal_ideation", "psychomotor"]
+}
+```
+
+The technique selector builds a WHERE clause:
+```sql
+WHERE minPhq9 <= {user_phq9} AND maxPhq9 >= {user_phq9}
+  AND safeAtSeverity HAS {current_severity}
+  AND contraindicatedFlags NOT OVERLAPPING {user_indicators}
+```
+
+### Clinical Assessment Log
+
+Severity assessments are persisted per-session for longitudinal tracking:
+
+```prisma
+model ClinicalAssessmentLog {
+  id           String           @id @default(cuid())
+  sessionId    String
+  userId       String
+  severity     ClinicalSeverity // MINIMAL|MILD|MODERATE|MODERATELY_SEVERE|SEVERE
+  phq9Score    Int              // 0-27
+  gad7Score    Int              // 0-21
+  indicators   String[]         // items scoring >= 2
+  confidence   Float            // 0.0-1.0
+  justification String?         // LLM reasoning
+  assessedAt   DateTime         @default(now())
+}
+```
 
 ---
 
@@ -509,10 +618,10 @@ User: "can i try timeline journal"
 | **PRE-GRAPH GATE** ⭐ | chitchat router — bypasses graph if casual | ✅ Groq | llama-3.1-8b | ~400ms |
 | ↳ *Chitchat fast-path* | single casual LLM reply, no graph at all | ✅ Groq | llama-3.3-70b | **~600ms total** |
 | **1** Parallel Intake | crisis ∥ intake ∥ mood (intent SKIPPED if gate fired) | ✅ OpenRouter | claude-3.5-sonnet / llama-3.3-70b | ~800ms |
-| **2** Analysis & Planning | emotion fusion + trend + planner (distortion SKIPPED for technique_request) | ✅ Fallback | llama-3.1-8b | ~60ms |
-| **3** Response Pipeline | technique selector (SKIPPED for validate_only) + role selector | ❌ DB only | — | ~100ms |
-| **4** Response Generator | Empathetic response with voice-aware context | ✅ OpenRouter | llama-3.3-70b | ~1200ms |
-| **5** Parallel Persist | profile ∥ DB saver ∥ outcome tracker (background) | ❌ | — | 0ms (UI) |
+| **2** Analysis & Planning | emotion fusion + trend + **🏥 clinical severity (PHQ-9/GAD-7)** + planner | ✅ OpenRouter | llama-3.3-70b (clinical) + llama-3.1-8b (distortion) | ~300ms |
+| **3** Response Pipeline | technique selector (**severity-gated** DB query) + role selector | ❌ DB only | — | ~100ms |
+| **4** Response Generator | Empathetic response with voice-aware + **clinical severity** context | ✅ OpenRouter | llama-3.3-70b | ~1200ms |
+| **5** Parallel Persist | profile ∥ DB saver ∥ outcome tracker ∥ **🏥 clinical log** (background) | ❌ | — | 0ms (UI) |
 | | **TOTAL — therapeutic (warm, TTFT)** | | | **~2.1s** |
 | | **TOTAL — chitchat (warm)** | | | **~600ms** |
 
@@ -621,6 +730,13 @@ class MentalHealthState(TypedDict):
     technique_delivery_emotion: Optional[str]
     technique_delivery_intensity: Optional[float]
 
+    # v9.0: Clinical Severity (PHQ-9/GAD-7)
+    clinical_severity: str            # minimal|mild|moderate|moderately_severe|severe
+    clinical_phq9_score: int          # estimated PHQ-9 total (0-27)
+    clinical_gad7_score: int          # estimated GAD-7 total (0-21)
+    clinical_indicators: list[str]    # items scoring >= 2 (e.g. ["anhedonia", "sleep_disturbance"])
+    clinical_confidence: float        # 0.0-1.0
+
     # Metadata
     tools_used: list[str]
     processing_time_ms: int
@@ -681,26 +797,26 @@ The `audio_data` field is a **base64-encoded 16kHz mono WAV** produced by the br
 └── mental_health_wellness/             # Python AI Backend
     ├── api_server.py                   # FastAPI (UTF-8 forced, voice preload, SSE)
     ├── massive_test_suite.py           # Full automated test suite (all routes)
-    ├── prisma/schema.prisma            # 12 models
+    ├── prisma/schema.prisma            # 13 models (+ClinicalAssessmentLog)
     └── src/mental_health_wellness/
         ├── agent/
         │   ├── graph.py                # LangGraph 5-node graph + chat_with_agent_streaming
         │   └── state.py                # MentalHealthState TypedDict (voice fields added)
         ├── nodes/
         │   ├── parallel_intake.py      # 4-way concurrent intake
-        │   ├── analysis_and_planning.py# Fused: fusion + distortion + trend + planner
+        │   ├── analysis_and_planning.py# Fused: fusion + distortion + trend + clinical severity + planner
         │   ├── emotion_fusion_node.py  # 3-way text+voice+acoustic fusion + overrides
         │   ├── response_pipeline.py    # Fused: technique + role selector
         │   ├── optimized_response_generator.py
         │   ├── crisis_handler.py       # LLM-based crisis + Twilio alerts
-        │   ├── parallel_persist.py     # Fire-and-forget: profile + saver + outcome
+        │   ├── parallel_persist.py     # Fire-and-forget: profile + saver + outcome + clinical log
         │   └── voice_preprocessing.py  # preprocess_voice_input() node
         ├── voice/
         │   └── __init__.py             # analyze_voice_full() + preload_all_voice_models()
         │                               # OpenSMILE → librosa → torchaudio → wav2vec2 → Whisper
         ├── llm/
         │   ├── groq_llm.py             # OpenRouter LLM manager
-        │   └── llm_classifier.py       # LLM-based intent, crisis, distortion classifiers
+        │   └── llm_classifier.py       # LLM-based intent, crisis, distortion, clinical severity classifiers
         ├── db/                         # Prisma client
         └── memory/                     # Semantic retrieval
 ```
@@ -832,7 +948,7 @@ LangGraph's `MemorySaver` was writing 7–9 checkpoint serialization events per 
 
 <div align="center">
 
-**SentiMind v8.0** — Smart Routing · Multimodal · Empathetic · Safe · Real-time
+**SentiMind v9.0** — Smart Routing · Clinical Validation · Multimodal · Empathetic · Safe · Real-time
 
 *Built with ❤️ for accessible mental health support*
 

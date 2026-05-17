@@ -247,17 +247,39 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
         print(f"[NODE: PLANNER]  Reflection override ({intent_confidence:.0%})  encourage_reflection (user is practicing/reporting a technique)")
 
     else:
-        psych_profile = state.get("psych_profile", {})
-        strategy = _select_strategy(
-            emotion=emotion,
-            intensity=intensity,
-            trend=trend,
-            phase=phase,
-            readiness=readiness,
-            user_msg_count=user_msg_count,
-            current_message=current_message,
-            psych_profile=psych_profile,
-        )
+        # ============================================
+        # v9.0: CLINICAL SEVERITY OVERRIDES
+        # Run BEFORE default strategy selection to enforce safety boundaries.
+        # ============================================
+        clinical_severity = state.get("clinical_severity", "minimal")
+
+        # SEVERE → always suggest technique + professional referral hint in response
+        if clinical_severity == "severe":
+            strategy = "suggest_technique"
+            print(f"[NODE: PLANNER] 🏥 Clinical override: SEVERE severity → suggest_technique (with professional referral)")
+
+        # MODERATELY SEVERE + moderate+ intensity → push technique earlier
+        elif clinical_severity == "moderately_severe" and intensity >= 0.5:
+            strategy = "suggest_technique"
+            print(f"[NODE: PLANNER] 🏥 Clinical override: MODERATELY_SEVERE + intensity={intensity:.0%} → suggest_technique")
+
+        # MINIMAL + low intensity → don't push, just validate
+        elif clinical_severity == "minimal" and intensity < 0.3 and emotion not in _RECOVERY_POSITIVE_EMOTIONS:
+            strategy = "validate_only"
+            print(f"[NODE: PLANNER] 🏥 Clinical override: MINIMAL severity + low intensity → validate_only")
+
+        else:
+            psych_profile = state.get("psych_profile", {})
+            strategy = _select_strategy(
+                emotion=emotion,
+                intensity=intensity,
+                trend=trend,
+                phase=phase,
+                readiness=readiness,
+                user_msg_count=user_msg_count,
+                current_message=current_message,
+                psych_profile=psych_profile,
+            )
 
     print(f"[NODE: PLANNER]  Strategy: {strategy.upper()} | "
           f"Phase: {phase.upper()} | Readiness: {readiness:.0%}")

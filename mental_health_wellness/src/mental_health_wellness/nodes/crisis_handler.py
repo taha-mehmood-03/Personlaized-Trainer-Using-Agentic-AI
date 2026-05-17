@@ -67,7 +67,7 @@ async def handle_crisis(state: MentalHealthState) -> dict:
         - Route to response generator for LLM-generated empathetic response
     
     CRITICAL: This node NO LONGER generates the response directly.
-    It sets crisis flags and routes to response_generator_node for LLM response generation.
+    It sets crisis flags and routes to optimized_response_generator for LLM response generation.
     This ensures the LLM generates contextually appropriate crisis responses.
     
     Input State:

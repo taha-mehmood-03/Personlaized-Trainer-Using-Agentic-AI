@@ -2,8 +2,8 @@
 Parallel Intake Node  SentiMind v5.3 Latency Optimization
 
 Runs FOUR tasks concurrently via asyncio.gather:
-  1. Crisis Pre-Screener    ELECTRA + optional Groq 70b
-  2. Intake Node            DB context + ChromaDB memory
+  1. Crisis Pre-Screener    OpenRouter Llama 3.3 70B safety LLM
+  2. Context Loader         DB context + ChromaDB memory
   3. Mood Analyzer Node     DistilBERT local inference
   4. Intent Pre-Check       Groq 8b intent (now truly async)
 
@@ -11,7 +11,7 @@ WHY THIS IS SAFE:
   All four tasks only READ from the initial state (messages, user_id, session_id)
   and write to COMPLETELY DISJOINT state keys:
     - crisis_screener   crisis_detected, crisis_level, crisis_pre_screened
-    - intake_node       is_new_user, session_count, memory_context, chat_history, ...
+    - context_loader    is_new_user, session_count, memory_context, chat_history, ...
     - mood_analyzer     emotion, sentiment, intensity, confidence
     - intent_pre_check  prefetched_intent
 
@@ -65,7 +65,7 @@ async def run_parallel_intake(state: MentalHealthState) -> dict:
     All tasks read from the initial state only and write to disjoint keys.
     Returns: merged dict across all nodes' outputs.
     """
-    from ..nodes.intake import load_user_context
+    from ..nodes.context_loader import load_user_context
     from ..nodes.mood_analyzer_node import analyze_mood
 
     messages = state.get("messages", [])
@@ -95,7 +95,7 @@ async def run_parallel_intake(state: MentalHealthState) -> dict:
     # Skip crisis screener when gate explicitly routed as therapeutic (non-crisis).
     # Gate uses the same Llama-3.1-8b that also handles chitchat vs crisis — if it
     # said "therapeutic" the message is safe enough; save the expensive 70b call.
-    skip_crisis = gate_source and gate_route == "therapeutic"
+    skip_crisis = False
 
     # --- Build task log ---
     if skip_crisis:
@@ -103,7 +103,7 @@ async def run_parallel_intake(state: MentalHealthState) -> dict:
     else:
         print("   screen_for_crisis     (llama-3.3-70b via OpenRouter)")
     print("   load_user_context     (Prisma DB context)")
-    print("   analyze_mood          (claude-3.5-sonnet via OpenRouter)")
+    print("   analyze_mood          (llama-3.3-70b via OpenRouter)")
     if has_gate_intent:
         print("   intent_pre_check        SKIPPED (gate intent already available)")
     else:

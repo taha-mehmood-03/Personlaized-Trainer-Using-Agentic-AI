@@ -1,0 +1,39 @@
+TEST CASE: Case_6_Severe_Panic
+============================================================
+INPUT MESSAGE: "My heart is racing, I can't breathe, I feel like I'm going to die right now! Please help me!"
+BASE EMOTION:  FEAR (Intensity: 0.95)
+============================================================
+
+1. CLINICAL SEVERITY ANALYSIS (LLM)
+----------------------------------------
+Detected Severity:   SEVERE
+Estimated PHQ-9:     6 / 27
+Estimated GAD-7:     9 / 21
+Clinical Indicators: feeling of impending doom, racing heart, difficulty breathing, restlessness
+Confidence Score:    95%
+
+LLM Reasoning:
+The patient's message indicates severe anxiety and panic symptoms, with evidence of psychomotor agitation and suicidal ideation, warranting a severe severity rating.
+
+
+2. TECHNIQUE SELECTION (DATABASE GATING)
+----------------------------------------
+Filtering Rules Applied:
+- Matched Target Emotion: FEAR
+- Applied Clinical Bounds: minPhq9 <= 6 AND maxPhq9 >= 6
+- Safety Requirement: Must be marked SafeAtSeverity=SEVERE
+- Contraindication Filter: Excluded techniques matching flags ['feeling of impending doom', 'racing heart', 'difficulty breathing', 'restlessness']
+
+Recommended Exercises (Top 3):
+  > 4-7-8 Breathing (Category: Breathing)
+    Difficulty: EASY, Duration: 5m
+    Why: Extending the exhale activates the parasympathetic nervous system, lowering heart rate and blood pressure. The specific counts maximize oxygen-carbon dioxide exchange and focus the mind.
+
+  > Box Breathing (Category: Breathing)
+    Difficulty: EASY, Duration: 5m
+    Why: The equal pattern creates rhythm and predictability, which signals safety to the nervous system. The holds between breaths increase CO2 tolerance, which has a calming effect.
+
+  > Belly Breathing (Category: Breathing)
+    Difficulty: EASY, Duration: 8m
+    Why: Diaphragmatic breathing stimulates the vagus nerve, which activates the parasympathetic nervous system. This lowers heart rate, blood pressure, and stress hormones.
+

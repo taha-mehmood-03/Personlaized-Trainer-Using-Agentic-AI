@@ -1,0 +1,39 @@
+TEST CASE: Case_4_Severe_Anhedonia
+============================================================
+INPUT MESSAGE: "Nothing brings me joy anymore. Even playing with my kids feels like a massive chore. I'm so exhausted I can barely function."
+BASE EMOTION:  SADNESS (Intensity: 0.85)
+============================================================
+
+1. CLINICAL SEVERITY ANALYSIS (LLM)
+----------------------------------------
+Detected Severity:   MODERATE
+Estimated PHQ-9:     8 / 27
+Estimated GAD-7:     0 / 21
+Clinical Indicators: Little interest or pleasure in doing things (anhedonia), Feeling tired or having little energy (fatigue)
+Confidence Score:    85%
+
+LLM Reasoning:
+The patient's statement 'Nothing brings me joy anymore' and 'I'm so exhausted I can barely function' indicates significant anhedonia and fatigue, scoring high on PHQ-9 items Q1 and Q4.
+
+
+2. TECHNIQUE SELECTION (DATABASE GATING)
+----------------------------------------
+Filtering Rules Applied:
+- Matched Target Emotion: SADNESS
+- Applied Clinical Bounds: minPhq9 <= 8 AND maxPhq9 >= 8
+- Safety Requirement: Must be marked SafeAtSeverity=MODERATE
+- Contraindication Filter: Excluded techniques matching flags ['Little interest or pleasure in doing things (anhedonia)', 'Feeling tired or having little energy (fatigue)']
+
+Recommended Exercises (Top 3):
+  > Alternate Nostril Breathing (Category: Breathing)
+    Difficulty: MODERATE, Duration: 8m
+    Why: Balances the autonomic nervous system, synchronizes brain hemispheres, and clears energetic channels. Particularly effective for racing thoughts.
+
+  > Breath Counting (Category: Breathing)
+    Difficulty: EASY, Duration: 10m
+    Why: Gives the mind a simple task, preventing rumination and worry. The gentle focus reduces default mode network activity.
+
+  > Wim Hof Breathing (Category: Breathing)
+    Difficulty: HARD, Duration: 15m
+    Why: Controlled hyperventilation raises blood pH (alkalosis), which triggers various physiological responses including adrenaline release, enhanced mitochondrial function, and temporary suppression of inflammatory cytokines.
+

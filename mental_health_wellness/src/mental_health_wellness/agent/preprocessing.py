@@ -434,7 +434,7 @@ async def classify_message_with_llm(message: str) -> Dict[str, any]:
         from langchain_core.messages import SystemMessage, HumanMessage
         
         manager = get_llm_manager()
-        llm = manager.get_llm("llama-3.1-8b-instant")  # Fast classification model
+        llm = manager.get_llm()  # Single configured OpenRouter Llama 3.3 70B model
         
         classification_prompt = f"""Classify this user message semantically (NO keyword matching - understand intent).
 

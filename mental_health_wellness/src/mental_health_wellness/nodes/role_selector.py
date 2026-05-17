@@ -8,7 +8,7 @@ Bridges gap between crisis routing and personalized support
 
 KEY INSIGHT:
 The agent's role (friend, coach, trainer, crisis_support) determines HOW to respond,
-not WHAT tools to use. Tools are already selected by the agentic agent (node 3).
+not WHAT tools to use. Tools are already selected earlier in the response pipeline.
 This node only determines the communication style and depth of guidance.
 
 ROLE DEFINITIONS:

@@ -34,9 +34,6 @@ GROQ_TO_OPENROUTER_MODEL_MAP = {
     "llama3-8b-8192":              "meta-llama/llama-3.3-70b-instruct:free",
     "mixtral-8x7b-32768":          "meta-llama/llama-3.3-70b-instruct:free",
     "gemma-7b-it":                 "meta-llama/llama-3.3-70b-instruct:free",
-    "anthropic/claude-3.5-sonnet": "meta-llama/llama-3.3-70b-instruct:free",
-    "anthropic/claude-3-haiku":    "meta-llama/llama-3.3-70b-instruct:free",
-    "anthropic/claude-3-opus":     "meta-llama/llama-3.3-70b-instruct:free",
 }
 
 
@@ -72,24 +69,24 @@ class MultiKeyGroqChat:
         self.temperature = temperature
         self.max_tokens = max_tokens
 
-        self.provider = os.getenv("LLM_PROVIDER", "gemini").lower()
+        self.provider = "openrouter"
 
         # ── Gemini (PRIMARY) ─────────────────────────────────────────
-        self.gemini_keys = self._load_gemini_keys()
-        self.gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        self.gemini_keys = []
+        self.gemini_model = ""
         self.gemini_failed_keys: set = set()
 
         # ── OpenRouter (FALLBACK) ─────────────────────────────────────
         self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "")
         self.openrouter_base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-        self.model = model or os.getenv("MODEL", "meta-llama/llama-3.3-70b-instruct:free")
-        self.model_fast = os.getenv("MODEL_FAST", "meta-llama/llama-3.3-70b-instruct:free")
+        self.model = model or os.getenv("MODEL", "meta-llama/llama-3.3-70b-instruct")
+        self.model_fast = self.model
         
         if not self.openrouter_api_key:
             print("[LLM] ⚠ WARNING: OPENROUTER_API_KEY not set — fallback may fail")
 
         # ── Groq (LEGACY LAST RESORT) ─────────────────────────────────
-        self.groq_api_keys = api_keys or self._load_groq_keys()
+        self.groq_api_keys = []
         self.current_groq_key_idx = 0
         self.groq_failed_keys: set = set()
 
@@ -98,11 +95,11 @@ class MultiKeyGroqChat:
 
         # ── Startup banner ─────────────────────────────────────────────
         print("[LLM] ════════════════════════════════════════════════════")
-        if self.gemini_keys:
+        if False:
             print(f"[LLM]   PRIMARY  : Gemini ({len(self.gemini_keys)} key(s)) | {self.gemini_model}")
         else:
-            print("[LLM]   PRIMARY  : Gemini — NO KEYS FOUND, skipping")
-        print(f"[LLM]   FALLBACK : OpenRouter | {self.model}")
+            print("[LLM]   PROVIDER : OpenRouter only")
+        print(f"[LLM]   PROVIDER : OpenRouter only | {self.model}")
         if self.groq_api_keys:
             print(f"[LLM]   LEGACY   : Groq ({len(self.groq_api_keys)} key(s))")
         print("[LLM] ════════════════════════════════════════════════════")
@@ -217,15 +214,15 @@ class MultiKeyGroqChat:
                        through to OpenRouter if/when falling back.
         """
         # Explicit Groq-only mode
-        if self.provider == "groq":
+        if False:
             return self._get_groq_llm(model)
 
         # Explicit OpenRouter mode — skip Gemini entirely
-        if self.provider == "openrouter":
-            return self._get_openrouter_llm(model, reasoning=reasoning)
+        if True:
+            return self._get_openrouter_llm(self.model, reasoning=reasoning)
 
         # Default: Try Gemini first (LLM_PROVIDER=gemini or unset)
-        if self.gemini_keys and self._get_available_gemini_key_idx() is not None:
+        if False and self.gemini_keys and self._get_available_gemini_key_idx() is not None:
             return self._get_gemini_llm()
 
         # Gemini unavailable → OpenRouter
@@ -273,7 +270,7 @@ class MultiKeyGroqChat:
         if not self.openrouter_api_key:
             raise ValueError("[LLM] ❌ OPENROUTER_API_KEY not configured. Set OPENROUTER_API_KEY in .env")
 
-        raw_model = model or self.model
+        raw_model = self.model
         effective_model = _resolve_openrouter_model(raw_model)
 
         # Include reasoning in cache key to avoid collision between modes
@@ -416,13 +413,13 @@ async def invoke_llm(
         
         llm = manager.get_openrouter_llm(model=model)
         llm_bound = llm.bind(max_tokens=max_tokens, temperature=temperature)
-        eff_model = model or manager.model
+        eff_model = manager.model
         print(f"[LLM] 🔵 invoke_llm: OpenRouter fallback | model={eff_model}")
         response = await llm_bound.ainvoke(messages)
         return response.content
     except Exception as e:
         error_details = f"\n  Error Type: {type(e).__name__}\n  Details: {str(e)}"
-        raise RuntimeError(f"[LLM] Both Gemini and OpenRouter failed:{error_details}") from e
+        raise RuntimeError(f"[LLM] OpenRouter Llama 3.3 70B failed:{error_details}") from e
 
 
 # ============================================

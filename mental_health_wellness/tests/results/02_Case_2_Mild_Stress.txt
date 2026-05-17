@@ -1,0 +1,39 @@
+TEST CASE: Case_2_Mild_Stress
+============================================================
+INPUT MESSAGE: "I'm feeling a bit overwhelmed with my exams coming up. I haven't been sleeping great but it's manageable."
+BASE EMOTION:  ANXIETY (Intensity: 0.5)
+============================================================
+
+1. CLINICAL SEVERITY ANALYSIS (LLM)
+----------------------------------------
+Detected Severity:   MILD
+Estimated PHQ-9:     1 / 27
+Estimated GAD-7:     1 / 21
+Clinical Indicators: sleep disturbance (Q3), nervousness (G1)
+Confidence Score:    50%
+
+LLM Reasoning:
+The patient reports feeling overwhelmed and having sleep disturbances, indicating mild anxiety and some depressive symptoms.
+
+
+2. TECHNIQUE SELECTION (DATABASE GATING)
+----------------------------------------
+Filtering Rules Applied:
+- Matched Target Emotion: ANXIETY
+- Applied Clinical Bounds: minPhq9 <= 1 AND maxPhq9 >= 1
+- Safety Requirement: Must be marked SafeAtSeverity=MILD
+- Contraindication Filter: Excluded techniques matching flags ['sleep disturbance (Q3)', 'nervousness (G1)']
+
+Recommended Exercises (Top 3):
+  > Thought Record (Category: CBT)
+    Difficulty: MODERATE, Duration: 15m
+    Why: Breaks the automatic connection between thought and emotion by introducing rational analysis. The written format creates distance from thoughts.
+
+  > 5-4-3-2-1 Grounding (Category: Mindfulness)
+    Difficulty: EASY, Duration: 5m
+    Why: Forces attention outward and away from internal distress. Engaging multiple senses interrupts the anxiety cycle and activates the prefrontal cortex, reducing amygdala reactivity.
+
+  > Body Scan Meditation (Category: Mindfulness)
+    Difficulty: MODERATE, Duration: 15m
+    Why: Develops interoceptive awareness (ability to sense internal body states) and reduces rumination by shifting focus from thoughts to physical sensations.
+

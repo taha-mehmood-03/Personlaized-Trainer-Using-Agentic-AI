@@ -1,89 +1,460 @@
-# Three-Issue Fix: User Identity, Gate Routing & Smart DB Storage
+# Clinical Severity Assessment — Implementation Plan
 
-## Background
+> **Objective 3:** Validate the system through controlled trials with mental health professionals, ensuring consistency with clinical tools.
 
-After the NextAuth integration, three interconnected failure modes appeared:
-1. `user_id` passed to the FastAPI backend is the real CUID from Prisma, but some code paths still fall back to `"anonymous"`, causing orphaned DB records with FK violations.
-2. The smart pipeline gate uses `llama-3.1-8b-instruct` — a 8B model on OpenRouter with no structured output guarantee. It misclassifies chitchat as therapeutic and misses memory queries.
-3. The memory layer (`extract_and_save_facts`) stores raw user messages without any intelligence about *what* is actually worth persisting. It stores facts for every message unconditionally, and `session_saver` triggers a full session summary via a simple `% 5 == 0` counter with no quality filter.
+## What This Changes
 
----
-
-## Proposed Changes
+The LLM will assess **clinical severity** using PHQ-9 (depression) and GAD-7 (anxiety) criteria embedded directly in its prompt — on **every therapeutic turn**. This severity score will then drive **which exercises get selected from the DB**, replacing the current custom intensity-only threshold with a clinically validated severity-to-difficulty mapping.
 
 ---
 
-### Issue 1 — Dynamic User ID (All data paths must carry the real NextAuth CUID)
+## Current Flow (Before)
 
-The flow is: `NextAuth session → layout.tsx (server) → ChatLayout props → useStream → fetch /api/chat/stream → FastAPI → graph.py → parallel_persist`.
+```
+User message
+    ↓
+analyze_mood → emotion="sadness", intensity=0.78
+    ↓
+technique_selector_node → _intensity_tier(0.78) = "high"
+    ↓
+DB query: WHERE targetEmotions HAS "SADNESS" AND categoryId IN ["Breathing", "DBT"]
+    ↓
+Returns: Box Breathing (EASY), Emotion Surfing (MODERATE), etc.
+    ↓
+Top technique by rating score → delivered to user
+```
 
-The key audit findings:
-- ✅ `layout.tsx`: Already correctly extracts `session.user.id` server-side and passes it as `userId` prop.
-- ✅ `useStream.ts`: Correctly sends `user_id: userId` in the fetch body to `/api/chat/stream`.
-- ✅ `api_server.py /api/chat/stream`: Passes `request.user_id` directly to `chat_with_agent_streaming`.
-- ✅ `graph.py`: Passes `user_id` into the `input_state` dict and into `create_new_session`.
-- ⚠️ **`/api/pipeline/complete`**: Still has `user_id = request.user_id or "anonymous"` — this is the only remaining hardcoded fallback.
-- ⚠️ **`/api/user/ensure`**: Creates users with `id = user_id or "anonymous"` — acceptable, but needs to never be called with anonymous for real users.
-- ✅ `user_tools.py save_session`: Already fixed in the last session (session claiming).
-- ⚠️ **`explicit_facts.py extract_and_save_facts`**: Uses a *synchronous* LLM call (`llm.invoke`) inside an `asyncio.create_task`. This will block the event loop. Must be changed to `await llm.ainvoke`.
-
-**Fix:** Remove the `or "anonymous"` fallback in `/api/pipeline/complete`. Fix the sync LLM call in `explicit_facts.py`.
-
-#### [MODIFY] [api_server.py](file:///e:/FYP/mental_health_wellness/api_server.py)
-- Line 433: Change `user_id = request.user_id or "anonymous"` → raise 400 if `user_id` is empty, else use as-is.
-
-#### [MODIFY] [explicit_facts.py](file:///e:/FYP/mental_health_wellness/src/mental_health_wellness/memory/explicit_facts.py)
-- Line 34: Use `manager.get_llm()` async call — change `llm.invoke(...)` → `await llm.ainvoke(...)`.
-- This function is always called via `asyncio.create_task()`, so it runs in an async context and can safely use `await`.
+**Problem:** The intensity tier only considers emotional intensity (how strong the feeling is). It doesn't consider **clinical severity** (how persistent, pervasive, and functionally impairing the distress is). A user who says "I'm very stressed about my exam" (high intensity, low severity) gets the same treatment as someone showing signs of moderate clinical depression (high intensity, HIGH severity).
 
 ---
 
-### Issue 2 — LLM Gate Routing (`smart_pipeline_gate`)
+## New Flow (After)
 
-**Root causes:**
-1. **Wrong model:** `llama-3.1-8b-instruct` is too small for reliable 7-way intent routing with context. It hallucinates routes and ignores examples. The gate should use the **same 70b model** used for crisis — `meta-llama/llama-3.3-70b-instruct`. This is the single highest-impact change.
-2. **No structured output:** The prompt asks for JSON but doesn't enforce schema strictly enough. The 8b model often wraps it in markdown or adds extra text.
-3. **`memory_query` examples are too narrow:** The prompt only shows "do you remember" but users say things like "what have we talked about?" or "tell me about myself".
+```
+User message
+    ↓
+analyze_mood → emotion="sadness", intensity=0.78
+    ↓
+[NEW] clinical_severity_check (LLM) → severity="moderate", phq9_estimated=14, gad7_estimated=8
+    ↓ (both severity AND intensity feed into technique selection)
+technique_selector_node → uses severity to pick DIFFICULTY level
+    ↓
+DB query: WHERE targetEmotions HAS "SADNESS"
+          AND difficulty IN ["MODERATE", "HARD"]     ← severity-driven
+          AND categoryId IN ["Breathing", "DBT"]     ← intensity-driven (unchanged)
+    ↓
+Returns: Socratic Questioning (MODERATE), Emotion Surfing (MODERATE), etc.
+    ↓
+Top technique by rating score → delivered to user
+```
 
-**Fix:** Upgrade the gate model to `llama-3.3-70b-instruct` and tighten the `memory_query` examples.
+---
+
+## Architecture Diagram — Where It Plugs In
+
+```
+NODE 2: ANALYSIS & PLANNING (analysis_and_planning.py)
+┌──────────────────────────────────────────────────────────────────┐
+│                                                                   │
+│  Sub-node 1: emotion_fusion_node     ← unchanged                │
+│      → fused_emotion, fused_intensity                            │
+│                                                                   │
+│  Sub-node 2: parallel_analysis       ← MODIFIED                 │
+│      → distortion, trend                                         │
+│      → [NEW] clinical_severity_check (runs in parallel           │
+│              with distortion + trend)                             │
+│      → clinical_severity, clinical_scores                        │
+│                                                                   │
+│  Sub-node 3: conversation_planner    ← MODIFIED                 │
+│      → NOW reads clinical_severity to adjust strategy            │
+│      → severe → always suggest_technique + crisis-aware          │
+│      → minimal → validate_only (don't push techniques)           │
+│                                                                   │
+│  Sub-node 4: behavioral_activation   ← unchanged                │
+│                                                                   │
+└──────────────────────────────────────────────────────────────────┘
+                          ↓
+NODE 3: RESPONSE PIPELINE
+┌──────────────────────────────────────────────────────────────────┐
+│                                                                   │
+│  technique_selector_node             ← MODIFIED                  │
+│      → NOW uses clinical_severity to filter by difficulty        │
+│      → severity→difficulty mapping:                              │
+│           minimal  → [EASY]                                      │
+│           mild     → [EASY, MODERATE]                            │
+│           moderate → [MODERATE, HARD]                            │
+│           moderately_severe → [HARD] + professional referral hint│
+│           severe   → SKIP exercises, crisis pathway              │
+│                                                                   │
+│  role_selector_node                  ← unchanged                 │
+│                                                                   │
+└──────────────────────────────────────────────────────────────────┘
+                          ↓
+NODE 4: RESPONSE GENERATOR
+┌──────────────────────────────────────────────────────────────────┐
+│  _build_structured_context()         ← MODIFIED                  │
+│      → Injects severity label into LLM context                  │
+│      → "CLINICAL SEVERITY: MODERATE (PHQ-9 est. ~14)"           │
+│      → LLM adapts tone/depth based on severity                  │
+└──────────────────────────────────────────────────────────────────┘
+                          ↓
+NODE 5: PARALLEL PERSIST
+┌──────────────────────────────────────────────────────────────────┐
+│  session_saver                       ← MODIFIED                  │
+│      → Saves clinical_severity + scores to ClinicalAssessmentLog│
+│      → Enables longitudinal tracking of severity over sessions  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Proposed Changes — File by File
+
+---
+
+### 1. [NEW] `llm_classifier.py` — Add `clinical_severity_check()`
 
 > [!IMPORTANT]
-> This will increase gate latency by ~200-400ms but dramatically improve routing accuracy. The 70b model is already running for crisis checks, so it's already in your cost budget. The chitchat bypass saves far more time per turn than this overhead.
+> This is the core new function. It's an LLM classifier (same pattern as `llm_crisis_check`, `llm_distortion_check`) that evaluates the user's message + recent context against PHQ-9 and GAD-7 scoring criteria.
 
-#### [MODIFY] [llm_classifier.py](file:///e:/FYP/mental_health_wellness/src/mental_health_wellness/llm/llm_classifier.py)
-- Line 673: Change gate model from `"meta-llama/llama-3.1-8b-instruct"` → `"meta-llama/llama-3.3-70b-instruct"`.
-- Lines 619-624: Expand `memory_query` examples to include: `"what have we talked about"`, `"what do you know about me"`, `"remind me what we discussed"`, `"summarize our conversation"`.
+**Location:** [llm_classifier.py](file:///e:/FYP/mental_health_wellness/src/mental_health_wellness/llm/llm_classifier.py) — add new function after `llm_distortion_check()` (~line 493)
+
+**What it does:**
+- Takes user message + recent conversation context
+- The LLM prompt contains the **full PHQ-9 and GAD-7 criteria** as reference
+- LLM estimates: which PHQ-9 items show evidence, what score range, what severity level
+- Returns structured JSON with severity classification
+
+```python
+async def clinical_severity_check(
+    message: str,
+    recent_context: str = "",
+    emotion: str = "neutral",
+    intensity: float = 0.5,
+    emotional_trend: str = "stable",
+) -> dict:
+    """
+    Clinical severity assessment using PHQ-9 and GAD-7 criteria.
+    
+    The LLM evaluates conversational cues against standardized clinical
+    instrument criteria to estimate severity level.
+    
+    Returns:
+      {
+        "severity": "minimal" | "mild" | "moderate" | "moderately_severe" | "severe",
+        "phq9_estimated": int (0-27),
+        "gad7_estimated": int (0-21),
+        "clinical_indicators": ["sleep_disturbance", "anhedonia", ...],
+        "confidence": float (0.0-1.0),
+        "reasoning": str
+      }
+    """
+```
+
+**Prompt design:** The LLM prompt will contain:
+- All 9 PHQ-9 items (depression screening)
+- All 7 GAD-7 items (anxiety screening)
+- Instructions to evaluate which items show evidence from the conversation
+- Scoring: each item 0-3 (not at all → nearly every day)
+- Final severity mapping:
+  - PHQ-9: 0-4 minimal, 5-9 mild, 10-14 moderate, 15-19 moderately_severe, 20-27 severe
+  - GAD-7: 0-4 minimal, 5-9 mild, 10-14 moderate, 15-21 severe
+  - Overall severity = max(PHQ-9 severity, GAD-7 severity)
+
+**Model used:** `MODEL_HEAVY` (llama-3.3-70b-instruct) — clinical assessment is safety-adjacent, needs the 70b model
+
+**When it runs:** Only on therapeutic turns (NOT chitchat, accept_technique, list_techniques, memory_query, rejection)
 
 ---
 
-### Issue 3 — Smart DB Storage Decision
+### 2. [MODIFY] `state.py` — Add clinical severity state fields
 
-**Root causes:**
-1. **`extract_and_save_facts`** runs on *every* user message without pre-filtering. It extracts facts even when the message is a greeting or therapeutic venting (no stable facts possible). The LLM does this filtering, but it's an unnecessary LLM call for most messages.
-2. **Session summary** triggers at every 5th message regardless of whether meaningful content was exchanged. A session of chitchat gets a summary. A session with 4 deep therapeutic messages (just under the threshold) gets no summary.
-3. **No storage decision node:** There's no single LLM call that decides: (a) worth storing a fact? (b) worth summarizing now? (c) skip? — instead facts and summaries are decided by separate, disconnected code paths.
+**File:** [state.py](file:///e:/FYP/mental_health_wellness/src/mental_health_wellness/agent/state.py)
 
-**Fix:** Add a lightweight **storage decision guard** as a pre-filter in `session_saver.py`. Before calling `extract_and_save_facts`, quickly check if the message is "storage-worthy" (contains personal facts OR is therapeutic, not just chitchat). The check can be a cheap regex/keyword scan (no LLM cost).
+Add after the existing `v5.4: GATE ROUTE` section (~line 178):
 
-Also: change the session summary trigger from a fixed `% 5 == 0` counter to a **content-aware** trigger: summarize if `msg_count >= 4` AND the session has any non-chitchat message (detected from `conversation_strategy != "no_action"`).
+```python
+# ============================================
+# v9.0: CLINICAL SEVERITY (PHQ-9/GAD-7)
+# ============================================
+clinical_severity: str            # "minimal" | "mild" | "moderate" | "moderately_severe" | "severe"
+clinical_phq9_score: int          # estimated PHQ-9 total (0-27)
+clinical_gad7_score: int          # estimated GAD-7 total (0-21)
+clinical_indicators: list[str]    # detected clinical indicators
+clinical_confidence: float        # 0.0-1.0 confidence in assessment
+```
 
-#### [MODIFY] [session_saver.py](file:///e:/FYP/mental_health_wellness/src/mental_health_wellness/nodes/session_saver.py)
-- Before the `asyncio.create_task(summarize_session(...))` call: change the condition from `msg_count % 5 == 0` → `msg_count >= 4 and strategy not in ("no_action", "")` so the summary only fires when meaningful therapeutic content exists.
+And add defaults in `get_initial_state()`:
 
-#### [MODIFY] [explicit_facts.py](file:///e:/FYP/mental_health_wellness/src/mental_health_wellness/memory/explicit_facts.py)
-- Add a `_is_storage_worthy(message: str) -> bool` guard at the top of `extract_and_save_facts`. Returns `False` for short greetings (<30 chars) and messages that are clearly temporal emotions ("I feel sad today"). Only calls the LLM if the message might contain a stable fact.
+```python
+# v9.0: Clinical Severity
+clinical_severity="minimal",
+clinical_phq9_score=0,
+clinical_gad7_score=0,
+clinical_indicators=[],
+clinical_confidence=0.0,
+```
+
+---
+
+### 3. [MODIFY] `analysis_and_planning.py` — Wire clinical severity check
+
+**File:** [analysis_and_planning.py](file:///e:/FYP/mental_health_wellness/src/mental_health_wellness/nodes/analysis_and_planning.py)
+
+**Change:** In `run_analysis_and_planning()`, after the parallel analysis step (sub-node 2), add the clinical severity check. It runs **in parallel** with distortion + trend (it's another LLM call that can overlap).
+
+```python
+# Sub-node 2: Parallel Analysis + Clinical Severity
+# Run distortion + trend + clinical severity concurrently
+import asyncio
+
+async def _run_clinical():
+    from ..llm.llm_classifier import clinical_severity_check
+    user_msg = messages[-1].content if messages else ""
+    recent_ctx = ... # last 4 messages
+    return await clinical_severity_check(
+        message=user_msg,
+        recent_context=recent_ctx,
+        emotion=merged.get("fused_emotion", "neutral"),
+        intensity=merged.get("fused_intensity", 0.5),
+        emotional_trend=merged.get("emotional_trend", "stable"),
+    )
+
+# Run all three concurrently
+analysis_task = asyncio.create_task(run_parallel_analysis(state_after_fusion))
+clinical_task = asyncio.create_task(_run_clinical())
+
+analysis_result = await analysis_task
+clinical_result = await clinical_task
+
+merged.update(analysis_result)
+merged.update({
+    "clinical_severity": clinical_result.get("severity", "minimal"),
+    "clinical_phq9_score": clinical_result.get("phq9_estimated", 0),
+    "clinical_gad7_score": clinical_result.get("gad7_estimated", 0),
+    "clinical_indicators": clinical_result.get("clinical_indicators", []),
+    "clinical_confidence": clinical_result.get("confidence", 0.0),
+})
+```
+
+**Skip condition:** Same as distortion — skip for chitchat, technique_request, etc. Only run on therapeutic turns.
+
+---
+
+### 4. [MODIFY] `technique_selector_node.py` — Severity-driven difficulty filtering
+
+**File:** [technique_selector_node.py](file:///e:/FYP/mental_health_wellness/src/mental_health_wellness/nodes/technique_selector_node.py)
+
+**Current behavior:** Calls `recommend_technique()` with just `emotion` + `intensity` + `user_id`.
+
+**New behavior:** Also passes `clinical_severity` which gets translated to difficulty filter.
+
+```python
+# NEW: severity → difficulty mapping
+SEVERITY_DIFFICULTY_MAP = {
+    "minimal":            ["EASY"],
+    "mild":               ["EASY", "MODERATE"],
+    "moderate":           ["MODERATE", "HARD"],
+    "moderately_severe":  ["HARD"],
+    "severe":             [],  # No exercises — crisis pathway
+}
+
+severity = state.get("clinical_severity", "minimal")
+allowed_difficulties = SEVERITY_DIFFICULTY_MAP.get(severity, ["EASY", "MODERATE"])
+```
+
+Then pass `allowed_difficulties` to `recommend_technique()`.
+
+---
+
+### 5. [MODIFY] `technique_tools.py` — Accept difficulty filter
+
+**File:** [technique_tools.py](file:///e:/FYP/mental_health_wellness/src/mental_health_wellness/tools/technique_tools.py)
+
+**Change:** `recommend_technique()` gains a new parameter `allowed_difficulties: List[str] = None`.
+
+When provided, the DB query adds:
+```python
+if allowed_difficulties:
+    where_clause["difficulty"] = {"in": allowed_difficulties}
+```
+
+This filters techniques by the difficulty levels that match the clinical severity.
+
+---
+
+### 6. [MODIFY] `conversation_planner_node.py` — Severity-aware strategy selection
+
+**File:** [conversation_planner_node.py](file:///e:/FYP/mental_health_wellness/src/mental_health_wellness/nodes/conversation_planner_node.py)
+
+**Change:** In `_select_strategy()`, add severity-aware overrides:
+
+```python
+severity = state.get("clinical_severity", "minimal")
+
+# Severe → always suggest technique + flag for professional referral
+if severity == "severe":
+    print("[NODE: PLANNER] ⚠ Severe clinical severity → suggest_technique + referral hint")
+    return "suggest_technique"
+
+# Moderately severe → push technique earlier (don't wait for readiness)
+if severity == "moderately_severe" and intensity >= 0.5:
+    print("[NODE: PLANNER] ⚠ Moderately severe → suggest_technique (early push)")
+    return "suggest_technique"
+
+# Minimal → don't push techniques, just validate
+if severity == "minimal" and intensity < 0.5:
+    return "validate_only"
+```
+
+---
+
+### 7. [MODIFY] `optimized_response_generator.py` — Inject severity into prompt
+
+**File:** [optimized_response_generator.py](file:///e:/FYP/mental_health_wellness/src/mental_health_wellness/nodes/optimized_response_generator.py)
+
+**Change in `_build_structured_context()`:** Add a `CLINICAL ASSESSMENT` section:
+
+```python
+clinical_info = ""
+severity = state.get("clinical_severity", "minimal")
+if severity and severity != "minimal":
+    phq9 = state.get("clinical_phq9_score", 0)
+    gad7 = state.get("clinical_gad7_score", 0)
+    indicators = state.get("clinical_indicators", [])
+    clinical_info = f"""
+CLINICAL SEVERITY ASSESSMENT (PHQ-9/GAD-7 based):
+- Overall Severity: {severity.upper().replace('_', ' ')}
+- Depression Screen (PHQ-9 est.): {phq9}/27
+- Anxiety Screen (GAD-7 est.): {gad7}/21
+- Indicators: {', '.join(indicators) if indicators else 'none detected'}
+
+INSTRUCTION: Adjust response depth and urgency to match severity level.
+- moderate/moderately_severe → be more directive, introduce technique with confidence
+- severe → prioritize safety, validate deeply, gently mention professional support
+"""
+```
+
+Also in `_build_optimized_system_prompt()`, add severity-aware guidance:
+
+```python
+if severity == "moderately_severe":
+    system_prompt += "\n⚠ CLINICAL NOTE: User shows signs of moderately severe distress. "
+    "Alongside the technique, gently mention that speaking with a professional "
+    "could also be helpful. Frame it as 'in addition to' not 'instead of'."
+
+if severity == "severe":
+    system_prompt += "\n🚨 CLINICAL NOTE: User shows signs of severe distress. "
+    "Exercise extreme care. Validate deeply. Gently encourage professional support."
+```
+
+---
+
+### 8. [MODIFY] `schema.prisma` — Add `ClinicalAssessmentLog` for tracking
+
+**File:** [schema.prisma](file:///e:/FYP/mental_health_wellness/prisma/schema.prisma)
+
+Add a new model to track severity assessments over time:
+
+```prisma
+enum ClinicalSeverity {
+  MINIMAL
+  MILD
+  MODERATE
+  MODERATELY_SEVERE
+  SEVERE
+}
+
+model ClinicalAssessmentLog {
+  id               String            @id @default(cuid())
+  sessionId        String
+  session          Session           @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  userId           String
+
+  severity         ClinicalSeverity
+  phq9Score        Int               // 0-27
+  gad7Score        Int               // 0-21
+  indicators       String[]          // e.g. ["anhedonia", "sleep_disturbance", "concentration"]
+  confidence       Float             // 0.0-1.0
+
+  assessedAt       DateTime          @default(now())
+
+  @@index([userId])
+  @@index([sessionId])
+  @@index([assessedAt])
+}
+```
+
+---
+
+### 9. [MODIFY] `session_saver.py` — Persist clinical severity
+
+**File:** `session_saver.py` (in parallel_persist)
+
+**Change:** After saving the session/message, also save the clinical assessment log:
+
+```python
+severity = state.get("clinical_severity", "minimal")
+if severity and severity != "minimal":
+    await prisma.clinicalassessmentlog.create(
+        data={
+            "sessionId": session_id,
+            "userId": user_id,
+            "severity": severity.upper().replace(" ", "_"),
+            "phq9Score": state.get("clinical_phq9_score", 0),
+            "gad7Score": state.get("clinical_gad7_score", 0),
+            "indicators": state.get("clinical_indicators", []),
+            "confidence": state.get("clinical_confidence", 0.0),
+        }
+    )
+```
+
+---
+
+## Summary of All Changes
+
+| File | Change | Impact |
+|------|--------|--------|
+| [llm_classifier.py](file:///e:/FYP/mental_health_wellness/src/mental_health_wellness/llm/llm_classifier.py) | **Add** `clinical_severity_check()` function (~80 lines) | Core new classifier with PHQ-9/GAD-7 prompt |
+| [state.py](file:///e:/FYP/mental_health_wellness/src/mental_health_wellness/agent/state.py) | **Add** 5 new state fields + defaults | State carries severity through pipeline |
+| [analysis_and_planning.py](file:///e:/FYP/mental_health_wellness/src/mental_health_wellness/nodes/analysis_and_planning.py) | **Add** clinical severity call in parallel with distortion + trend | Severity assessed on every therapeutic turn |
+| [technique_selector_node.py](file:///e:/FYP/mental_health_wellness/src/mental_health_wellness/nodes/technique_selector_node.py) | **Add** severity→difficulty mapping + pass to DB query | Exercises matched to clinical severity |
+| [technique_tools.py](file:///e:/FYP/mental_health_wellness/src/mental_health_wellness/tools/technique_tools.py) | **Add** `allowed_difficulties` parameter to `recommend_technique()` | DB query filters by difficulty |
+| [conversation_planner_node.py](file:///e:/FYP/mental_health_wellness/src/mental_health_wellness/nodes/conversation_planner_node.py) | **Add** severity-aware strategy overrides in `_select_strategy()` | Severe → always suggest, minimal → validate only |
+| [optimized_response_generator.py](file:///e:/FYP/mental_health_wellness/src/mental_health_wellness/nodes/optimized_response_generator.py) | **Add** severity context in prompt + severity-aware system prompt notes | LLM response adapts to severity |
+| [schema.prisma](file:///e:/FYP/mental_health_wellness/prisma/schema.prisma) | **Add** `ClinicalSeverity` enum + `ClinicalAssessmentLog` model | Longitudinal severity tracking |
+| `session_saver.py` | **Add** clinical assessment log save | Persist severity per session |
 
 ---
 
 ## Verification Plan
 
-### Automated Checks
-1. Send a chat message as an authenticated user → check backend logs for `[CHAT] [NEW] New message from user: cmo...` (should show real CUID, not `anonymous`).
-2. Send "hey how are you?" → verify gate logs show `Route: CHITCHAT` not `THERAPEUTIC`.
-3. Send "what do you know about me?" → verify gate logs show `Route: MEMORY_QUERY`.
-4. Say your name in a message ("my name is Taha") → check `UserFact` table for a saved fact.
-5. After 4+ meaningful therapeutic exchanges, check `SessionSummary` table for a new row.
+### Automated Testing
+1. **Unit test `clinical_severity_check()`** with known messages:
+   - "I'm stressed about my exam" → minimal/mild
+   - "I can't sleep, can't eat, don't enjoy anything anymore, been feeling this way for weeks" → moderate/moderately_severe
+   - "I don't see any point in living" → severe (+ crisis pathway)
+
+2. **Integration test**: Send therapeutic message through full pipeline → verify `clinical_severity` state field is populated → verify technique difficulty matches severity
+
+3. **DB verification**: Check `ClinicalAssessmentLog` records are created with correct scores
 
 ### Manual Verification
-- Check the FastAPI terminal after restart: you should NEVER see `[TOOL] save_session: Created fallback session` after the first message in a new session.
-- The `[NODE: SESSION_SAVER]` log should show `Using session <cuid>` on every subsequent message, not `Created fallback session`.
+- Run the agent, express various levels of distress, verify:
+  - Mild distress → EASY exercises (breathing, grounding)
+  - Moderate distress → MODERATE exercises (CBT worksheets, DBT skills)
+  - High severity → HARD exercises + professional referral hint
+  - Severe → crisis pathway, no exercises
+
+---
+
+## Open Questions
+
+> [!IMPORTANT]
+> **Latency cost:** The clinical severity check adds one additional LLM call (~400-600ms) on therapeutic turns. Since it runs **in parallel** with distortion detection + trend analysis, the actual wall-clock impact should be ~0ms (hidden behind the existing LLM calls). However, it does add an additional OpenRouter API call per therapeutic turn. Is this acceptable?
+
+> [!IMPORTANT]
+> **Score persistence frequency:** Should we save a `ClinicalAssessmentLog` record on **every** therapeutic turn, or only when severity changes from the previous assessment? Every turn gives more data but more DB writes. On severity change only is lighter but could miss nuance.
+
+> [!WARNING]
+> **Severity accuracy from single messages:** PHQ-9/GAD-7 are designed for 2-week recall. A single message can't perfectly estimate severity. The LLM will use conversational cues + trend data to approximate, but we should clearly document this as an **estimated** severity, not a clinical diagnosis. This is important for academic honesty in your FYP report.

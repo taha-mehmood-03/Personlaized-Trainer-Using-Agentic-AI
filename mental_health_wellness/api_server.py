@@ -18,11 +18,12 @@ if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
 
 import os
 import time
+import logging
 from datetime import datetime
 from typing import Optional, List, Dict
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -30,17 +31,33 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("sentimind.server")
+logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
+logging.getLogger("transformers").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+def latency_seconds(start_time: float) -> float:
+    """Return elapsed wall-clock time in seconds for latency logs."""
+    return time.time() - start_time
+
 # Import the new agent
 from src.mental_health_wellness.agent import chat_with_agent, get_agent, check_agent_health
 from src.mental_health_wellness.db.client import get_prisma_client, close_prisma_client
 
-# Import crisis routes
-crisis_router = None
+# Import API crisis routes
+api_crisis_router = None
 try:
-    from src.mental_health_wellness.api.crisis_routes import router as crisis_router
-    print("[SERVER] [OK] Crisis routes imported successfully")
+    from src.mental_health_wellness.api.crisis_routes import router as api_crisis_router
+    logger.info("Crisis routes imported")
 except Exception as e:
-    print(f"[SERVER] [WARN] Failed to import crisis routes: {e}")
+    logger.warning("Failed to import crisis routes: %s", e)
 
 
 # ============================================
@@ -136,36 +153,43 @@ class SessionRenameRequest(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage startup and shutdown events"""
-    print("\n" + "="*60)
-    print("[SERVER] 🚀 SentiMind Mental Health API — Starting Up")
-    print("="*60)
+    logger.info("=" * 72)
+    logger.info("SentiMind Mental Health API starting")
+    logger.info("=" * 72)
 
     # ── Database ──────────────────────────────────────────────────────────
     try:
         await get_prisma_client()
-        print("[SERVER] ✅ Database connected (Supabase/PostgreSQL)")
+        logger.info("Startup OK   | Prisma/Supabase database connected")
     except Exception as e:
-        print(f"[SERVER] ❌ Database connection failed: {e}")
+        logger.exception("Startup FAIL | Prisma/Supabase database connection failed: %s", e)
         import traceback
         traceback.print_exc()
 
     # ── LLM Provider (OpenRouter) ─────────────────────────────────────────
     try:
-        print("[SERVER] 🔄 Initializing LLM provider (OpenRouter)...")
+        logger.info("Startup      | Initializing LLM provider")
         from src.mental_health_wellness.llm.groq_llm import get_llm_manager
-        get_llm_manager()
-        print("[SERVER] ✅ LLM provider ready (OpenRouter / llama-3.3-70b)")
+        llm_manager = get_llm_manager()
+        llm_manager.get_llm()
+        llm_status = llm_manager.get_status()
+        logger.info(
+            "Startup OK   | LLM ready | provider=%s model=%s openrouter=%s",
+            llm_status.get("provider"),
+            llm_status.get("openrouter_model"),
+            llm_status.get("openrouter_key_set"),
+        )
     except Exception as e:
-        print(f"[SERVER] ❌ LLM provider initialization failed: {e}")
+        logger.exception("Startup FAIL | LLM provider initialization failed: %s", e)
         import traceback
         traceback.print_exc()
 
     # ── Agentic Pipeline ──────────────────────────────────────────────────
     try:
         get_agent()
-        print("[SERVER] ✅ Deterministic Agentic Pipeline initialized")
+        logger.info("Startup OK   | Deterministic agent graph initialized")
     except Exception as e:
-        print(f"[SERVER] ❌ Pipeline initialization failed: {e}")
+        logger.exception("Startup FAIL | Agent graph initialization failed: %s", e)
         import traceback
         traceback.print_exc()
 
@@ -200,6 +224,89 @@ async def lifespan(app: FastAPI):
 
 
 # ============================================
+@asynccontextmanager
+async def organized_lifespan(app: FastAPI):
+    """Structured startup/shutdown with model preloading."""
+    logger.info("=" * 72)
+    logger.info("SentiMind Mental Health API starting")
+    logger.info("=" * 72)
+
+    try:
+        await get_prisma_client()
+        logger.info("Startup OK   | Prisma/Supabase database connected")
+    except Exception as e:
+        logger.exception("Startup FAIL | Prisma/Supabase database connection failed: %s", e)
+
+    try:
+        logger.info("Startup      | Initializing LLM provider")
+        from src.mental_health_wellness.llm.groq_llm import get_llm_manager
+
+        llm_manager = get_llm_manager()
+        llm_manager.get_llm()
+        status = llm_manager.get_status()
+        logger.info(
+            "Startup OK   | LLM ready | provider=%s model=%s openrouter=%s",
+            status.get("provider"),
+            status.get("openrouter_model"),
+            status.get("openrouter_key_set"),
+        )
+    except Exception as e:
+        logger.exception("Startup FAIL | LLM provider initialization failed: %s", e)
+
+    try:
+        get_agent()
+        logger.info("Startup OK   | Deterministic agent graph initialized")
+    except Exception as e:
+        logger.exception("Startup FAIL | Agent graph initialization failed: %s", e)
+
+    try:
+        logger.info("Startup      | Preloading semantic memory embedding model")
+        import asyncio
+        from src.mental_health_wellness.memory import check_memory_health, preload_embeddings
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, preload_embeddings)
+        memory_health = check_memory_health()
+        if memory_health.get("status") == "healthy":
+            logger.info(
+                "Startup OK   | Chroma semantic memory ready | model=%s dim=%s",
+                memory_health.get("embedding_model"),
+                memory_health.get("embedding_dim"),
+            )
+        else:
+            logger.warning("Startup WARN | Semantic memory unhealthy: %s", memory_health.get("error"))
+    except Exception as e:
+        logger.warning("Startup WARN | Semantic memory preload failed (non-fatal): %s", e)
+
+    try:
+        logger.info("Startup      | Preloading voice models and checking Deepgram")
+        import asyncio
+        from src.mental_health_wellness.voice import preload_all_voice_models
+
+        loop = asyncio.get_event_loop()
+        voice_status = await loop.run_in_executor(None, preload_all_voice_models)
+        ready = [k for k, v in voice_status.items() if v in ("ok", "fallback")]
+        failed = [k for k, v in voice_status.items() if k not in ready]
+        logger.info("Startup OK   | Voice services ready: %s", ready)
+        if failed:
+            logger.warning("Startup WARN | Voice services unavailable: %s", failed)
+    except Exception as e:
+        logger.warning("Startup WARN | Voice model preload failed (non-fatal): %s", e)
+
+    logger.info("=" * 72)
+    logger.info("SentiMind ready - listening for requests")
+    logger.info("=" * 72)
+
+    yield
+
+    logger.info("=" * 72)
+    logger.info("SentiMind shutting down")
+    await close_prisma_client()
+    logger.info("Shutdown OK  | Database connection closed")
+    logger.info("Shutdown complete")
+    logger.info("=" * 72)
+
+
 # FASTAPI APP
 # ============================================
 
@@ -207,7 +314,7 @@ app = FastAPI(
     title="Mental Health Wellness API",
     description="AI mental health support using LangGraph ReAct Agent",
     version="3.0.0",
-    lifespan=lifespan
+    lifespan=organized_lifespan
 )
 
 # CORS middleware
@@ -219,12 +326,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def log_request_latency(request: Request, call_next):
+    """Log total HTTP request handling latency in seconds."""
+    start_time = time.time()
+    path = request.url.path
+    method = request.method
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception(
+            "Latency FAIL | %s %s | %.3fs",
+            method,
+            path,
+            latency_seconds(start_time),
+        )
+        raise
+
+    logger.info(
+        "Latency HTTP | %s %s | status=%s | %.3fs",
+        method,
+        path,
+        response.status_code,
+        latency_seconds(start_time),
+    )
+    return response
+
 # Include crisis routes
-if crisis_router is not None:
-    app.include_router(crisis_router)
-    print("[SERVER] [OK] Crisis routes registered")
+if api_crisis_router is not None:
+    app.include_router(api_crisis_router)
+    logger.info("Crisis routes registered")
 else:
-    print("[SERVER] [WARN] Crisis routes not registered")
+    logger.warning("Crisis routes not registered")
 
 
 # ============================================
@@ -274,11 +408,24 @@ async def chat(request: ChatRequest):
     """
     Main chat endpoint using the deterministic graph pipeline.
     """
+    request_start = time.time()
+    logger.info(
+        "Latency CHAT | start | user=%s session=%s",
+        request.user_id,
+        request.session_id or "new",
+    )
     try:
         result = await chat_with_agent(
             user_id=request.user_id,
             message=request.message,
             session_id=request.session_id
+        )
+        logger.info(
+            "Latency CHAT | agent_complete | user=%s session=%s | %.3fs | trace=%s",
+            request.user_id,
+            result.get("session_id") or request.session_id or "new",
+            latency_seconds(request_start),
+            " -> ".join(result.get("node_trace", [])),
         )
 
         return ChatResponse(
@@ -294,7 +441,13 @@ async def chat(request: ChatRequest):
         )
 
     except Exception as e:
-        print(f"[ERROR] Chat failed: {e}")
+        logger.exception(
+            "Latency CHAT | failed | user=%s session=%s | %.3fs | error=%s",
+            request.user_id,
+            request.session_id or "new",
+            latency_seconds(request_start),
+            e,
+        )
         raise HTTPException(
             status_code=500,
             detail=f"Chat processing failed: {str(e)}"
@@ -309,8 +462,16 @@ async def chat_stream(request: ChatRequest):
     from fastapi.responses import StreamingResponse
     import json
 
+    request_start = time.time()
+    logger.info(
+        "Latency STREAM | start | user=%s session=%s",
+        request.user_id,
+        request.session_id or "new",
+    )
+
     async def event_generator():
         audio_temp_path = None
+        first_token_logged = False
         try:
             from src.mental_health_wellness.agent.graph import chat_with_agent_streaming
             import tempfile
@@ -338,6 +499,7 @@ async def chat_stream(request: ChatRequest):
             final_message = request.message
             if audio_temp_path:
                 from src.mental_health_wellness.nodes.voice_preprocessing import preprocess_voice_input
+                voice_start = time.time()
                 
                 voice_state = {
                     "audio_file_path": audio_temp_path,
@@ -345,6 +507,11 @@ async def chat_stream(request: ChatRequest):
                 }
                 
                 voice_result = await preprocess_voice_input(voice_state)
+                logger.info(
+                    "Latency STREAM | voice_preprocessing | user=%s | %.3fs",
+                    request.user_id,
+                    latency_seconds(voice_start),
+                )
                 voice_processed = voice_result.get("voice_processed", False)
                 voice_features = voice_result.get("voice_features", {})
                 transcription = voice_result.get("transcription", "")
@@ -389,16 +556,37 @@ async def chat_stream(request: ChatRequest):
 
             async for chunk_data in stream:
                 if chunk_data["type"] == "token":
+                    if not first_token_logged:
+                        first_token_logged = True
+                        logger.info(
+                            "Latency STREAM | first_token | user=%s session=%s | %.3fs",
+                            request.user_id,
+                            request.session_id or "new",
+                            latency_seconds(request_start),
+                        )
                     yield f"data: {json.dumps({'type': 'token', 'content': chunk_data['content']})}\n\n"
                 elif chunk_data["type"] == "done":
                     # Send metadata as final event
                     metadata = chunk_data["metadata"]
                     metadata["type"] = "done"  # Ensure type is explicitly set
                     yield f"data: {json.dumps(metadata)}\n\n"
+                    logger.info(
+                        "Latency STREAM | complete | user=%s session=%s | %.3fs",
+                        request.user_id,
+                        metadata.get("session_id") or request.session_id or "new",
+                        latency_seconds(request_start),
+                    )
                     print(f"[STREAM] ✅ Stream complete | Metadata sent")
 
         except Exception as e:
             print(f"[STREAM] ❌ Stream error: {e}")
+            logger.exception(
+                "Latency STREAM | failed | user=%s session=%s | %.3fs | error=%s",
+                request.user_id,
+                request.session_id or "new",
+                latency_seconds(request_start),
+                e,
+            )
             import traceback
             traceback.print_exc()
             yield f"data: {json.dumps({'type': 'error', 'content': 'Something went wrong. Please try again.'})}\n\n"
@@ -442,6 +630,13 @@ async def pipeline_complete(request: PipelineRequest):
         
         end_time = time.time()
         total_ms = int((end_time - start_time) * 1000)
+        total_s = end_time - start_time
+        logger.info(
+            "Latency PIPELINE | complete | user=%s session=%s | %.3fs",
+            user_id,
+            result.get("session_id") or request.session_id or "new",
+            total_s,
+        )
         
         return {
             "status": "success",
@@ -458,12 +653,19 @@ async def pipeline_complete(request: PipelineRequest):
             "node_trace": result.get("node_trace", []),
             "techniques": result.get("techniques", []),
             "performance": {
-                "total_ms": total_ms
+                "total_ms": total_ms,
+                "total_seconds": round(total_s, 3),
             }
         }
         
     except Exception as e:
-        print(f"[ERROR] Pipeline failed: {e}")
+        logger.exception(
+            "Latency PIPELINE | failed | user=%s session=%s | %.3fs | error=%s",
+            request.user_id or "missing",
+            request.session_id or "new",
+            latency_seconds(start_time),
+            e,
+        )
         import traceback
         traceback.print_exc()
         
@@ -819,6 +1021,16 @@ async def delete_session(session_id: str):
             print(f"[SESSION-DELETE] ⚠️  Session not found: {session_id}")
             raise HTTPException(status_code=404, detail="Session not found")
 
+        # Keep semantic memory aligned with the source-of-truth DB.
+        # Non-fatal: deletion should still succeed even if Chroma cleanup fails.
+        try:
+            from src.mental_health_wellness.memory import delete_session_memories
+
+            cleanup = await delete_session_memories(session.userId, session_id)
+            print(f"[SESSION-DELETE] Semantic memory cleanup: {cleanup}")
+        except Exception as mem_err:
+            print(f"[SESSION-DELETE] Semantic memory cleanup failed (non-fatal): {str(mem_err)[:100]}")
+
         # Delete all messages first (FK constraint)
         deleted_msgs = await prisma.message.delete_many(where={"sessionId": session_id})
         print(f"[SESSION-DELETE] 🧹 Deleted {deleted_msgs} messages")
@@ -883,7 +1095,7 @@ async def get_dashboard_stats(user_id: str):
     and psychological profile from real database records.
     """
     from collections import Counter
-    from datetime import timedelta
+    from datetime import timedelta, timezone
 
     try:
         prisma = await get_prisma_client()
@@ -901,7 +1113,7 @@ async def get_dashboard_stats(user_id: str):
         avg_mood_rating = user_stats.averageMoodRating if user_stats else 5.0
 
         # ── Sessions (last 30 days) ───────────────────────────────────────────
-        thirty_days_ago = datetime.now() - timedelta(days=30)
+        thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
         sessions = await prisma.session.find_many(
             where={"userId": user_id, "startedAt": {"gte": thirty_days_ago}},
             order={"startedAt": "desc"},
@@ -909,7 +1121,7 @@ async def get_dashboard_stats(user_id: str):
         )
 
         # Sessions this week
-        one_week_ago = datetime.now() - timedelta(days=7)
+        one_week_ago = datetime.now(timezone.utc) - timedelta(days=7)
         sessions_this_week = sum(1 for s in sessions if s.startedAt and s.startedAt >= one_week_ago)
 
         # ── MoodLogs (last 7 days for timeline) ───────────────────────────────
@@ -959,7 +1171,7 @@ async def get_dashboard_stats(user_id: str):
         top_emotion = emotion_counter.most_common(1)[0][0] if emotion_counter else "neutral"
 
         # ── Mood trend (compare last 7 days to previous 7 days) ──────────────
-        two_weeks_ago = datetime.now() - timedelta(days=14)
+        two_weeks_ago = datetime.now(timezone.utc) - timedelta(days=14)
         prev_week_logs = await prisma.moodlog.find_many(
             where={"userId": user_id, "createdAt": {"gte": two_weeks_ago, "lt": one_week_ago}},
         )
@@ -1245,6 +1457,13 @@ async def delete_user_account(user_id: str):
         user = await prisma.user.find_unique(where={"id": user_id})
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
+        try:
+            from src.mental_health_wellness.memory import delete_user_memories
+
+            cleanup = await delete_user_memories(user_id)
+            print(f"[USER-DELETE] Semantic memory cleanup: {cleanup}")
+        except Exception as mem_err:
+            print(f"[USER-DELETE] Semantic memory cleanup failed (non-fatal): {str(mem_err)[:100]}")
         await prisma.user.delete(where={"id": user_id})
         return {"status": "success", "message": "Account permanently deleted"}
     except HTTPException:
@@ -1475,6 +1694,14 @@ async def delete_user_data(user_id: str):
         user = await prisma.user.find_unique(where={"id": user_id})
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
+
+        try:
+            from src.mental_health_wellness.memory import delete_user_memories
+
+            cleanup = await delete_user_memories(user_id)
+            print(f"[USER-DATA-DELETE] Semantic memory cleanup: {cleanup}")
+        except Exception as mem_err:
+            print(f"[USER-DATA-DELETE] Semantic memory cleanup failed (non-fatal): {str(mem_err)[:100]}")
         
         # Cascade delete handles related records (sessions, messages, etc.)
         await prisma.user.delete(where={"id": user_id})
@@ -1584,6 +1811,7 @@ async def chat_voice(
     """
     import tempfile
     import os as _os
+    request_start = time.time()
     
     try:
         print(f"\n[API: VOICE] 🎤 Voice endpoint called - user: {user_id}, session: {session_id}")
@@ -1591,8 +1819,19 @@ async def chat_voice(
         # ============================================
         # RECEIVE AND SAVE AUDIO
         # ============================================
+        logger.info(
+            "Latency VOICE | start | user=%s session=%s",
+            user_id,
+            session_id or "new",
+        )
         
+        stage_start = time.time()
         audio_bytes = await audio.read()
+        logger.info(
+            "Latency VOICE | read_upload | user=%s | %.3fs",
+            user_id,
+            latency_seconds(stage_start),
+        )
         print(f"[API: VOICE] 📥 Received {len(audio_bytes)} bytes of audio")
         
         # Detect audio format
@@ -1619,7 +1858,13 @@ async def chat_voice(
         }
         
         # Run voice preprocessing
+        stage_start = time.time()
         voice_result = await preprocess_voice_input(voice_state)
+        logger.info(
+            "Latency VOICE | preprocessing | user=%s | %.3fs",
+            user_id,
+            latency_seconds(stage_start),
+        )
         
         voice_processed = voice_result.get("voice_processed", False)
         voice_features = voice_result.get("voice_features", {})
@@ -1666,11 +1911,18 @@ async def chat_voice(
         print(f"[API: VOICE] ✅ With context: '{text_message_with_context[:100]}...'")
         print(f"[API: VOICE] 🚀 Routing to chat_with_agent...")
         
+        stage_start = time.time()
         result = await chat_with_agent(
             user_id=user_id,
             message=text_message_with_context,
             session_id=session_id,
             audio_file_path=temp_audio_path if voice_processed else None
+        )
+        logger.info(
+            "Latency VOICE | agent_complete | user=%s session=%s | %.3fs",
+            user_id,
+            result.get("session_id") or session_id or "new",
+            latency_seconds(stage_start),
         )
         
         # ============================================
@@ -1687,6 +1939,12 @@ async def chat_voice(
         # ============================================
         # RETURN RESPONSE WITH VOICE DATA
         # ============================================
+        logger.info(
+            "Latency VOICE | complete | user=%s session=%s | %.3fs",
+            user_id,
+            result.get("session_id") or session_id or "new",
+            latency_seconds(request_start),
+        )
         
         return {
             "response": result.get("response", "I'm here to listen."),
@@ -1707,6 +1965,13 @@ async def chat_voice(
         print(f"[API: VOICE] ❌ Voice chat failed: {e}")
         import traceback
         traceback.print_exc()
+        logger.exception(
+            "Latency VOICE | failed | user=%s session=%s | %.3fs | error=%s",
+            user_id,
+            session_id or "new",
+            latency_seconds(request_start),
+            e,
+        )
         raise HTTPException(status_code=500, detail=f"Voice processing failed: {str(e)}")
 
 

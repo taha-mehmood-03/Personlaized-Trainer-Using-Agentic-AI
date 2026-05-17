@@ -72,6 +72,14 @@ enum Difficulty {
   HARD
 }
 
+enum ClinicalSeverity {
+  MINIMAL
+  MILD
+  MODERATE
+  MODERATELY_SEVERE
+  SEVERE
+}
+
 enum SleepQuality {
   POOR
   FAIR
@@ -143,8 +151,9 @@ model Session {
   // Relationships
   messages          Message[]
   moodLog           MoodLog?
-  summaries         SessionSummary[]
-  techniqueOutcomes TechniqueOutcome[]
+  summaries             SessionSummary[]
+  techniqueOutcomes     TechniqueOutcome[]
+  clinicalAssessments  ClinicalAssessmentLog[]
 
   // v3: Emotion trajectory snapshots
   emotionSnapshots  EmotionSnapshot[]
@@ -253,6 +262,12 @@ model Technique {
   
   isActive        Boolean           @default(true)
   createdAt       DateTime          @default(now())
+
+  // v9.0: Clinical severity gating (PHQ-9/GAD-7)
+  minPhq9              Int       @default(0)     // minimum PHQ-9 score this technique is appropriate for
+  maxPhq9              Int       @default(27)    // maximum PHQ-9 score this technique is appropriate for
+  safeAtSeverity       String[]  @default(["MINIMAL", "MILD", "MODERATE", "MODERATELY_SEVERE"])
+  contraindicatedFlags String[]  @default([])    // e.g. ["suicidal_ideation", "psychomotor"]
   
   userRatings     UserTechniqueRating[]
   recommendedIn   Message[]
@@ -473,4 +488,28 @@ model EmotionSnapshot {
 
   @@index([sessionId])
   @@index([userId])
+}
+
+// ============================================
+// v9.0: CLINICAL ASSESSMENT LOG (PHQ-9/GAD-7)
+// ============================================
+
+model ClinicalAssessmentLog {
+  id               String            @id @default(cuid())
+  sessionId        String
+  session          Session           @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  userId           String
+
+  severity         ClinicalSeverity
+  phq9Score        Int               // estimated PHQ-9 total (0-27)
+  gad7Score        Int               // estimated GAD-7 total (0-21)
+  indicators       String[]          // clinical indicators scoring >= 2
+  confidence       Float             // 0.0-1.0 confidence in assessment
+  justification    String?           // LLM reasoning for the severity
+
+  assessedAt       DateTime          @default(now())
+
+  @@index([userId])
+  @@index([sessionId])
+  @@index([assessedAt])
 }

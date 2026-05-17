@@ -2,7 +2,7 @@
 Voice Tools  LangChain tool wrapper for voice emotion analysis.
 
 Exposes the full acoustic feature set (including new psychoacoustic signals
-distress_index, pause_density, mfcc_vector) so the agentic pipeline and
+distress_index, pause_density, mfcc_vector) so the graph pipeline and
 system prompt can reason about them.
 """
 from langchain_core.tools import tool

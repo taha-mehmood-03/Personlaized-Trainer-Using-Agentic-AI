@@ -411,7 +411,7 @@ def get_response_prompt(context: dict) -> str:
 
 def get_role_based_prompt(agent_role: str, state: dict = None) -> str:
     """
-    Return the role-specific system prompt for response_generator_node.
+    Return the role-specific system prompt for optimized_response_generator.
 
     v2.1 FIX: Now accepts full pipeline state dict instead of just agent_role string.
     Reads route, intent, conversation_history to detect rejection.
@@ -422,7 +422,7 @@ def get_role_based_prompt(agent_role: str, state: dict = None) -> str:
       Layer 2: ⛔⛔⛔ HARD STOP block prepended to role prompt.
                Even if LLM ignores Layer 1, it cannot miss this.
 
-    HOW TO CALL IN YOUR response_generator_node (Node 4):
+    HOW TO CALL IN YOUR optimized_response_generator (Node 4):
       # BEFORE (broken — never checked rejection):
       system_prompt = get_role_based_prompt(agent_role)
 

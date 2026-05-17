@@ -15,42 +15,6 @@ from typing import Optional
 MAX_FACTS = 33
 FACT_CATEGORIES = {"identity", "preference", "goal", "clinical", "context"}
 
-# ── Storage pre-filter helpers ─────────────────────────────────────────────────
-_STORAGE_KEYWORDS = {
-    "my name", "i am", "i'm", "i work", "i study", "i have", "i live",
-    "my job", "my age", "i prefer", "i like", "i don't like", "i hate",
-    "i want to", "my goal", "i suffer", "i was diagnosed", "my doctor",
-    "my family", "my mother", "my father", "my brother", "my sister",
-    "my friend", "my partner", "my wife", "my husband", "i graduated",
-    "i'm studying", "i am studying", "years old", "call me", "not call me",
-    "remember that", "please remember", "don't forget",
-}
-
-_GREETINGS = {
-    "hi", "hello", "hey", "ok", "okay", "sure", "thanks", "thank you",
-    "bye", "goodbye", "yes", "no", "lol", "haha", "cool", "nice",
-}
-
-
-def _is_storage_worthy(message: str) -> bool:
-    """
-    Fast pre-filter: returns True only if the message is likely to contain
-    a stable personal fact worth running the LLM extraction on.
-    Skips: pure greetings, very short messages, pure emotion venting.
-    """
-    stripped = message.strip().lower()
-    if len(stripped) < 25:
-        return False
-    words = set(stripped.split())
-    if words.issubset(_GREETINGS):
-        return False
-    for kw in _STORAGE_KEYWORDS:
-        if kw in stripped:
-            return True
-    # Medium-long messages might contain storable context
-    if len(stripped) > 80:
-        return True
-    return False
 
 
 async def extract_and_save_facts(
@@ -63,10 +27,11 @@ async def extract_and_save_facts(
     Handles CORRECTIONS: if user says "im not X im Y", the wrong fact is deleted.
     Runs as a background asyncio.create_task() -- never blocks the pipeline.
 
-    Pre-filter: skips LLM call entirely for greetings / short messages.
+    The LLM is the sole judge of whether a message contains a storable fact.
+    Only truly empty / single-token messages are skipped without an LLM call.
     """
-    # ── Fast pre-filter: skip LLM if message cannot contain a stable fact ──
-    if not _is_storage_worthy(message):
+    # Skip completely empty messages only — LLM handles everything else
+    if not message or not message.strip() or len(message.strip()) < 3:
         return
 
     try:
@@ -74,8 +39,9 @@ async def extract_and_save_facts(
         from ..llm.groq_llm import get_llm_manager
 
         manager = get_llm_manager()
-        # Use best free model for highest-quality fact extraction
-        llm = manager.get_llm(model="deepseek/deepseek-r1:free")
+        # Use the standard LLM manager which defaults to the best available model
+        # (Gemini or OpenRouter Llama 3.3 70b fallback)
+        llm = manager.get_llm()
 
         prompt = (
             "You are a memory extraction system for a mental health chatbot.\n"

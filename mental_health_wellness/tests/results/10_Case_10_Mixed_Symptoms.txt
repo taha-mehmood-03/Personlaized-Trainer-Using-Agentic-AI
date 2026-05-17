@@ -1,0 +1,39 @@
+TEST CASE: Case_10_Mixed_Symptoms
+============================================================
+INPUT MESSAGE: "I'm so anxious about losing my job that I've stopped eating, and I'm so depressed about it that I can't get out of bed to even try looking for a new one."
+BASE EMOTION:  FEAR (Intensity: 0.85)
+============================================================
+
+1. CLINICAL SEVERITY ANALYSIS (LLM)
+----------------------------------------
+Detected Severity:   MODERATELY_SEVERE
+Estimated PHQ-9:     12 / 27
+Estimated GAD-7:     10 / 21
+Clinical Indicators: little interest or pleasure in doing things (anhedonia), feeling down, depressed, or hopeless (depressed_mood), feeling tired or having little energy (fatigue), poor appetite or overeating (appetite_change), feeling bad about yourself — failure, let family down (worthlessness), feeling nervous, anxious, or on edge (nervousness), not being able to stop or control worrying (uncontrollable_worry), worrying too much about different things (excessive_worry), trouble relaxing (restlessness), feeling afraid, as if something awful might happen (dread)
+Confidence Score:    85%
+
+LLM Reasoning:
+The patient's message explicitly states they are anxious about losing their job, stopped eating, and can't get out of bed, indicating significant symptoms of depression and anxiety.
+
+
+2. TECHNIQUE SELECTION (DATABASE GATING)
+----------------------------------------
+Filtering Rules Applied:
+- Matched Target Emotion: FEAR
+- Applied Clinical Bounds: minPhq9 <= 12 AND maxPhq9 >= 12
+- Safety Requirement: Must be marked SafeAtSeverity=MODERATELY_SEVERE
+- Contraindication Filter: Excluded techniques matching flags ['little interest or pleasure in doing things (anhedonia)', 'feeling down, depressed, or hopeless (depressed_mood)', 'feeling tired or having little energy (fatigue)', 'poor appetite or overeating (appetite_change)', 'feeling bad about yourself — failure, let family down (worthlessness)', 'feeling nervous, anxious, or on edge (nervousness)', 'not being able to stop or control worrying (uncontrollable_worry)', 'worrying too much about different things (excessive_worry)', 'trouble relaxing (restlessness)', 'feeling afraid, as if something awful might happen (dread)']
+
+Recommended Exercises (Top 3):
+  > 4-7-8 Breathing (Category: Breathing)
+    Difficulty: EASY, Duration: 5m
+    Why: Extending the exhale activates the parasympathetic nervous system, lowering heart rate and blood pressure. The specific counts maximize oxygen-carbon dioxide exchange and focus the mind.
+
+  > Box Breathing (Category: Breathing)
+    Difficulty: EASY, Duration: 5m
+    Why: The equal pattern creates rhythm and predictability, which signals safety to the nervous system. The holds between breaths increase CO2 tolerance, which has a calming effect.
+
+  > Belly Breathing (Category: Breathing)
+    Difficulty: EASY, Duration: 8m
+    Why: Diaphragmatic breathing stimulates the vagus nerve, which activates the parasympathetic nervous system. This lowers heart rate, blood pressure, and stress hormones.
+

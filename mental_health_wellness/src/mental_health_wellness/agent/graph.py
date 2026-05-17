@@ -11,8 +11,8 @@ PRE-GRAPH SHORT-CIRCUITS (before the graph runs):
 
 MAIN PIPELINE (LangGraph, 5 nodes):
   1. Parallel Intake (v5.3):         4-way concurrent:
-                                        Crisis Pre-Screener (OpenRouter claude-3.5-sonnet)
-                                        Therapist Agent     (OpenRouter claude-3.5-sonnet)
+                                        Crisis Pre-Screener (OpenRouter llama-3.3-70b)
+                                        Therapist Agent     (OpenRouter llama-3.3-70b)
                                         Mood Analyzer       (OpenRouter claude-3-haiku)
                                         Intent Pre-Check    (OpenRouter claude-3-haiku async)
                                         Support Tools       (DuckDuckGo, Vector DB)
@@ -65,6 +65,10 @@ logger = logging.getLogger(__name__)
 
 _message_store: dict[str, list] = {}    # {thread_id: [BaseMessage, ...]}
 _MAX_MESSAGE_HISTORY = 20               # Rolling window per thread
+
+
+def _elapsed_s(start: float) -> float:
+    return time.time() - start
 
 
 async def _load_messages_with_db_fallback(thread_id: str) -> list:
@@ -281,6 +285,140 @@ def _update_message_store(
     _message_store[thread_id] = all_msgs[-_MAX_MESSAGE_HISTORY:]
 
 
+def _is_short_acceptance(message: str) -> bool:
+    """True only for short affirmative replies that need prior context."""
+    text = (message or "").lower().strip()
+    if not text or len(text.split()) > 6:
+        return False
+    acceptance_signals = {
+        "yes", "yes i do", "yeah", "yep", "yup", "sure", "ok", "okay",
+        "please", "go ahead", "sounds good", "let's do it", "lets do it",
+        "i'm ready", "im ready", "guide me", "show me",
+    }
+    return text in acceptance_signals or any(text.startswith(s + " ") for s in acceptance_signals)
+
+
+async def _resolve_accepted_technique_name(
+    accepted: Optional[str], message: str, prev_messages: list
+) -> Optional[str]:
+    """
+    Validate that an accept_technique route points to a real DB technique.
+
+    Generic replies like "yes i do" are only accepted when the previous assistant
+    turn named an actual stored technique. This prevents random fallback delivery
+    when the previous turn merely offered to "explore an idea" or do a reframe.
+    """
+    from ..tools.technique_tools import get_technique_by_name
+    import re
+
+    candidates: list[str] = []
+    if accepted:
+        candidates.append(str(accepted).strip())
+
+    # If the user explicitly typed a name, try that too.
+    if not _is_short_acceptance(message):
+        candidates.append(message.strip())
+
+    # For short yes/okay replies, inspect the last assistant turn for bolded or
+    # offer-style technique names, then validate each candidate against the DB.
+    prev_ai_msgs = [m for m in prev_messages if getattr(m, "type", "") == "ai"]
+    if prev_ai_msgs:
+        prev_ai = getattr(prev_ai_msgs[-1], "content", "") or ""
+        candidates.extend(re.findall(r"\*\*([^*]{2,80})\*\*", prev_ai))
+        candidates.extend(re.findall(
+            r"(?:share|suggest|try|practice|start|work through)\s+([A-Z][A-Za-z0-9 \-]{2,80}?)(?:\s+technique|\s+exercise|[.,?!]|$)",
+            prev_ai,
+        ))
+
+    seen = set()
+    for candidate in candidates:
+        clean = re.sub(r"^(the|a|an)\s+", "", candidate.strip(), flags=re.I)
+        clean = clean.strip(" .,!?:;\"'")
+        if not clean or clean.lower() in seen:
+            continue
+        seen.add(clean.lower())
+        try:
+            technique = await get_technique_by_name(clean)
+            if technique and technique.get("name"):
+                return technique["name"]
+        except Exception as e:
+            print(f"[GATE-ROUTE] Technique validation failed for '{clean}': {e}")
+
+    return None
+
+
+def _looks_emotionally_loaded(message: str) -> bool:
+    """Small deterministic guard against unsafe chitchat/list bypasses."""
+    text = (message or "").lower()
+    distress_markers = {
+        "alone", "lonely", "sad", "depressed", "anxious", "anxiety",
+        "panic", "scared", "afraid", "hopeless", "worthless", "empty",
+        "crying", "overwhelmed", "stressed", "trauma", "grief", "loss",
+        "hurt myself", "kill myself", "die", "suicide", "can't cope",
+        "cant cope", "need help", "what should i do", "what shoudl i do",
+    }
+    return any(marker in text for marker in distress_markers)
+
+
+def _is_memory_query_candidate(message: str) -> bool:
+    """Validate memory bypasses so ordinary reflective wording is not hijacked."""
+    text = (message or "").lower()
+    memory_markers = {
+        "remember me", "do you remember", "last time", "last session",
+        "previous session", "what did we talk", "what did we discuss",
+        "what have we covered", "my information", "my info", "stored about me",
+        "what do you know about me",
+    }
+    return any(marker in text for marker in memory_markers)
+
+
+def _is_list_techniques_candidate(message: str) -> bool:
+    """Validate that list_techniques means browsing options, not asking for support."""
+    text = (message or "").lower()
+    list_markers = {
+        "list", "show me exercises", "show me techniques", "what exercises",
+        "what techniques", "what options", "available exercises",
+        "available techniques", "all exercises", "all techniques",
+    }
+    return any(marker in text for marker in list_markers) or (
+        "show me" in text and ("exercise" in text or "technique" in text)
+    )
+
+
+def _is_rejection_candidate(message: str, prev_messages: list) -> bool:
+    """Validate rejection bypasses; avoid treating every 'no' as global refusal."""
+    text = (message or "").lower().strip()
+    rejection_markers = {
+        "no exercises", "no exercise", "don't want exercises", "dont want exercises",
+        "don't want exercise", "dont want exercise", "stop suggesting",
+        "stop giving me", "just listen", "just want to vent", "just want to talk",
+        "no thanks", "not interested", "leave me alone", "don't want help",
+        "dont want help",
+    }
+    if any(marker in text for marker in rejection_markers):
+        return True
+    # A bare "no" is only a rejection when the prior assistant offered a technique.
+    if text in {"no", "nope", "nah"}:
+        prev_ai_msgs = [m for m in prev_messages if getattr(m, "type", "") == "ai"]
+        if prev_ai_msgs:
+            prev = (getattr(prev_ai_msgs[-1], "content", "") or "").lower()
+            return any(k in prev for k in ("technique", "exercise", "would you like to try", "give it a try"))
+    return False
+
+
+def _gate_route_to_intent(route: str, confidence: float, message: str) -> str:
+    """
+    Convert gate route to planner intent.
+    The LLM (70b) is authoritative — its route is trusted directly.
+    No confidence threshold gatekeeping.
+    """
+    if route == "crisis":
+        return "crisis_signal"
+    if route == "chitchat":
+        return "chitchat"
+    return "venting"
+
+
 async def _memory_query_response(
     message: str, user_id: str, session_id: str, prev_messages: list, start_time: float
 ) -> dict:
@@ -392,45 +530,57 @@ async def _list_techniques_response(
 
 
 async def _accept_technique_response(
-    technique_name: Optional[str], user_id: str, session_id: str, prev_messages: list, start_time: float
+    technique_name: Optional[str],
+    user_id: str,
+    session_id: str,
+    prev_messages: list,
+    start_time: float,
+    technique_data: Optional[dict] = None,
 ) -> dict:
-    """Deliver the specific technique the user just accepted, step-by-step."""
+    """Acknowledge the specific DB technique the user just accepted.
+
+    The frontend/sidebar owns step delivery from database fields; the LLM must
+    not invent or narrate technique steps here.
+    """
     from ..tools.technique_tools import get_technique_by_name
     from ..llm.groq_llm import get_chat_llm
     from langchain_core.messages import SystemMessage as SysMsg
 
-    technique = None
+    technique = technique_data
     if technique_name:
-        try:
-            technique = await get_technique_by_name(technique_name)
-        except Exception as e:
-            print(f"[GATE-BYPASS] accept_technique: could not fetch '{technique_name}': {e}")
+        if technique:
+            print(f"[GATE-BYPASS] accept_technique: using gate-prefetched DB exercise '{technique.get('name')}'")
+        else:
+            try:
+                technique = await get_technique_by_name(technique_name)
+            except Exception as e:
+                print(f"[GATE-BYPASS] accept_technique: could not fetch '{technique_name}': {e}")
 
     llm = get_chat_llm()
+
     if technique:
         steps      = technique.get("steps") or []
-        steps_text = ("\n".join(f"  Step {i+1}: {s}" for i, s in enumerate(steps))
-                      if isinstance(steps, list) and steps else "")
+        duration = technique.get("duration_minutes", technique.get("durationMinutes", "N/A"))
         tech_block = (
             f"Name: {technique.get('name')}\n"
-            f"Duration: {technique.get('duration_minutes', 'N/A')} min\n"
+            f"Duration: {duration} min\n"
             f"Category: {technique.get('category', 'N/A')}\n"
-            f"Why it works: {technique.get('why_it_works', '')}\n"
-            + (f"Steps:\n{steps_text}" if steps_text else "")
+            f"Why it works: {technique.get('why_it_works', technique.get('whyItWorks', ''))}\n"
+            f"Step count available in DB/sidebar: {len(steps) if isinstance(steps, list) else 0}"
         )
         system_content = (
             f"You are SentiMind. The user just said YES to trying {technique.get('name')}.\n\n"
-            f"TECHNIQUE TO DELIVER:\n{tech_block}\n\n"
+            f"TECHNIQUE TO ACKNOWLEDGE:\n{tech_block}\n\n"
             "1. Respond warmly in 1 sentence (e.g. 'Great, let\u2019s do this together!')\n"
-            "2. Guide them step-by-step through the technique.\n"
+            "2. Name the technique and tell them the steps are ready in the exercise panel/sidebar.\n"
             "3. Do NOT suggest a different technique.\n"
-            "4. Be encouraging and present throughout."
+            "4. Do NOT list, paraphrase, or generate steps. The database/sidebar handles steps."
         )
     else:
         system_content = (
-            "You are SentiMind. The user agreed to try the technique you just offered.\n"
-            "Deliver it step-by-step based on what you offered in your previous message. "
-            "Be warm, clear, and encouraging. Do NOT suggest a different technique."
+            "You are SentiMind. The user may have agreed to try something, but no verified "
+            "database technique is available. Do NOT invent or deliver technique steps. "
+            "Briefly acknowledge and ask what they would like to explore."
         )
 
     msgs = [SysMsg(content=system_content)]
@@ -477,6 +627,16 @@ async def _rejection_response(
     return _wrap_bypass_result(reply, session_id, "gate:rejection_bypass", start_time)
 
 
+
+async def _background_extract_facts(user_id: str, message: str, session_id: str) -> None:
+    """Fire-and-forget wrapper for fact extraction on bypass routes."""
+    try:
+        from ..memory.explicit_facts import extract_and_save_facts
+        await extract_and_save_facts(user_id, message, session_id)
+    except Exception as e:
+        print(f"[MEMORY:FACTS] Background extraction failed (non-fatal): {str(e)[:80]}")
+
+
 async def _execute_gate_route(
     gate_result: dict,
     message: str,
@@ -496,33 +656,49 @@ async def _execute_gate_route(
 
     result: Optional[dict] = None
 
-    if route == "chitchat" and conf >= 0.70:
-        print(f"[GATE-ROUTE] Chitchat bypass ({conf:.0%})")
+    if route == "chitchat":
+        if _is_short_acceptance(message):
+            print("[GATE-ROUTE] Chitchat rejected: short agreement needs conversation-state handling")
+            return None
+        # Fire-and-forget fact extraction even on bypass — LLM decides if there's a fact
+        asyncio.create_task(_background_extract_facts(user_id, message, actual_session_id))
+        print(f"[GATE-ROUTE] Chitchat bypass — LLM decision trusted directly (conf={conf:.0%})")
         reply  = await _fast_casual_response(message, prev_messages)
         result = _wrap_bypass_result(reply, actual_session_id, "gate:chitchat_bypass", start_time)
 
     elif route == "memory_query":
-        print("[GATE-ROUTE] Memory query bypass")
+        asyncio.create_task(_background_extract_facts(user_id, message, actual_session_id))
+        print(f"[GATE-ROUTE] Memory query bypass — LLM trusted (conf={conf:.0%})")
         result = await _memory_query_response(
             message, user_id, actual_session_id, prev_messages, start_time
         )
 
     elif route == "list_techniques":
         category = metadata.get("technique_category")
-        print(f"[GATE-ROUTE] List techniques bypass | category={category}")
+        print(f"[GATE-ROUTE] List techniques bypass — LLM trusted (conf={conf:.0%}) | category={category}")
         result = await _list_techniques_response(
             category, user_id, actual_session_id, prev_messages, start_time
         )
 
     elif route == "accept_technique":
         accepted = metadata.get("accepted_technique")
+        accepted = await _resolve_accepted_technique_name(accepted, message, prev_messages)
+        if not accepted:
+            print("[GATE-ROUTE] Accept route rejected: no real DB technique was offered/named")
+            return None
         print(f"[GATE-ROUTE] Accept technique bypass | technique={accepted}")
         result = await _accept_technique_response(
-            accepted, user_id, actual_session_id, prev_messages, start_time
+            accepted,
+            user_id,
+            actual_session_id,
+            prev_messages,
+            start_time,
+            metadata.get("exercise_data"),
         )
 
     elif route == "rejection":
-        print("[GATE-ROUTE] Rejection bypass")
+        asyncio.create_task(_background_extract_facts(user_id, message, actual_session_id))
+        print(f"[GATE-ROUTE] Rejection bypass — LLM trusted (conf={conf:.0%})")
         result = await _rejection_response(
             message, actual_session_id, prev_messages, start_time
         )
@@ -543,7 +719,7 @@ async def screen_for_crisis(state: MentalHealthState) -> dict:
     LLM-BASED CRISIS PRE-SCREENER (v7.0 - NO KEYWORDS)
 
     Uses semantic LLM understanding instead of keyword matching.
-    OpenRouter claude-3.5-sonnet is the sole authoritative decision maker.
+    OpenRouter llama-3.3-70b-instruct is the sole authoritative decision maker.
     This ensures:
     - No false positives from metaphorical language
     - Nuanced understanding of intent
@@ -563,9 +739,9 @@ async def screen_for_crisis(state: MentalHealthState) -> dict:
     print(separator)
     print(f"[NODE:CRISIS_SCREENER] Running LLM-based crisis analysis (no keywords)...")
 
-    # ---- SINGLE LAYER: OpenRouter claude-3.5-sonnet (semantic understanding) ----
+    # ---- SINGLE LAYER: OpenRouter llama-3.3-70b-instruct (semantic understanding) ----
     original_message = messages[-1].content if messages else ""
-    print(f"[CRISIS_SCREENER] [BOT] Running OpenRouter claude-3.5-sonnet semantic analysis...")
+    print(f"[CRISIS_SCREENER] [BOT] Running OpenRouter llama-3.3-70b semantic analysis...")
     llm_result = await llm_crisis_check(original_message)
 
     if llm_result.get("crisis_detected", False):
@@ -653,7 +829,7 @@ def build_graph() -> StateGraph:
     SENTIMIND v6.0 LATENCY-OPTIMIZED ARCHITECTURE:
 
      Graph Nodes (5):
-      1. parallel_intake            4-way concurrent: crisis || intake || mood || intent
+      1. parallel_intake            4-way concurrent: crisis || context || mood || intent
       2. analysis_and_planning      FUSED: emotion_fusion + analysis + planner + activation
       3. response_pipeline          FUSED: technique_selector + role_selector
       4. response_generator         Single async Groq LLM call
@@ -683,7 +859,7 @@ def build_graph() -> StateGraph:
     # ADD EDGES (v6.0 optimized flow)
     # ========================================
 
-    # START -> run_parallel_intake (4-way: crisis + intake + mood + intent)
+    # START -> run_parallel_intake (4-way: crisis + context + mood + intent)
     graph.add_edge(START, "run_parallel_intake")
 
     # run_parallel_intake -> EITHER run_analysis_and_planning (normal) OR handle_crisis
@@ -752,8 +928,8 @@ def get_agent():
             _compiled_agent = graph.compile()
 
             print("[AGENT] [OK] Agent loaded successfully (NO CHECKPOINTER)")
-            print("[AGENT] [CHART] Architecture v6.0: ParallelIntake -> AnalysisAndPlanning[fused] -> ResponsePipeline[fused] -> Response -> Persist[bg]")
-            print("[AGENT] [BOLT] Pre-graph: crisis_shortcircuit + chitchat_shortcircuit")
+            print("[AGENT] [CHART] Architecture v6.0: ParallelIntake -> AnalysisAndPlanning[fused] -> ResponsePipeline[fused] -> OptimizedResponse -> Persist[bg]")
+            print("[AGENT] [BOLT] Pre-graph: smart_pipeline_gate + route bypasses")
             print("[AGENT]  Graph nodes: 5 (down from 10)")
             print("="*60 + "\n")
 
@@ -995,7 +1171,10 @@ async def _execute_smart_gate(message: str, user_id: str, session_id: Optional[s
           f"{len(session_context.get('facts', []))} facts")
 
     # ONE context-aware gate call  the LLM has FULL context for informed routing
-    return await smart_pipeline_gate(message, recent_context, user_context, session_context)
+    gate_result = await smart_pipeline_gate(message, recent_context, user_context, session_context)
+    gate_result["prefetched_user_context"] = user_context
+    gate_result["prefetched_session_context"] = session_context
+    return gate_result
 
 
 # ============================================
@@ -1025,24 +1204,35 @@ async def chat_with_agent(
     print("="*60)
 
     try:
+        ensure_user_task = asyncio.create_task(ensure_user_exists_cached(user_id))
+
         #  SMART PIPELINE GATE 
         # Context-aware routing. user facts + session summaries are fetched
         # CONCURRENTLY (asyncio.gather), then ONE gate LLM call is made with
         # the full context. Saves 200-400ms vs the old sequential DB calls.
+        stage_start = time.time()
         prev_messages = await _load_messages_with_db_fallback(session_id or "")
+        print(f"[LATENCY] message_history={_elapsed_s(stage_start):.3f}s")
+
+        stage_start = time.time()
         gate_result = await _execute_smart_gate(message, user_id, session_id, prev_messages)
+        print(f"[LATENCY] smart_gate={_elapsed_s(stage_start):.3f}s")
 
         # ── Setup session (needed for all paths) ─────────────────────────────
-        await ensure_user_exists_cached(user_id)
+        stage_start = time.time()
+        await ensure_user_task
         actual_session_id = session_id
         if not actual_session_id:
             new_session = await create_new_session(user_id)
             actual_session_id = new_session["id"]
+        print(f"[LATENCY] session_setup={_elapsed_s(stage_start):.3f}s")
 
         # ── Bypass dispatcher (chitchat / memory / list / accept / rejection) ─
+        stage_start = time.time()
         bypass_result = await _execute_gate_route(
             gate_result, message, user_id, actual_session_id, prev_messages, start_time
         )
+        print(f"[LATENCY] gate_route_dispatch={_elapsed_s(stage_start):.3f}s")
         if bypass_result is not None:
             proc_time = int((time.time() - start_time) * 1000)
             bypass_result["processing_time_ms"] = proc_time
@@ -1071,7 +1261,7 @@ async def chat_with_agent(
             "crisis":      "crisis_signal",
         }
         gate_prefetched_intent = {
-            "intent": _gate_to_intent_map.get(gate_route, "venting"),
+            "intent": _gate_route_to_intent(gate_route, gate_conf, message),
             "confidence": gate_conf,
             "source": "smart_gate",   # AUTHORITATIVE — planner skips duplicate LLM call
         }
@@ -1083,6 +1273,8 @@ async def chat_with_agent(
             "tools_used": [],
             "gate_route": gate_route,
             "prefetched_intent": gate_prefetched_intent,  #  skips duplicate LLM call
+            "prefetched_user_context": gate_result.get("prefetched_user_context", ""),
+            "prefetched_session_context": gate_result.get("prefetched_session_context", {}),
             "session_message_count": len(prev_messages_full) + 1,
         }
 
@@ -1097,7 +1289,9 @@ async def chat_with_agent(
 
         # Use ainvoke  returns the full merged final state directly.
         # No checkpoint serialization at node boundaries = massive speedup.
+        stage_start = time.time()
         result = await agent.ainvoke(input_state)
+        print(f"[LATENCY] graph_pipeline={_elapsed_s(stage_start):.3f}s")
 
         processing_time = int((time.time() - start_time) * 1000)
 
@@ -1190,24 +1384,32 @@ async def chat_with_agent_streaming(
     async def _graph_worker():
         try:
             #  SMART PIPELINE GATE (streaming path) 
+            stage_start = time.time()
             await ensure_user_exists_cached(user_id)
             actual_session_id = session_id
             if not actual_session_id:
                 new_session = await create_new_session(user_id)
                 actual_session_id = new_session["id"]
+            print(f"[LATENCY:STREAM] session_setup={_elapsed_s(stage_start):.3f}s")
 
             thread_id = actual_session_id
+            stage_start = time.time()
             prev_messages = await _load_messages_with_db_fallback(thread_id)
+            print(f"[LATENCY:STREAM] message_history={_elapsed_s(stage_start):.3f}s")
 
+            stage_start = time.time()
             gate_result = await _execute_smart_gate(message, user_id, actual_session_id, prev_messages)
+            print(f"[LATENCY:STREAM] smart_gate={_elapsed_s(stage_start):.3f}s")
 
             gate_route = gate_result.get("route", "therapeutic")
             gate_conf  = gate_result.get("confidence", 0.5)
 
             # ── Bypass dispatcher (all non-pipeline routes) ───────────────────
+            stage_start = time.time()
             bypass_result = await _execute_gate_route(
                 gate_result, message, user_id, actual_session_id, prev_messages, start_time
             )
+            print(f"[LATENCY:STREAM] gate_route_dispatch={_elapsed_s(stage_start):.3f}s")
             if bypass_result is not None:
                 proc_time = int((time.time() - start_time) * 1000)
                 bypass_result["processing_time_ms"] = proc_time
@@ -1230,7 +1432,7 @@ async def chat_with_agent_streaming(
                 "crisis":      "crisis_signal",
             }
             gate_prefetched_intent = {
-                "intent": _gate_to_intent_map.get(gate_route, "venting"),
+                "intent": _gate_route_to_intent(gate_route, gate_conf, message),
                 "confidence": gate_conf,
                 "source": "smart_gate",   # AUTHORITATIVE — planner skips duplicate LLM call
             }
@@ -1245,6 +1447,8 @@ async def chat_with_agent_streaming(
                 "tools_used": [],
                 "gate_route": gate_route,
                 "prefetched_intent": gate_prefetched_intent,
+                "prefetched_user_context": gate_result.get("prefetched_user_context", ""),
+                "prefetched_session_context": gate_result.get("prefetched_session_context", {}),
                 "session_message_count": len(prev_messages) + 1,
             }
             if audio_file_path:
@@ -1267,6 +1471,7 @@ async def chat_with_agent_streaming(
             got_tokens = False
 
             try:
+                graph_stream_start = time.time()
                 async for event in agent.astream_events(input_state, version="v2"):
                     kind = event["event"]
                     if kind == "on_chat_model_stream":
@@ -1276,15 +1481,23 @@ async def chat_with_agent_streaming(
                                 got_tokens = True
                                 await token_queue.put({"type": "token", "content": chunk.content})
                     elif kind == "on_chain_end":
-                        if getattr(agent, "name", "LangGraph") == event["name"]:
-                            final_state = event["data"].get("output")
+                        output = event.get("data", {}).get("output")
+                        if isinstance(output, dict) and (
+                            "final_response" in output
+                            or "messages" in output
+                            or "conversation_strategy" in output
+                        ):
+                            final_state = output
+                print(f"[LATENCY:STREAM] graph_pipeline_stream={_elapsed_s(graph_stream_start):.3f}s")
             except Exception as stream_err:
                 print(f"[CHAT-STREAM] [WARN] astream_events error: {stream_err}, falling back to ainvoke")
 
             # Fallback: if no final state captured, re-run with ainvoke
             if not final_state:
                 print("[CHAT-STREAM] [WARN] No final state from events  running ainvoke fallback")
+                stage_start = time.time()
                 final_state = await agent.ainvoke(input_state)
+                print(f"[LATENCY:STREAM] graph_pipeline_fallback={_elapsed_s(stage_start):.3f}s")
 
             # Fallback: if no streaming tokens received, simulate word-by-word streaming
             if not got_tokens:
@@ -1379,16 +1592,16 @@ def check_agent_health() -> dict:
             "agent_ready": agent is not None,
             "architecture": "sentimind_v6.0_latency_optimized",
             "nodes": [
-                "parallel_intake",          # 4-way: crisis || intake || mood || intent
+                "parallel_intake",          # 4-way: crisis || context || mood || intent
                 "analysis_and_planning",    # FUSED: emotion_fusion + analysis + planner + activation
                 "response_pipeline",        # FUSED: technique_selector + role_selector
                 "crisis_handler",
-                "response_generator",       # single async LLM call per message
+                "optimized_response_generator",
             ],
             "post_graph": ["parallel_persist (fire-and-forget)"],
-            "pre_graph": ["crisis_shortcircuit", "chitchat_shortcircuit"],
+            "pre_graph": ["smart_pipeline_gate", "route bypasses"],
             "parallel_tiers": 3,
-            "llm_calls_per_message": "1 (response_generator only, async ainvoke)",
+            "latency_profile": "smart gate + graph stages timed in logs",
             "checkpointer": "NONE (manual message store)",
             "version": "6.0.0",
         }

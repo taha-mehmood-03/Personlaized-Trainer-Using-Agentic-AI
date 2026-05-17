@@ -1,0 +1,39 @@
+TEST CASE: Case_7_Agitated_Anger
+============================================================
+INPUT MESSAGE: "I am so furiously angry at my boss I could scream. He completely humiliated me today and I can't stop shaking."
+BASE EMOTION:  ANGER (Intensity: 0.9)
+============================================================
+
+1. CLINICAL SEVERITY ANALYSIS (LLM)
+----------------------------------------
+Detected Severity:   MILD
+Estimated PHQ-9:     2 / 27
+Estimated GAD-7:     8 / 21
+Clinical Indicators: G1: Feeling nervous, anxious, or on edge, G4: Trouble relaxing, G5: Being so restless it's hard to sit still, G6: Becoming easily annoyed or irritable, Q8: Moving/speaking slowly OR being fidgety/restless
+Confidence Score:    80%
+
+LLM Reasoning:
+The patient's high intensity anger, shaking, and humiliation suggest anxiety and restlessness, scoring high on GAD-7 items, with some overlap with Q8 on PHQ-9.
+
+
+2. TECHNIQUE SELECTION (DATABASE GATING)
+----------------------------------------
+Filtering Rules Applied:
+- Matched Target Emotion: ANGER
+- Applied Clinical Bounds: minPhq9 <= 2 AND maxPhq9 >= 2
+- Safety Requirement: Must be marked SafeAtSeverity=MILD
+- Contraindication Filter: Excluded techniques matching flags ['G1: Feeling nervous, anxious, or on edge', 'G4: Trouble relaxing', "G5: Being so restless it's hard to sit still", 'G6: Becoming easily annoyed or irritable', 'Q8: Moving/speaking slowly OR being fidgety/restless']
+
+Recommended Exercises (Top 3):
+  > 4-7-8 Breathing (Category: Breathing)
+    Difficulty: EASY, Duration: 5m
+    Why: Extending the exhale activates the parasympathetic nervous system, lowering heart rate and blood pressure. The specific counts maximize oxygen-carbon dioxide exchange and focus the mind.
+
+  > Belly Breathing (Category: Breathing)
+    Difficulty: EASY, Duration: 8m
+    Why: Diaphragmatic breathing stimulates the vagus nerve, which activates the parasympathetic nervous system. This lowers heart rate, blood pressure, and stress hormones.
+
+  > Sitali Breath (Cooling Breath) (Category: Breathing)
+    Difficulty: EASY, Duration: 5m
+    Why: The evaporative cooling of air across the tongue sends cooling signals to the hypothalamus, lowering body temperature. Since anger involves physiological heating, cooling the body reduces the anger response.
+

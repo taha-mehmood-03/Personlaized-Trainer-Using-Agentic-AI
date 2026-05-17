@@ -8,7 +8,7 @@ Runs all 3 post-response write nodes concurrently via asyncio.gather:
 
 WHY THIS IS SAFE:
   All 3 nodes are WRITE-ONLY side-effect nodes that:
-  - Read from the SAME frozen state (set by response_generator)
+  - Read from the SAME frozen state (set by optimized_response_generator)
   - Write to DIFFERENT database tables
   - Write to DIFFERENT state keys
 

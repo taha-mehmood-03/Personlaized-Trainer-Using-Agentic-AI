@@ -1,0 +1,39 @@
+TEST CASE: Case_3_Moderate_Depression
+============================================================
+INPUT MESSAGE: "I've been feeling really down for the last two weeks. I just sit on the couch and stare at the wall. My appetite is completely gone."
+BASE EMOTION:  SADNESS (Intensity: 0.7)
+============================================================
+
+1. CLINICAL SEVERITY ANALYSIS (LLM)
+----------------------------------------
+Detected Severity:   MODERATE
+Estimated PHQ-9:     6 / 27
+Estimated GAD-7:     0 / 21
+Clinical Indicators: little interest or pleasure in doing things (anhedonia), feeling down, depressed, or hopeless (depressed_mood), poor appetite or overeating (appetite_change)
+Confidence Score:    70%
+
+LLM Reasoning:
+The patient reports feeling down for two weeks, having no interest in activities, and a complete loss of appetite, indicating moderate depressive symptoms.
+
+
+2. TECHNIQUE SELECTION (DATABASE GATING)
+----------------------------------------
+Filtering Rules Applied:
+- Matched Target Emotion: SADNESS
+- Applied Clinical Bounds: minPhq9 <= 6 AND maxPhq9 >= 6
+- Safety Requirement: Must be marked SafeAtSeverity=MODERATE
+- Contraindication Filter: Excluded techniques matching flags ['little interest or pleasure in doing things (anhedonia)', 'feeling down, depressed, or hopeless (depressed_mood)', 'poor appetite or overeating (appetite_change)']
+
+Recommended Exercises (Top 3):
+  > Alternate Nostril Breathing (Category: Breathing)
+    Difficulty: MODERATE, Duration: 8m
+    Why: Balances the autonomic nervous system, synchronizes brain hemispheres, and clears energetic channels. Particularly effective for racing thoughts.
+
+  > Breath Counting (Category: Breathing)
+    Difficulty: EASY, Duration: 10m
+    Why: Gives the mind a simple task, preventing rumination and worry. The gentle focus reduces default mode network activity.
+
+  > Wim Hof Breathing (Category: Breathing)
+    Difficulty: HARD, Duration: 15m
+    Why: Controlled hyperventilation raises blood pH (alkalosis), which triggers various physiological responses including adrenaline release, enhanced mitochondrial function, and temporary suppression of inflammatory cytokines.
+

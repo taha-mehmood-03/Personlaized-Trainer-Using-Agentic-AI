@@ -59,16 +59,28 @@ async def select_technique(state: MentalHealthState) -> dict:
         emotion   = state.get("fused_emotion", state.get("emotion", "neutral"))
         intensity = state.get("fused_intensity", state.get("intensity", 0.5))
         user_id   = state.get("user_id", "")
+        messages  = state.get("messages", [])
+        user_message = messages[-1].content if messages else ""
 
-        print(f"\n[TECHNIQUE]  emotion={emotion.upper()} intensity={intensity:.0%} strategy={strategy}")
+        # v9.0: Clinical severity inputs for DB gating
+        severity   = state.get("clinical_severity", "minimal")
+        phq9_score = state.get("clinical_phq9_score", 0)
+        indicators = state.get("clinical_indicators", [])
+
+        print(f"\n[TECHNIQUE]  emotion={emotion.upper()} intensity={intensity:.0%} strategy={strategy}"
+              f" | clinical: {severity.upper()} PHQ-9={phq9_score}")
 
         start_time = time.time()
 
-        #  Fetch top-3 (list) 
+        #  Fetch top-3 (list) — now with clinical severity gating 
         top3: list = await recommend_technique.ainvoke({
             "emotion":   emotion,
             "intensity": intensity,
             "user_id":   user_id,
+            "phq9_score": phq9_score,              # v9.0: clinical PHQ-9 score
+            "severity": severity,                   # v9.0: clinical severity level
+            "clinical_indicators": indicators,      # v9.0: contraindication filter
+            "query": user_message,                  # v9.2: semantic rerank against user's wording
         })
 
         elapsed_ms = int((time.time() - start_time) * 1000)

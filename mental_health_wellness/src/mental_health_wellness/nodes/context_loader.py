@@ -1,15 +1,15 @@
 """
-Intake Node - Loads user context, chat history, and semantic memories
+Context Loader - Loads user context, preferences, and semantic memories
 
-ARCHITECTURE NODE 2:
-Purpose: Prepare full context for agentic pipeline
-Runs AFTER voice pre-processing (if applicable)
+This module is used by the parallel intake node. It is not a standalone graph
+node anymore; `parallel_intake.run_parallel_intake` calls `load_user_context`
+concurrently with crisis screening, mood analysis, and intent prefetching.
 
 RESPONSIBILITIES:
 1. Load Session History (chat messages from current session)
 2. Load User Stats & Preferences (from database) - CACHED for speed
 3. Retrieve Semantic Memories (from ChromaDB vector store)
-4. Build Context ready for agentic analysis
+4. Build context ready for the fused analysis/planning pipeline
 
 Input:
   - user_id: User's unique identifier
@@ -30,6 +30,7 @@ Output:
 from ..agent.state import MentalHealthState
 from ..tools import get_user_history
 import time
+import asyncio
 
 # Simple in-memory cache for user data (5 min TTL)
 _user_data_cache = {}
@@ -55,13 +56,13 @@ def _set_cached_user_data(user_id: str, data: dict):
 
 async def load_user_context(state: MentalHealthState) -> dict:
     """
-    INTAKE NODE - Build comprehensive context before agent analysis.
+    Build comprehensive context before agent analysis.
     
     STEP-BY-STEP PROCESS:
     1. Load session history (current conversation messages)
     2. Load user stats & preferences (who they are, how they prefer responses)
     3. Retrieve semantic memories (relevant past conversations)
-    4. Build full context object for agentic pipeline
+    4. Build full context object for the fused analysis/planning pipeline
     
     Input State:
         - user_id: User's unique identifier
@@ -83,20 +84,30 @@ async def load_user_context(state: MentalHealthState) -> dict:
     messages = state.get("messages", [])
     current_message = messages[-1].content if messages else ""
     voice_features = state.get("voice_features", {})
+    prefetched_user_context = state.get("prefetched_user_context", "") or ""
+    prefetched_session_context = state.get("prefetched_session_context", {}) or {}
     intake_errors = []
     
-    print(f"\n[NODE: INTAKE]  Loading context for user: {user_id}, session: {session_id}")
+    print(f"\n[CONTEXT_LOADER]  Loading context for user: {user_id}, session: {session_id}")
     
     if not user_id:
         error_msg = "user_id is required in state"
-        print(f"[NODE: INTAKE]  FATAL: {error_msg}")
+        print(f"[CONTEXT_LOADER]  FATAL: {error_msg}")
         raise ValueError(error_msg)
     
+    memory_task = asyncio.create_task(_retrieve_semantic_memories(
+        user_id,
+        current_message,
+        session_id,
+        prefetched_user_context=prefetched_user_context,
+        prefetched_session_context=prefetched_session_context,
+    ))
+
     # ============================================
     # STEP 1: LOAD USER STATS & PREFERENCES (CACHED)
     # ============================================
     
-    print("[NODE: INTAKE]  Step 1: Loading user stats & preferences")
+    print("[CONTEXT_LOADER]  Step 1: Loading user stats & preferences")
     
     # Check cache first (OPTIMIZATION)
     cached_data = _get_cached_user_data(user_id)
@@ -106,26 +117,29 @@ async def load_user_context(state: MentalHealthState) -> dict:
         sessions = cached_data.get("total_sessions", 0)
         emotion = cached_data.get("most_common_emotion", "neutral")
         user_prefs = cached_data.get("preferences", {})
-        print(f"[NODE: INTAKE]  Using CACHED user data (fresh)")
+        print(f"[CONTEXT_LOADER]  Using CACHED user data (fresh)")
     else:
+        history_task = asyncio.create_task(get_user_history.ainvoke({"user_id": user_id}))
+        preferences_task = asyncio.create_task(_load_user_preferences(user_id))
+
         try:
-            history = await get_user_history.ainvoke({"user_id": user_id})
+            history = await history_task
             is_new = history.get("is_new_user", True)
             sessions = history.get("total_sessions", 0)
             emotion = history.get("most_common_emotion", "neutral")
-            print(f"[NODE: INTAKE]  User stats: new={is_new}, sessions={sessions}, mood={emotion}")
+            print(f"[CONTEXT_LOADER]  User stats: new={is_new}, sessions={sessions}, mood={emotion}")
         except Exception as e:
-            print(f"[NODE: INTAKE]  Error loading user stats: {str(e)[:80]}")
+            print(f"[CONTEXT_LOADER]  Error loading user stats: {str(e)[:80]}")
             intake_errors.append(f"Failed to load user stats: {str(e)}")
             is_new = True
             sessions = 0
             emotion = "neutral"
         
         try:
-            user_prefs = await _load_user_preferences(user_id)
-            print(f"[NODE: INTAKE]  Preferences loaded: {list(user_prefs.keys()) if user_prefs else 'none'}")
+            user_prefs = await preferences_task
+            print(f"[CONTEXT_LOADER]  Preferences loaded: {list(user_prefs.keys()) if user_prefs else 'none'}")
         except Exception as e:
-            print(f"[NODE: INTAKE]  Error loading preferences: {str(e)[:80]}")
+            print(f"[CONTEXT_LOADER]  Error loading preferences: {str(e)[:80]}")
             intake_errors.append(f"Failed to load preferences: {str(e)}")
             user_prefs = {}
         
@@ -138,49 +152,54 @@ async def load_user_context(state: MentalHealthState) -> dict:
         })
     
     # ============================================
-    # STEP 2: MEMORY ARCHITECTURE (Two-Layer)
+    # STEP 2: MEMORY ARCHITECTURE
     # ============================================
     # Layer 1 (Within-session): LangGraph `state["messages"]` accumulates all turns
     #   via the add_messages reducer  the response generator reads these directly.
     #   No DB query needed, no token bloat risk.
     # Layer 2 (Cross-session): ChromaDB semantic memory (fetched in STEP 3 below)
-    #   provides relevant summaries from past sessions.
+    #   provides relevant raw user-turn recall from past sessions.
+    # Prisma/Supabase Postgres remains the source of truth for stored messages,
+    # summaries, facts, and analytics; raw DB messages are not injected here.
     chat_history = []  # Not used  see response generator for two-layer memory implementation
-    print(f"[NODE:INTAKE]  Step 2: Memory handled via LangGraph state + ChromaDB (no DB history load)")
+    print(f"[CONTEXT_LOADER]  Step 2: Memory handled via LangGraph state + ChromaDB semantic recall (no raw DB history load)")
     
     # ============================================
     # STEP 3: RETRIEVE SEMANTIC MEMORIES
     # ============================================
     
-    print("[NODE:INTAKE]  Step 3: Retrieving memory context (3-layer ChatGPT-style memory)")
-    memory_context = await _retrieve_semantic_memories(user_id, current_message, session_id)
+    print("[CONTEXT_LOADER]  Step 3: Retrieving deduplicated memory context")
+    try:
+        memory_context = await memory_task
+    except Exception as e:
+        print(f"[CONTEXT_LOADER]  Memory task failed (non-fatal): {str(e)[:120]}")
+        memory_context = ""
 
     # Background task: extract facts from user message (non-blocking)
     if current_message and user_id:
-        import asyncio
         from ..memory.explicit_facts import extract_and_save_facts
         asyncio.create_task(extract_and_save_facts(
             user_id=user_id,
             message=current_message,
             session_id=session_id
         ))
-        print(f"[NODE:INTAKE]  Fact extraction scheduled (background)")
+        print(f"[CONTEXT_LOADER]  Fact extraction scheduled (background)")
 
-    print(f"[NODE:INTAKE]  Retrieved {len(memory_context)} chars of memory context")
+    print(f"[CONTEXT_LOADER]  Retrieved {len(memory_context)} chars of memory context")
     
     # ============================================
     # STEP 4: BUILD FULL CONTEXT
     # ============================================
     
-    print("[NODE: INTAKE]  Step 4: Building full context object")
+    print("[CONTEXT_LOADER]  Step 4: Building full context object")
     
     # Context ready flag
     context_ready = True
     
-    print(f"[NODE: INTAKE]  Context ready: {context_ready}")
-    print(f"[NODE: INTAKE]  Preferences: {user_prefs}")
+    print(f"[CONTEXT_LOADER]  Context ready: {context_ready}")
+    print(f"[CONTEXT_LOADER]  Preferences: {user_prefs}")
     if voice_features:
-        print(f"[NODE: INTAKE]  Voice features included: emotion={voice_features.get('emotion')}")
+        print(f"[CONTEXT_LOADER]  Voice features included: emotion={voice_features.get('emotion')}")
     
     # CRITICAL: Pass through messages from state to avoid state corruption in LangGraph
     # LangGraph uses add_messages reducer, so we need to maintain this field
@@ -190,7 +209,7 @@ async def load_user_context(state: MentalHealthState) -> dict:
     # It must NEVER be used as the current-session emotion signal.
     # Stored separately as `historical_mood` so downstream nodes don't confuse it
     # with the current detected emotion. OUTCOME_TRACKER must use session_start_emotion instead.
-    print(f"[NODE: INTAKE]  Historical mood (cross-session): {emotion}  stored as 'historical_mood' (metadata only)")
+    print(f"[CONTEXT_LOADER]  Historical mood (cross-session): {emotion}  stored as 'historical_mood' (metadata only)")
     return {
         "is_new_user": is_new,
         "session_count": sessions,
@@ -212,66 +231,48 @@ async def load_user_context(state: MentalHealthState) -> dict:
     }
 
 
-async def _retrieve_semantic_memories(user_id: str, current_message: str, session_id: str = "") -> str:
+async def _retrieve_semantic_memories(
+    user_id: str,
+    current_message: str,
+    session_id: str = "",
+    prefetched_user_context: str = "",
+    prefetched_session_context: dict | None = None,
+) -> str:
     """
-    Retrieve memory context using the new 3-layer ChatGPT-style memory system.
+    Retrieve deduplicated prompt memory context.
     Falls back to empty string if memory builder fails.
 
-    Layer 1: Explicit facts (Prisma UserFact)
-    Layer 2: Session summaries (Prisma SessionSummary)
-    Layer 3: Sliding window (current session, in-memory)
+    ChromaDB provides specific semantic recall.
+    Prisma/Supabase Postgres provides facts and broad session summaries.
+    Raw Prisma message history is deliberately not injected here to avoid
+    duplicate context with Chroma semantic memories.
     """
     try:
-        from ..memory.memory_builder import build_full_memory_context
-        # Pass empty list for window  the window is managed inside the pipeline via state["messages"]
-        # Only facts + summaries are needed at intake time
-        memory_context = await build_full_memory_context(
-            user_id=user_id,
-            current_messages=[],   # Window handled by response generator via state
-            include_window=False
-        )
-        return memory_context
-    except Exception as e:
-        print(f"[NODE:INTAKE]  Memory builder failed (non-fatal): {str(e)[:120]}")
+        sections = []
+        if prefetched_user_context and prefetched_user_context.strip():
+            sections.append(prefetched_user_context.strip())
+        if prefetched_session_context and prefetched_session_context.get("formatted_context"):
+            sections.append(prefetched_session_context["formatted_context"].strip())
+
+        from ..memory import get_memory_context_for_prompt
+        semantic_context = ""
+        if current_message and current_message.strip():
+            semantic_context = await get_memory_context_for_prompt(
+                user_id,
+                current_message,
+                max_memories=3,
+                exclude_session_id=session_id or None,
+            )
+        if semantic_context and semantic_context.strip():
+            sections.insert(0, semantic_context.strip())
+
+        if sections:
+            return "\n\n".join(sections) + "\n\nUse above as context. Do not repeat verbatim. Only reference if directly relevant."
+
         return ""
-
-
-async def _load_session_chat_history(session_id: str, limit: int = 10) -> list[dict]:
-    """
-    Load chat messages from the CURRENT session only.
-    
-    Args:
-        session_id: Current session's unique identifier
-        limit: Maximum number of message pairs to load
-        
-    Returns:
-        List of message dictionaries with role and content
-    """
-    if not session_id:
-        return []
-    
-    from ..db.client import get_prisma_client
-    prisma = await get_prisma_client()
-    
-    # Get messages ONLY from the current session
-    messages = await prisma.message.find_many(
-        where={"sessionId": session_id},
-        order={"createdAt": "asc"},
-        take=limit * 2  # Limit to last N message pairs
-    )
-    
-    if not messages:
-        return []
-    
-    # Convert to chat history format
-    chat_history = []
-    for msg in messages:
-        chat_history.append({
-            "role": msg.role.lower(),  # "user" or "assistant"
-            "content": msg.content
-        })
-    
-    return chat_history
+    except Exception as e:
+        print(f"[CONTEXT_LOADER]  Memory builder failed (non-fatal): {str(e)[:120]}")
+        return ""
 
 
 async def _load_user_preferences(user_id: str) -> dict:
@@ -305,5 +306,5 @@ async def _load_user_preferences(user_id: str) -> dict:
             "preferredCategories": pref.preferredCategories or [],
         }
     except Exception as e:
-        print(f"[NODE: INTAKE]  Failed to load preferences: {e}")
+        print(f"[CONTEXT_LOADER]  Failed to load preferences: {e}")
         return {}

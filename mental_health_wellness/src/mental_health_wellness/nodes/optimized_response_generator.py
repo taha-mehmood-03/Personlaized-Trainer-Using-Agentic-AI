@@ -72,6 +72,12 @@ async def generate_response(state: MentalHealthState) -> dict:
         proactive_alert = state.get("proactive_alert")
         psych_profile = state.get("psych_profile", {})
 
+        # v9.0: Clinical severity context
+        clinical_severity = state.get("clinical_severity", "minimal")
+        clinical_phq9 = state.get("clinical_phq9_score", 0)
+        clinical_gad7 = state.get("clinical_gad7_score", 0)
+        clinical_indicators = state.get("clinical_indicators", [])
+
         # NEW: voice acoustic context
         voice_features  = state.get("voice_features") or {}
         voice_processed = state.get("voice_processed", False)
@@ -79,7 +85,7 @@ async def generate_response(state: MentalHealthState) -> dict:
         user_message = messages[-1].content if messages else ""
         # Within-session: last 6 message turns from LangGraph state (no DB needed)
         recent_history = messages[:-1][-6:] if len(messages) > 1 else []
-        # Cross-session: semantic memory from ChromaDB (fetched by intake_node)
+        # Cross-session: semantic memory from ChromaDB (fetched by context_loader)
         memory_context = state.get("memory_context", "")
 
         #  Technique rejection detection 
@@ -142,7 +148,30 @@ async def generate_response(state: MentalHealthState) -> dict:
                     )
                     if match:
                         accepted_technique_name = match.group(1).strip()
-                    print(f"[NODE:RESPONSE]  TECHNIQUE ACCEPTANCE DETECTED  user agreed to: {accepted_technique_name or 'the offered technique'}")
+                    # A generic "yes" is only a technique acceptance if we can
+                    # validate a real DB technique from the previous assistant turn.
+                    validated_name = None
+                    candidates = []
+                    if accepted_technique_name:
+                        candidates.append(accepted_technique_name)
+                    candidates.extend(re.findall(r"\*\*([^*]{2,80})\*\*", prev_ai_content))
+                    for candidate in candidates:
+                        try:
+                            from ..tools.technique_tools import get_technique_by_name
+                            found = await get_technique_by_name(candidate.strip())
+                            if found and found.get("name"):
+                                validated_name = found["name"]
+                                break
+                        except Exception as e:
+                            print(f"[NODE:RESPONSE]  Technique acceptance validation failed: {e}")
+
+                    if validated_name:
+                        accepted_technique_name = validated_name
+                        print(f"[NODE:RESPONSE]  TECHNIQUE ACCEPTANCE DETECTED  user agreed to: {accepted_technique_name}")
+                    else:
+                        user_accepted_technique = False
+                        accepted_technique_name = None
+                        print("[NODE:RESPONSE]  Ignoring generic acceptance: no verified DB technique was offered")
 
         print(f"[NODE:RESPONSE]  Generating | Role: {agent_role} | Emotion: {emotion} ({intensity:.0%}) | Strategy: {conversation_strategy}")
         if user_rejected_technique:
@@ -214,6 +243,7 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
             trend=emotional_trend,
             phase=conversation_phase,
             distortion_type=distortion_type,
+            clinical_severity=clinical_severity,
         )
 
         #  Rejection override: inject strong instruction into system prompt 
@@ -238,11 +268,12 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
                 f"The user has agreed to try {_tech_label}. They said: \"{user_message}\".\n"
                 f"You MUST:\n"
                 f"  1. Respond warmly to their acceptance (1 sentence)  e.g. 'Great, let's do this together!'\n"
-                f"  2. Immediately begin guiding them through {_tech_label} step-by-step.\n"
+                f"  2. Name {_tech_label} and tell them the steps are ready in the exercise panel/sidebar.\n"
                 f"  3. Do NOT suggest a completely different technique.\n"
-                f"  4. Do NOT repeat the offer  they already said yes. Start the exercise.\n"
+                f"  4. Do NOT repeat the offer  they already said yes.\n"
                 f"  5. Ignore the freshly-detected emotion below if it contradicts this context  \n"
                 f"     the user's intent is clear from their 'yes'. Follow through.\n"
+                f"  6. Do NOT list, paraphrase, or invent technique steps. Steps come from the database/sidebar.\n"
                 f"NEVER start a fresh technique suggestion when the user has already agreed to one."
             )
             system_prompt += acceptance_instruction
@@ -302,6 +333,10 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
             voice_features=voice_features,
             voice_processed=voice_processed,
             text_emotion_raw=state.get("emotion", "neutral"),
+            clinical_severity=clinical_severity,
+            clinical_phq9=clinical_phq9,
+            clinical_gad7=clinical_gad7,
+            clinical_indicators=clinical_indicators,
         )
 
         # ============================================
@@ -364,6 +399,7 @@ def _build_optimized_system_prompt(
     trend: str = "stable",
     phase: str = "venting",
     distortion_type: str | None = None,
+    clinical_severity: str = "minimal",
 ) -> str:
     """
     Build the SentiMind system prompt  comprehensive, scenario-aware, edge-case hardened.
@@ -390,7 +426,7 @@ Tone: Deeply human, slow, warm, unhurried, unconditionally present. Like a trust
     role_instructions = {
         "friend":        "You are a warm, non-clinical friend. ONLY listen and validate. Never push exercises unless explicitly asked.",
         "coach":         "You are a supportive coach. Validate first, then guide gently. Introduce a technique only if the strategy says so.",
-        "trainer":       "You are a confident trainer. Validate strongly, then present the technique with energy and guide them through it step by step.",
+        "trainer":       "You are a confident trainer. Validate strongly, then present the technique with energy. Do not generate steps; the database/sidebar provides them.",
         "crisis_support":"You are in crisis support mode. Compassionate human connection is your ONLY goal. No techniques. No resources.",
     }
     role_desc = role_instructions.get(agent_role, role_instructions["coach"])
@@ -499,7 +535,7 @@ ABSOLUTE RULES  NEVER VIOLATE THESE:
 12.  Use the user's name if you know it (from memory context). It makes the conversation feel personal.
 """
 
-    return f"""You are SentiMind, a compassionate AI mental health companion. You are warm, non-judgmental, and clinically aware.
+    base_prompt = f"""You are SentiMind, a compassionate AI mental health companion. You are warm, non-judgmental, and clinically aware.
 
 
 ROLE: {agent_role.upper()}
@@ -531,7 +567,39 @@ If there are no memories, respond to what the user is sharing right now.
 
 {hard_rules}"""
 
+    # v9.0: CLINICAL SEVERITY GUIDANCE — append after base prompt
+    if clinical_severity and clinical_severity != "minimal":
+        _clinical_map = {
+            "mild": "\nCLINICAL NOTE: User shows MILD clinical indicators. Continue supportive care. Monitor for escalation.",
+            "moderate": "\nCLINICAL NOTE: User shows MODERATE clinical indicators. Prioritize structured techniques. Gently mention professional support is available.",
+            "moderately_severe": "\nCLINICAL NOTE: User shows MODERATELY SEVERE clinical indicators. Strongly recommend professional support alongside any technique. Be extra present and validating.",
+            "severe": "\n⚠️ CLINICAL NOTE: User shows SEVERE clinical indicators. Deep validation is priority. Encourage professional help warmly. Do NOT dismiss their experience. If suicidal ideation is flagged, follow crisis protocol.",
+        }
+        base_prompt += _clinical_map.get(clinical_severity, "")
 
+    return base_prompt
+
+
+
+def _build_clinical_context_block(
+    severity: str = "minimal",
+    phq9: int = 0,
+    gad7: int = 0,
+    indicators: list = None,
+) -> str:
+    """Build a structured clinical severity context block for the LLM."""
+    indicators = indicators or []
+    if severity == "minimal" and phq9 == 0 and gad7 == 0:
+        return ""  # No clinical info to inject
+
+    indicator_str = ", ".join(indicators) if indicators else "none"
+    severity_label = severity.upper().replace("_", " ")
+
+    return f"""CLINICAL SEVERITY ASSESSMENT (PHQ-9/GAD-7):
+- Estimated Severity: {severity_label}
+- PHQ-9 Score: {phq9}/27  |  GAD-7 Score: {gad7}/21
+- Active Indicators: {indicator_str}
+NOTE: Adapt response depth and urgency based on severity level."""
 
 
 def _build_structured_context(
@@ -554,6 +622,10 @@ def _build_structured_context(
     voice_features: dict | None = None,
     voice_processed: bool = False,
     text_emotion_raw: str = "neutral",
+    clinical_severity: str = "minimal",
+    clinical_phq9: int = 0,
+    clinical_gad7: int = 0,
+    clinical_indicators: list = None,
 ) -> str:
     """
     Build structured context for LLM prompt.
@@ -696,6 +768,9 @@ EMOTION ANALYSIS:
 - Conversation Phase: {phase.upper()}
 {distortion_info}
 {profile_info}
+
+{_build_clinical_context_block(clinical_severity, clinical_phq9, clinical_gad7, clinical_indicators or [])}
+
 USER CONTEXT:
 - New User: {is_new_user}
 - Agent Role for This Response: {agent_role.upper()}

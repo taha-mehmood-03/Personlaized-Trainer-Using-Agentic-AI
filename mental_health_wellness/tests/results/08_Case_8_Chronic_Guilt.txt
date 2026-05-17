@@ -1,0 +1,39 @@
+TEST CASE: Case_8_Chronic_Guilt
+============================================================
+INPUT MESSAGE: "I'm a terrible person. I always let everyone down. I've felt this worthless since I was a teenager."
+BASE EMOTION:  SADNESS (Intensity: 0.8)
+============================================================
+
+1. CLINICAL SEVERITY ANALYSIS (LLM)
+----------------------------------------
+Detected Severity:   MODERATE
+Estimated PHQ-9:     5 / 27
+Estimated GAD-7:     0 / 21
+Clinical Indicators: Feeling down, depressed, or hopeless, Feeling bad about yourself — failure, let family down
+Confidence Score:    80%
+
+LLM Reasoning:
+The patient expresses feelings of worthlessness and being a terrible person, indicating depressed mood and self-worth issues, which are key indicators of moderate depression.
+
+
+2. TECHNIQUE SELECTION (DATABASE GATING)
+----------------------------------------
+Filtering Rules Applied:
+- Matched Target Emotion: SADNESS
+- Applied Clinical Bounds: minPhq9 <= 5 AND maxPhq9 >= 5
+- Safety Requirement: Must be marked SafeAtSeverity=MODERATE
+- Contraindication Filter: Excluded techniques matching flags ['Feeling down, depressed, or hopeless', 'Feeling bad about yourself — failure, let family down']
+
+Recommended Exercises (Top 3):
+  > Alternate Nostril Breathing (Category: Breathing)
+    Difficulty: MODERATE, Duration: 8m
+    Why: Balances the autonomic nervous system, synchronizes brain hemispheres, and clears energetic channels. Particularly effective for racing thoughts.
+
+  > Breath Counting (Category: Breathing)
+    Difficulty: EASY, Duration: 10m
+    Why: Gives the mind a simple task, preventing rumination and worry. The gentle focus reduces default mode network activity.
+
+  > Wim Hof Breathing (Category: Breathing)
+    Difficulty: HARD, Duration: 15m
+    Why: Controlled hyperventilation raises blood pH (alkalosis), which triggers various physiological responses including adrenaline release, enhanced mitochondrial function, and temporary suppression of inflammatory cytokines.
+
