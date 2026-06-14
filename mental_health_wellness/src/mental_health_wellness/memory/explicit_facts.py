@@ -2,7 +2,7 @@
 Layer 1: Explicit Facts Memory
 ChatGPT-style explicit fact extraction and retrieval.
 
-Extracts structured facts from user messages using Groq LLM and persists them
+Extracts structured facts from user messages using Gemini LLM and persists them
 to the Prisma UserFact table. Max 33 facts per user (like ChatGPT's memory limit).
 Supports CORRECTIONS: if user says "im not X im Y", the wrong fact is deleted
 and replaced with the corrected one automatically.
@@ -10,11 +10,16 @@ and replaced with the corrected one automatically.
 
 import json
 import asyncio
+import os
 from typing import Optional
+from datetime import datetime, timezone, timedelta
 
 MAX_FACTS = 33
 FACT_CATEGORIES = {"identity", "preference", "goal", "clinical", "context"}
 
+
+def _retention_until(days: int = 365):
+    return datetime.now(timezone.utc) + timedelta(days=days)
 
 
 async def extract_and_save_facts(
@@ -34,14 +39,19 @@ async def extract_and_save_facts(
     if not message or not message.strip() or len(message.strip()) < 3:
         return
 
+    background_enabled = (
+        os.getenv("SENTIMIND_BACKGROUND_LLM_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
+        or os.getenv("SENTIMIND_BACKGROUND_FACT_EXTRACTION", "0").lower() in {"1", "true", "yes", "on"}
+    )
+    if not background_enabled:
+        print("[MEMORY:FACTS] Extraction skipped (background LLM disabled)")
+        return
+
     try:
         from ..db.client import get_prisma_client
-        from ..llm.groq_llm import get_llm_manager
+        from ..llm.groq_llm import get_llm_manager, message_content_to_text
 
         manager = get_llm_manager()
-        # Use the standard LLM manager which defaults to the best available model
-        # (Gemini or OpenRouter Llama 3.3 70b fallback)
-        llm = manager.get_llm()
 
         prompt = (
             "You are a memory extraction system for a mental health chatbot.\n"
@@ -67,9 +77,18 @@ async def extract_and_save_facts(
 
         from langchain_core.messages import HumanMessage
         # FIXED: was llm.invoke() (sync, blocks event loop) → now await ainvoke()
-        response = await llm.ainvoke([HumanMessage(content=prompt)])
-        raw = response.content.strip()
-
+        if hasattr(manager, "ainvoke_gemini_with_rotation"):
+            response = await manager.ainvoke_gemini_with_rotation(
+                [HumanMessage(content=prompt)],
+                model=getattr(manager, "model_mood", None),
+                max_tokens=512,
+                temperature=0.0,
+            )
+        else:
+            llm = manager.get_llm(model=getattr(manager, "model_mood", None))
+            response = await llm.ainvoke([HumanMessage(content=prompt)])
+        raw = message_content_to_text(response.content if hasattr(response, "content") else response).strip()
+        
         try:
             if "```" in raw:
                 raw = raw.split("```")[1]
@@ -85,7 +104,6 @@ async def extract_and_save_facts(
             return
 
         prisma = await get_prisma_client()
-
         current_count = await prisma.userfact.count(where={"userId": user_id})
 
         existing = await prisma.userfact.find_many(where={"userId": user_id})
@@ -127,15 +145,30 @@ async def extract_and_save_facts(
             if current_count + saved >= MAX_FACTS:
                 break
 
-            await prisma.userfact.create(data={
+            created_fact = await prisma.userfact.create(data={
                 "userId": user_id,
                 "fact": fact_text,
                 "category": category,
+                "sensitivity": "PHI" if category == "clinical" else "SENSITIVE",
+                "legalBasis": "HEALTH_CARE" if category == "clinical" else "CONSENT",
+                "retentionUntil": _retention_until(2555 if category == "clinical" else 365),
             })
+            try:
+                from . import store_fact_embedding
+
+                asyncio.create_task(store_fact_embedding(user_id, created_fact.id, fact_text, category))
+            except Exception:
+                pass
             existing_map[fact_text.lower()] = "new"
             saved += 1
 
         if saved > 0 or deleted > 0:
+            try:
+                from ..services.cache_state import invalidate_user_cache
+
+                invalidate_user_cache(user_id)
+            except Exception as cache_err:
+                print(f"[MEMORY:FACTS] Cache invalidation skipped: {str(cache_err)[:100]}")
             print(f"[MEMORY:FACTS] Facts updated for {user_id[:12]}... | Saved: {saved} | Corrected: {deleted}")
 
     except Exception as e:

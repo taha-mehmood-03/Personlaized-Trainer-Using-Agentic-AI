@@ -10,14 +10,14 @@ Architecture v7.0 nodes (SentiMind v7 - Pure LLM-First):
   6.  parallel_persist               - Background profile/session/outcome persistence
 
 Helper modules:
-  - context_loader                   - Loads user preferences and semantic memory for parallel_intake
+  - context_loader                   - Loads user preferences and compact memory context for parallel_intake
 
 v7.0 CHANGES (Complete LLM Integration):
-  - All ML models replaced with LLM (except voice feature extraction)
-  - DistilBERT  LLM emotion classification
+  - All ML models replaced with LLM-backed analysis
+  - Gemini mood model handles emotion classification
   - Keyword patterns  LLM semantic understanding
   - Cognitive distortions: LLM-only analysis (replaced keyword patterns)
-  - Voice features (wav2vec2, MFCC) retained for audio analysis only
+  - Voice emotion and sub-emotion analysis uses Gemini audio
 """
 
 from .context_loader import load_user_context
@@ -27,7 +27,7 @@ from .session_saver import save_session
 from .mood_analyzer_node import analyze_mood
 from .technique_selector_node import select_technique
 from .optimized_response_generator import generate_response
-from .voice_preprocessing import preprocess_voice_input
+from .voice_preprocessing import extract_voice_features_for_therapeutic_path, preprocess_voice_input
 
 # Intelligence nodes (v4.0)
 from .emotion_fusion_node import fuse_emotions
@@ -60,6 +60,7 @@ __all__ = [
     "update_psych_profile",
     "save_session",
     "track_outcome",
+    "extract_voice_features_for_therapeutic_path",
     "preprocess_voice_input",
     "check_and_notify",
     # v6.0 fused nodes

@@ -6,6 +6,19 @@ Categories: Breathing, Mindfulness, CBT, DBT, Journaling, Behavioral Activation
 import asyncio
 from prisma import Prisma
 from datetime import datetime
+import sys
+from pathlib import Path
+
+
+SRC_DIR = Path(__file__).resolve().parents[1] / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from mental_health_wellness.techniques.emotion_metadata import (  # noqa: E402
+    annotate_technique_dict,
+    prisma_metadata_fields,
+    target_emotions_for_technique,
+)
 
 
 # ============================================
@@ -1134,6 +1147,13 @@ async def seed_techniques():
     existing_count = 0
     
     for tech_data in all_techniques:
+        category_name = next(
+            (cat_name for cat_name, cat_db_id in categories.items() if cat_db_id == tech_data["categoryId"]),
+            "",
+        )
+        annotate_technique_dict(tech_data, category_name)
+        metadata_fields = prisma_metadata_fields(tech_data, category_name)
+
         # Check if exists first
         existing = await prisma.technique.find_first(
             where={"name": tech_data["name"]}
@@ -1141,6 +1161,13 @@ async def seed_techniques():
         
         if existing:
             existing_count += 1
+            await prisma.technique.update(
+                where={"id": existing.id},
+                data={
+                    "targetEmotions": normalize_target_emotions(target_emotions_for_technique(tech_data, category_name)),
+                    **metadata_fields,
+                },
+            )
             print(f"  [✓] Exists: {tech_data['name']}")
         else:
             # Prepare data for Prisma
@@ -1152,10 +1179,11 @@ async def seed_techniques():
                 "steps": tech_data["steps"],
                 "durationMinutes": tech_data["duration_minutes"],
                 "difficulty": tech_data["difficulty"],
-                "targetEmotions": normalize_target_emotions(tech_data["target_emotions"]),
+                "targetEmotions": normalize_target_emotions(target_emotions_for_technique(tech_data, category_name)),
                 "whyItWorks": tech_data["why_it_works"],
                 "effectiveness": tech_data["effectiveness"],
-                "isActive": True
+                "isActive": True,
+                **metadata_fields,
             }
             
             await prisma.technique.create(data=create_data)

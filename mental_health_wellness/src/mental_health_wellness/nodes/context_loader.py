@@ -1,5 +1,5 @@
 """
-Context Loader - Loads user context, preferences, and semantic memories
+Context Loader - Loads user context, preferences, and memory context
 
 This module is used by the parallel intake node. It is not a standalone graph
 node anymore; `parallel_intake.run_parallel_intake` calls `load_user_context`
@@ -8,7 +8,7 @@ concurrently with crisis screening, mood analysis, and intent prefetching.
 RESPONSIBILITIES:
 1. Load Session History (chat messages from current session)
 2. Load User Stats & Preferences (from database) - CACHED for speed
-3. Retrieve Semantic Memories (from ChromaDB vector store)
+3. Reuse compact memory context from the smart gate
 4. Build context ready for the fused analysis/planning pipeline
 
 Input:
@@ -23,7 +23,7 @@ Output:
   - most_common_emotion: User's typical emotion
   - user_preferences: Communication preferences
   - chat_history: Recent messages from current session
-  - memory_context: Semantically relevant memories
+  - memory_context: Relevant facts/session summaries
   - voice_features: (passthrough) Voice data if provided
 """
 
@@ -31,6 +31,7 @@ from ..agent.state import MentalHealthState
 from ..tools import get_user_history
 import time
 import asyncio
+import os
 
 # Simple in-memory cache for user data (5 min TTL)
 _user_data_cache = {}
@@ -61,7 +62,7 @@ async def load_user_context(state: MentalHealthState) -> dict:
     STEP-BY-STEP PROCESS:
     1. Load session history (current conversation messages)
     2. Load user stats & preferences (who they are, how they prefer responses)
-    3. Retrieve semantic memories (relevant past conversations)
+    3. Retrieve relevant facts/session summaries
     4. Build full context object for the fused analysis/planning pipeline
     
     Input State:
@@ -76,7 +77,7 @@ async def load_user_context(state: MentalHealthState) -> dict:
         - most_common_emotion: User's typical emotion
         - user_preferences: User's communication preferences
         - chat_history: Recent messages for context (current session only)
-        - memory_context: Semantically retrieved relevant memories
+        - memory_context: Relevant facts/session summaries
         - context_ready: Boolean - confirms context is ready
     """
     user_id = state.get("user_id", "")
@@ -102,6 +103,7 @@ async def load_user_context(state: MentalHealthState) -> dict:
         prefetched_user_context=prefetched_user_context,
         prefetched_session_context=prefetched_session_context,
     ))
+    handoff_task = asyncio.create_task(_load_previous_session_handoff(user_id, session_id))
 
     # ============================================
     # STEP 1: LOAD USER STATS & PREFERENCES (CACHED)
@@ -157,15 +159,15 @@ async def load_user_context(state: MentalHealthState) -> dict:
     # Layer 1 (Within-session): LangGraph `state["messages"]` accumulates all turns
     #   via the add_messages reducer  the response generator reads these directly.
     #   No DB query needed, no token bloat risk.
-    # Layer 2 (Cross-session): ChromaDB semantic memory (fetched in STEP 3 below)
-    #   provides relevant raw user-turn recall from past sessions.
+    # Layer 2 (Cross-session): smart-gate memory context provides relevant
+    #   facts and summaries from prior sessions.
     # Prisma/Supabase Postgres remains the source of truth for stored messages,
     # summaries, facts, and analytics; raw DB messages are not injected here.
     chat_history = []  # Not used  see response generator for two-layer memory implementation
-    print(f"[CONTEXT_LOADER]  Step 2: Memory handled via LangGraph state + ChromaDB semantic recall (no raw DB history load)")
+    print(f"[CONTEXT_LOADER]  Step 2: Memory handled via LangGraph state + smart-gate context (no raw DB history load)")
     
     # ============================================
-    # STEP 3: RETRIEVE SEMANTIC MEMORIES
+    # STEP 3: RETRIEVE MEMORY CONTEXT
     # ============================================
     
     print("[CONTEXT_LOADER]  Step 3: Retrieving deduplicated memory context")
@@ -175,8 +177,22 @@ async def load_user_context(state: MentalHealthState) -> dict:
         print(f"[CONTEXT_LOADER]  Memory task failed (non-fatal): {str(e)[:120]}")
         memory_context = ""
 
+    try:
+        previous_session_handoff = await handoff_task
+    except Exception as e:
+        print(f"[CONTEXT_LOADER]  Handoff task failed (non-fatal): {str(e)[:120]}")
+        previous_session_handoff = {}
+
+    handoff_text = _format_previous_session_handoff(previous_session_handoff)
+    if handoff_text:
+        memory_context = "\n\n".join(part for part in (memory_context, handoff_text) if part)
+
     # Background task: extract facts from user message (non-blocking)
-    if current_message and user_id:
+    background_facts = (
+        os.getenv("SENTIMIND_BACKGROUND_LLM_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
+        or os.getenv("SENTIMIND_BACKGROUND_FACT_EXTRACTION", "0").lower() in {"1", "true", "yes", "on"}
+    )
+    if background_facts and current_message and user_id:
         from ..memory.explicit_facts import extract_and_save_facts
         asyncio.create_task(extract_and_save_facts(
             user_id=user_id,
@@ -184,6 +200,8 @@ async def load_user_context(state: MentalHealthState) -> dict:
             session_id=session_id
         ))
         print(f"[CONTEXT_LOADER]  Fact extraction scheduled (background)")
+    elif current_message and user_id:
+        print("[CONTEXT_LOADER]  Fact extraction skipped (background LLM disabled)")
 
     print(f"[CONTEXT_LOADER]  Retrieved {len(memory_context)} chars of memory context")
     
@@ -218,6 +236,7 @@ async def load_user_context(state: MentalHealthState) -> dict:
         "user_preferences": user_prefs,
         "chat_history": chat_history,
         "memory_context": memory_context,
+        "previous_session_handoff": previous_session_handoff,
         "context_ready": context_ready,
         "voice_features": voice_features,  # Passthrough if provided
         "intake_errors": intake_errors,  # Track any errors during intake
@@ -242,10 +261,9 @@ async def _retrieve_semantic_memories(
     Retrieve deduplicated prompt memory context.
     Falls back to empty string if memory builder fails.
 
-    ChromaDB provides specific semantic recall.
-    Prisma/Supabase Postgres provides facts and broad session summaries.
+    Smart-gate context provides facts and broad session summaries.
     Raw Prisma message history is deliberately not injected here to avoid
-    duplicate context with Chroma semantic memories.
+    duplicate context with current-session history.
     """
     try:
         sections = []
@@ -254,25 +272,83 @@ async def _retrieve_semantic_memories(
         if prefetched_session_context and prefetched_session_context.get("formatted_context"):
             sections.append(prefetched_session_context["formatted_context"].strip())
 
+        # v9.5: pgvector recall supplements the smart-gate facts/session context
+        # with only the most relevant cross-session snippets.
         from ..memory import get_memory_context_for_prompt
-        semantic_context = ""
+
+        vector_context = ""
         if current_message and current_message.strip():
-            semantic_context = await get_memory_context_for_prompt(
+            vector_context = await get_memory_context_for_prompt(
                 user_id,
                 current_message,
                 max_memories=3,
                 exclude_session_id=session_id or None,
             )
-        if semantic_context and semantic_context.strip():
-            sections.insert(0, semantic_context.strip())
+        if vector_context and vector_context.strip():
+            sections.insert(0, vector_context.strip())
 
         if sections:
+            print("[CONTEXT_LOADER]  Reusing smart-gate memory context + pgvector recall")
             return "\n\n".join(sections) + "\n\nUse above as context. Do not repeat verbatim. Only reference if directly relevant."
 
         return ""
     except Exception as e:
         print(f"[CONTEXT_LOADER]  Memory builder failed (non-fatal): {str(e)[:120]}")
         return ""
+
+
+async def _load_previous_session_handoff(user_id: str, current_session_id: str = "") -> dict:
+    if not user_id:
+        return {}
+    try:
+        from ..db.client import get_prisma_client
+
+        prisma = await get_prisma_client()
+        summaries = await prisma.sessionsummary.find_many(
+            where={"userId": user_id},
+            order={"createdAt": "desc"},
+            take=5,
+        )
+        for summary in summaries:
+            if current_session_id and getattr(summary, "sessionId", None) == current_session_id:
+                continue
+            return {
+                "session_id": getattr(summary, "sessionId", None),
+                "title": getattr(summary, "title", None),
+                "summary": getattr(summary, "summary", None),
+                "final_emotion": getattr(summary, "finalEmotion", None) or getattr(summary, "emotion", None),
+                "final_intensity": getattr(summary, "finalIntensity", None),
+                "technique_offered": getattr(summary, "techniqueOffered", None),
+                "turn_type_counts": getattr(summary, "turnTypeCounts", None),
+                "outcome": getattr(summary, "outcome", None),
+            }
+    except Exception as e:
+        print(f"[CONTEXT_LOADER]  Previous handoff load failed (non-fatal): {str(e)[:120]}")
+    return {}
+
+
+def _format_previous_session_handoff(handoff: dict) -> str:
+    if not handoff:
+        return ""
+    parts = ["PREVIOUS SESSION HANDOFF:"]
+    if handoff.get("title"):
+        parts.append(f"- Title: {handoff['title']}")
+    if handoff.get("summary"):
+        parts.append(f"- Summary: {handoff['summary']}")
+    if handoff.get("final_emotion"):
+        intensity = handoff.get("final_intensity")
+        if intensity is not None:
+            try:
+                parts.append(f"- Final state: {handoff['final_emotion']} ({float(intensity):.0%})")
+            except (TypeError, ValueError):
+                parts.append(f"- Final state: {handoff['final_emotion']}")
+        else:
+            parts.append(f"- Final state: {handoff['final_emotion']}")
+    if handoff.get("outcome"):
+        parts.append(f"- Outcome: {handoff['outcome']}")
+    if handoff.get("turn_type_counts"):
+        parts.append(f"- Turn counts: {handoff['turn_type_counts']}")
+    return "\n".join(parts)
 
 
 async def _load_user_preferences(user_id: str) -> dict:

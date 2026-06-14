@@ -5,7 +5,7 @@ A compassionate AI mental health support companion
 Architecture:
     - Component-based with modular nodes
     - LangGraph StateGraph for conversation flow
-    - Groq LLM with multi-key failover
+    - Gemini LLM with key/model failover
     - PostgreSQL database via Prisma
 """
 

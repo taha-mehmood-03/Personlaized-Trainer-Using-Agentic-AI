@@ -1,9 +1,9 @@
 'use client'
 
-import { useState, useRef } from 'react'
+import { useState, useEffect } from 'react'
 import { Sparkles, Star, Check, ChevronRight, ChevronLeft, Flag, Loader, AlertCircle } from 'lucide-react'
-import { Technique } from '@/app/chat/types'
-import { submitTechniqueRating } from '@/app/chat/actions'
+import { Technique } from '@/types'
+import { submitTechniqueRating } from '@/actions/technique'
 
 interface TechniqueCardProps {
   technique: Technique | null
@@ -20,13 +20,13 @@ const CATEGORY_ICON: Record<string, string> = {
 
 const CATEGORY_COLOR: Record<string, string> = {
   breathing: 'from-cyan-400 to-blue-500',
-  meditation: 'from-purple-400 to-indigo-500',
-  mindfulness: 'from-green-400 to-teal-500',
+  meditation: 'from-cyan-700 to-slate-900',
+  mindfulness: 'from-emerald-400 to-cyan-600',
   grounding: 'from-orange-400 to-red-500',
-  cbt: 'from-indigo-400 to-purple-500',
+  cbt: 'from-slate-700 to-cyan-800',
   journaling: 'from-blue-400 to-cyan-500',
-  dbt: 'from-blue-500 to-indigo-600',
-  'behavioral activation': 'from-green-500 to-emerald-600',
+  dbt: 'from-blue-500 to-cyan-700',
+  'behavioral activation': 'from-emerald-500 to-green-600',
   visualization: 'from-yellow-400 to-orange-400',
 }
 
@@ -47,11 +47,11 @@ function StepWizard({ steps, onComplete }: { steps: string[]; onComplete: () => 
         <span>Step {step + 1} of {steps.length}</span>
         <div className="h-1 flex-1 mx-3 bg-gray-100 rounded-full overflow-hidden">
           <div
-            className="h-full bg-gradient-to-r from-teal-400 to-purple-500 rounded-full transition-all duration-500"
+            className="h-full bg-gradient-to-r from-emerald-400 to-cyan-500 rounded-full transition-all duration-500"
             style={{ width: `${((step + 1) / steps.length) * 100}%` }}
           />
         </div>
-        <span className="text-teal-600 font-semibold">Interactive</span>
+        <span className="text-cyan-700 font-semibold">Interactive</span>
       </div>
 
       {/* Step card */}
@@ -59,7 +59,7 @@ function StepWizard({ steps, onComplete }: { steps: string[]; onComplete: () => 
         <div className="absolute right-2 bottom-0 text-[80px] font-black text-gray-50 select-none pointer-events-none leading-none">
           {step + 1}
         </div>
-        <div className="w-8 h-8 rounded-full bg-gradient-to-br from-teal-500 to-purple-500 text-white flex items-center justify-center text-sm font-bold shrink-0 z-10">
+        <div className="w-8 h-8 rounded-full bg-gradient-to-br from-slate-950 to-cyan-700 text-white flex items-center justify-center text-sm font-bold shrink-0 z-10">
           {step + 1}
         </div>
         <p className="text-sm text-gray-800 leading-relaxed z-10">{steps[step]}</p>
@@ -83,7 +83,7 @@ function StepWizard({ steps, onComplete }: { steps: string[]; onComplete: () => 
               ? 'bg-green-100 text-green-700 cursor-default'
               : step < steps.length - 1
                 ? 'bg-gray-900 text-white hover:bg-gray-700'
-                : 'bg-gradient-to-r from-teal-500 to-emerald-500 text-white hover:shadow-md'
+                : 'bg-gradient-to-r from-cyan-700 to-emerald-600 text-white hover:shadow-md'
           }`}
         >
           {done ? <><Check className="w-3.5 h-3.5" />Completed!</>
@@ -155,7 +155,7 @@ function StarRating({
         onChange={e => setFeedback(e.target.value)}
         placeholder="Optional feedback…"
         rows={2}
-        className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-purple-300 bg-gray-50"
+        className="w-full text-xs px-3 py-2 border border-gray-200 rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-cyan-300 bg-gray-50"
       />
 
       <button
@@ -164,7 +164,7 @@ function StarRating({
         className={`w-full mt-2 py-2 text-xs font-bold rounded-lg transition-all ${
           status === 'success' ? 'bg-green-500 text-white'
             : !rating ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-            : 'bg-purple-600 text-white hover:bg-purple-700'
+            : 'bg-slate-950 text-white hover:bg-slate-800'
         }`}
       >
         {status === 'loading' ? (
@@ -180,6 +180,10 @@ function StarRating({
 export function TechniqueCard({ technique, userId }: TechniqueCardProps) {
   const [wizardCompleted, setWizardCompleted] = useState(false)
 
+  useEffect(() => {
+    setWizardCompleted(technique?.user_completed ?? false)
+  }, [technique?.id])
+
   if (!technique) {
     return (
       <div className="flex flex-col items-center justify-center h-48 text-gray-400 text-center px-4">
@@ -190,41 +194,40 @@ export function TechniqueCard({ technique, userId }: TechniqueCardProps) {
   }
 
   const catKey = technique.category?.toLowerCase() ?? ''
-  const gradient = CATEGORY_COLOR[catKey] ?? 'from-purple-400 to-teal-500'
-  const icon = CATEGORY_ICON[catKey] ?? '✨'
+  const gradient = CATEGORY_COLOR[catKey] ?? 'from-slate-700 to-cyan-700'
+  const icon = CATEGORY_ICON[catKey] ?? '*'
 
   return (
     <div key={technique.id} className="space-y-4">
-      {/* Header card */}
-      <div className={`rounded-xl bg-gradient-to-br ${gradient} text-white p-4 text-center relative overflow-hidden`}>
-        <div className="absolute -right-6 -top-6 w-20 h-20 bg-white/10 rounded-full" />
-        <div className="absolute -left-4 -bottom-6 w-16 h-16 bg-white/10 rounded-full" />
-
-        <div className="w-14 h-14 mx-auto bg-white/20 rounded-2xl flex items-center justify-center text-3xl mb-3 shadow-lg backdrop-blur-sm border border-white/20">
+      <div className={`rounded-xl bg-gradient-to-br ${gradient} p-4 text-center text-white`}>
+        <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-2xl border border-white/20 bg-white/20 text-3xl shadow-lg backdrop-blur-sm">
           {icon}
         </div>
-        <h3 className="font-bold text-base leading-tight">{technique.name}</h3>
-        <p className="text-xs text-white/80 mt-1">{technique.brief}</p>
-        <div className="flex justify-center gap-2 mt-3 flex-wrap">
-          <span className="px-2 py-1 bg-white/20 rounded-full text-[11px] font-semibold">⏱ {technique.duration_minutes} min</span>
-          <span className="px-2 py-1 bg-white/20 rounded-full text-[11px] font-semibold capitalize">{technique.difficulty ?? 'Moderate'}</span>
-          <span className="px-2 py-1 bg-white/20 rounded-full text-[11px] font-semibold capitalize">{technique.category}</span>
+        <h3 className="text-base font-bold leading-tight">{technique.name}</h3>
+        <p className="mt-1 text-xs text-white/80">{technique.brief}</p>
+        <div className="mt-3 flex flex-wrap justify-center gap-2">
+          <span className="rounded-full bg-white/20 px-2 py-1 text-[11px] font-semibold">
+            {technique.duration_minutes} min
+          </span>
+          <span className="rounded-full bg-white/20 px-2 py-1 text-[11px] font-semibold capitalize">
+            {technique.difficulty ?? 'Moderate'}
+          </span>
+          <span className="rounded-full bg-white/20 px-2 py-1 text-[11px] font-semibold capitalize">
+            {technique.category}
+          </span>
         </div>
       </div>
 
-      {/* Description */}
       {technique.description && (
-        <p className="text-xs text-gray-600 leading-relaxed bg-gray-50 rounded-xl p-3">
+        <p className="rounded-xl bg-gray-50 p-3 text-xs leading-relaxed text-gray-600">
           {technique.description}
         </p>
       )}
 
-      {/* Step wizard */}
       {technique.steps?.length > 0 && (
         <StepWizard steps={technique.steps} onComplete={() => setWizardCompleted(true)} />
       )}
 
-      {/* Star rating */}
       <StarRating userId={userId} technique={technique} wizardCompleted={wizardCompleted} />
     </div>
   )

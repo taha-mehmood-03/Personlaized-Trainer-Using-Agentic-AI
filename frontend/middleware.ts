@@ -1,23 +1,39 @@
 import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
+import { getToken } from 'next-auth/jwt'
 
-// Basic middleware to protect routes
-export function middleware(request: NextRequest) {
-    const userId = request.cookies.get('sentimind_user_id')?.value
+const PROTECTED_PREFIXES = ['/dashboard', '/profile', '/chat', '/onboarding']
 
-    // Protected routes require a user_id cookie
-    const protectedRoutes = ['/dashboard', '/profile']
-    const isProtectedRoute = protectedRoutes.some((route) =>
+function applySecurityHeaders(response: NextResponse) {
+    response.headers.set('X-Content-Type-Options', 'nosniff')
+    response.headers.set('X-Frame-Options', 'DENY')
+    response.headers.set('Referrer-Policy', 'no-referrer')
+    response.headers.set('Permissions-Policy', 'camera=(), microphone=(self), geolocation=(self)')
+    response.headers.set('X-Robots-Tag', 'noindex, nofollow')
+    return response
+}
+
+export async function middleware(request: NextRequest) {
+    const isProtectedRoute = PROTECTED_PREFIXES.some((route) =>
         request.nextUrl.pathname.startsWith(route)
     )
 
-    if (isProtectedRoute && !userId) {
-        return NextResponse.redirect(new URL('/login', request.url))
+    if (isProtectedRoute) {
+        const token = await getToken({
+            req: request,
+            secret: process.env.NEXTAUTH_SECRET,
+        })
+
+        if (!token) {
+            return applySecurityHeaders(
+                NextResponse.redirect(new URL('/login', request.url))
+            )
+        }
     }
 
-    return NextResponse.next()
+    return applySecurityHeaders(NextResponse.next())
 }
 
 export const config = {
-    matcher: ['/dashboard/:path*', '/profile/:path*'],
+    matcher: ['/dashboard/:path*', '/profile/:path*', '/chat/:path*', '/onboarding/:path*'],
 }

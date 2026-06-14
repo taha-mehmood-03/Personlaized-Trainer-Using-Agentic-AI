@@ -8,7 +8,7 @@ interface DangerZoneProps {
     onDeleteAccount: () => Promise<void>
 }
 
-/** Permanently delete account confirmation section. */
+/** GDPR erasure request confirmation section. */
 export const DangerZone = ({ onDeleteAccount }: DangerZoneProps) => {
     const [confirming, setConfirming] = useState(false)
     const [loading, setLoading] = useState(false)
@@ -27,8 +27,8 @@ export const DangerZone = ({ onDeleteAccount }: DangerZoneProps) => {
                 <div>
                     <h3 className="text-sm font-bold text-red-700">Danger Zone</h3>
                     <p className="text-xs text-red-600 mt-1 leading-relaxed">
-                        Permanently delete your account and all associated data. This action cannot be
-                        undone.
+                        Submit a GDPR erasure request, revoke consent, and sign out. Your account is
+                        marked for deletion and removed according to the retention policy.
                     </p>
                 </div>
             </div>
@@ -39,7 +39,7 @@ export const DangerZone = ({ onDeleteAccount }: DangerZoneProps) => {
                     size="sm"
                     onClick={() => setConfirming(true)}
                 >
-                    Delete My Account
+                    Request Account Erasure
                 </Button>
             ) : (
                 <div className="flex items-center gap-3">
@@ -49,7 +49,7 @@ export const DangerZone = ({ onDeleteAccount }: DangerZoneProps) => {
                         onClick={handleDelete}
                         disabled={loading}
                     >
-                        {loading ? 'Deleting...' : 'Yes, permanently delete'}
+                        {loading ? 'Submitting...' : 'Yes, request erasure'}
                     </Button>
                     <Button
                         variant="ghost"

@@ -6,12 +6,10 @@
 # ============================================
 langgraph>=0.2.0
 langchain>=0.3.0
-langchain-groq>=0.2.0
-langchain-openai>=0.2.0
+langchain-google-genai>=2.0.0
+google-genai>=1.0.0
 langchain-community>=0.3.0
-langchain-chroma>=0.1.0
 langchain-huggingface>=0.1.0
-chromadb>=0.5.0
 sentence-transformers>=3.0.0
 # Let pip resolve langchain-core automatically
 
@@ -28,6 +26,7 @@ uvicorn[standard]>=0.27.0
 python-dotenv>=1.0.0
 pydantic>=2.5.0
 python-multipart>=0.0.6
+bcrypt>=4.1.0
 
 # ============================================
 # ML / Emotion Analysis
@@ -37,11 +36,7 @@ transformers>=4.36.0
 # ============================================
 # Voice Analysis
 # ============================================
-# Acoustic features + wav2vec2 emotion classification
-librosa>=0.10.0
-soundfile>=0.12.0
-# Deepgram SDK — replaces Whisper-tiny for transcription (no local model needed)
-deepgram-sdk>=3.0.0
+# Gemini audio uses google-genai from the core dependencies.
 
 
 

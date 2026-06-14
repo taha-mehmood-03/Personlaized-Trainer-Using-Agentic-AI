@@ -1,6 +1,10 @@
 """
-Memory Module - Embedding-based semantic memory using ChromaDB
-Provides long-term memory with semantic retrieval for conversation context
+Memory Module - local embedding-based recall.
+
+Prisma/Supabase remains the source of truth for sessions, messages, facts,
+summaries, and analytics. This module indexes selected records into Supabase
+pgvector behind the existing memory API, with a local JSONL fallback if the
+database vector index is unavailable.
 """
 
 import os
@@ -23,8 +27,8 @@ os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 # Use lazy imports to avoid startup slowdown
-_vectorstore_cache: dict = {}  # Cache per user_id to avoid reconnection overhead
 _embeddings = None
+_embeddings_error: Optional[str] = None
 logger = logging.getLogger("sentimind.memory")
 _MEMORY_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "memory_store")
 _FALLBACK_DIR = os.path.join(_MEMORY_DIR, "fallback_json")
@@ -43,6 +47,10 @@ _MEMORY_SIGNAL_TERMS = {
     "struggle", "can't", "cannot", "diagnosed", "therapy", "medication",
     "suicide", "self harm", "hurt myself", "kill myself",
 }
+
+
+class EmbeddingsUnavailable(RuntimeError):
+    """Raised when the local semantic embedding model is not available."""
 
 
 class _LocalSentenceTransformerEmbeddings:
@@ -128,10 +136,10 @@ def _memory_id(user_id: str, session_id: Optional[str], content: str) -> str:
 
 def _is_semantic_memory_worthy(message: str) -> bool:
     """
-    Decide whether a user turn is worth semantic recall.
+    Decide whether a user turn is worth lightweight recall.
 
-    Chroma should hold meaningful user context, not every acknowledgement.
-    Prisma remains the full transcript source of truth.
+    Store meaningful user context, not every acknowledgement. Prisma remains
+    the full transcript source of truth.
     """
     text = (message or "").strip()
     lower = text.lower()
@@ -164,6 +172,7 @@ async def _store_fallback_memory(
     emotion: str,
     session_id: Optional[str],
     timestamp: str,
+    embedding: Optional[list[float]] = None,
 ) -> bool:
     """Append an embedded memory to a local JSONL fallback store."""
     os.makedirs(_FALLBACK_DIR, exist_ok=True)
@@ -183,7 +192,7 @@ async def _store_fallback_memory(
         except Exception:
             pass
 
-    embedding = _get_embeddings().embed_query(user_message)
+    embedding = embedding or _get_embeddings().embed_query(user_message)
 
     record = {
         "id": record_id,
@@ -301,8 +310,11 @@ async def _delete_fallback_session_memories(user_id: str, session_id: str) -> in
 
 def _get_embeddings():
     """Get or create the embeddings model (lazy loading)."""
-    global _embeddings
+    global _embeddings, _embeddings_error
     
+    if _embeddings_error:
+        raise EmbeddingsUnavailable(_embeddings_error)
+
     if _embeddings is None:
         # Avoid repeated HuggingFace network probes after the model is cached.
         # If the model is not present locally, the exception is caught by callers
@@ -314,53 +326,40 @@ def _get_embeddings():
             
         except ImportError:
             logger.warning("sentence-transformers not installed; falling back to langchain-huggingface")
-            model_kwargs = {'device': 'cpu', 'local_files_only': True}
-            from langchain_community.embeddings import HuggingFaceEmbeddings
-            
-            _embeddings = HuggingFaceEmbeddings(
-                model_name="sentence-transformers/all-MiniLM-L6-v2",
-                model_kwargs=model_kwargs,
-                encode_kwargs={'normalize_embeddings': True}
+            try:
+                model_kwargs = {'device': 'cpu', 'local_files_only': True}
+                from langchain_community.embeddings import HuggingFaceEmbeddings
+
+                _embeddings = HuggingFaceEmbeddings(
+                    model_name="sentence-transformers/all-MiniLM-L6-v2",
+                    model_kwargs=model_kwargs,
+                    encode_kwargs={'normalize_embeddings': True}
+                )
+            except Exception as exc:
+                _embeddings_error = str(exc)
+                logger.warning(
+                    "Semantic embeddings unavailable; semantic memory will be skipped until restart | error=%s",
+                    _embeddings_error[:160],
+                )
+                raise EmbeddingsUnavailable(_embeddings_error) from exc
+        except Exception as exc:
+            _embeddings_error = str(exc)
+            logger.warning(
+                "Semantic embeddings unavailable; semantic memory will be skipped until restart | error=%s",
+                _embeddings_error[:160],
             )
+            raise EmbeddingsUnavailable(_embeddings_error) from exc
             
     return _embeddings
 
 
 def preload_embeddings():
     """Eagerly preload embedding model on startup."""
-    _get_embeddings()
-
-
-def _get_vectorstore(user_id: str):
-    """
-    Get or create a ChromaDB vectorstore for a specific user.
-    Each user has their own collection for privacy.
-    """
     try:
-        from langchain_chroma import Chroma
-    except ImportError:
-        from langchain_community.vectorstores import Chroma
-    
-    # Ensure memory directory exists
-    os.makedirs(_MEMORY_DIR, exist_ok=True)
-    
-    # Cache per-user to avoid repeated disk I/O
-    if user_id in _vectorstore_cache:
-        return _vectorstore_cache[user_id]
-
-    embeddings = _get_embeddings()
-    
-    # Create user-specific collection
-    collection_name = f"user_{_safe_user_id(user_id).replace('-', '_')[:50]}"
-    
-    vectorstore = Chroma(
-        collection_name=collection_name,
-        embedding_function=embeddings,
-        persist_directory=_MEMORY_DIR
-    )
-    
-    _vectorstore_cache[user_id] = vectorstore
-    return vectorstore
+        _get_embeddings()
+        return True
+    except EmbeddingsUnavailable:
+        return False
 
 
 async def store_conversation_memory(
@@ -371,7 +370,7 @@ async def store_conversation_memory(
     session_id: Optional[str] = None
 ) -> bool:
     """
-    Store a conversation turn in the vector memory.
+    Store a conversation turn in pgvector-backed recall.
     
     Args:
         user_id: User's unique identifier
@@ -388,37 +387,42 @@ async def store_conversation_memory(
         return True
 
     try:
-        vectorstore = _get_vectorstore(user_id)
-        
-        # Create a combined document for the conversation turn
-        timestamp = datetime.now().isoformat()
-        
-        # Store ONLY user message  clean text, no prefix (no "User said:")
-        user_doc = user_message  # Clean text for best embedding quality
-        user_metadata = {
-            "role": "user",
-            "emotion": emotion,
-            "timestamp": timestamp,
-            "session_id": session_id or "unknown",
-            "source": "conversation_turn",
-        }
-        doc_id = _memory_id(user_id, session_id, user_doc)
-        
-        # Add only user message (assistant responses never retrieved  no point storing them)
-        vectorstore.add_texts(
-            texts=[user_doc],
-            metadatas=[user_metadata],
-            ids=[doc_id],
-        )
-        
-        logger.info("Stored semantic memory in ChromaDB | user=%s", user_id[:8])
+        embedding = _get_embeddings().embed_query(user_message)
+    except EmbeddingsUnavailable:
+        logger.debug("Semantic memory skipped | reason=embedding_model_unavailable")
         return True
-        
-    except Exception as e:
-        if "already exists" in str(e).lower() or "duplicate" in str(e).lower():
-            logger.debug("Chroma semantic memory already exists; skipping duplicate")
+    except Exception as err:
+        logger.warning("Semantic memory skipped | embedding error=%s", str(err)[:100])
+        return True
+
+    try:
+        from .pgvector_store import upsert_embedding
+
+        timestamp = datetime.now().isoformat()
+        stored = await upsert_embedding(
+            source_type="message",
+            source_id=_memory_id(user_id, session_id, user_message),
+            user_id=user_id,
+            session_id=session_id,
+            content=user_message,
+            metadata={"role": "user", "emotion": emotion, "timestamp": timestamp},
+            embedding=embedding,
+        )
+        if stored:
+            logger.info("Stored message embedding in pgvector | user=%s", user_id[:8])
             return True
-        logger.warning("Chroma store failed; trying fallback semantic store | error=%s", str(e)[:100])
+
+        logger.warning("pgvector message store returned false; using local fallback")
+        return await _store_fallback_memory(
+            user_id=user_id,
+            user_message=user_message,
+            emotion=emotion,
+            session_id=session_id,
+            timestamp=timestamp,
+            embedding=embedding,
+        )
+    except Exception as err:
+        logger.warning("pgvector memory store failed; using local fallback | error=%s", str(err)[:100])
         try:
             timestamp = datetime.now().isoformat()
             return await _store_fallback_memory(
@@ -427,10 +431,97 @@ async def store_conversation_memory(
                 emotion=emotion,
                 session_id=session_id,
                 timestamp=timestamp,
+                embedding=embedding,
             )
         except Exception as fallback_err:
-            logger.warning("Semantic memory store failed | error=%s", str(fallback_err)[:100])
+            logger.warning("Memory store failed | error=%s", str(fallback_err)[:100])
             return False
+
+
+async def store_fact_embedding(user_id: str, fact_id: str, fact: str, category: str = "context") -> bool:
+    """Index a UserFact row in pgvector."""
+    try:
+        from .pgvector_store import upsert_embedding
+        embedding = _get_embeddings().embed_query(fact)
+
+        return await upsert_embedding(
+            source_type="user_fact",
+            source_id=fact_id,
+            user_id=user_id,
+            content=fact,
+            metadata={"category": category},
+            embedding=embedding,
+        )
+    except EmbeddingsUnavailable:
+        logger.debug("Fact embedding skipped | reason=embedding_model_unavailable")
+        return True
+    except Exception as err:
+        logger.warning("Fact embedding store failed | error=%s", str(err)[:100])
+        return False
+
+
+async def store_session_summary_embedding(
+    user_id: str,
+    session_id: str,
+    summary_id: str,
+    title: str,
+    summary: str,
+    emotion: str = "neutral",
+) -> bool:
+    """Index a SessionSummary row in pgvector."""
+    try:
+        from .pgvector_store import upsert_embedding
+        content = f"{title}\n{summary}".strip()
+        embedding = _get_embeddings().embed_query(content)
+
+        return await upsert_embedding(
+            source_type="session_summary",
+            source_id=summary_id,
+            user_id=user_id,
+            session_id=session_id,
+            content=content,
+            metadata={"title": title, "emotion": emotion},
+            embedding=embedding,
+        )
+    except EmbeddingsUnavailable:
+        logger.debug("Session summary embedding skipped | reason=embedding_model_unavailable")
+        return True
+    except Exception as err:
+        logger.warning("Session summary embedding store failed | error=%s", str(err)[:100])
+        return False
+
+
+async def store_technique_embedding(technique) -> bool:
+    """Index a Technique row in pgvector for semantic technique matching."""
+    try:
+        from .pgvector_store import upsert_embedding
+
+        text = " | ".join([
+            getattr(technique, "name", "") or "",
+            getattr(technique, "brief", "") or "",
+            getattr(technique, "description", "") or "",
+            getattr(technique, "whyItWorks", "") or "",
+            " ".join(getattr(technique, "steps", []) or [])[:500],
+        ]).strip()
+        if not text:
+            return False
+        embedding = _get_embeddings().embed_query(text)
+        return await upsert_embedding(
+            source_type="technique",
+            source_id=getattr(technique, "id", ""),
+            content=text,
+            metadata={
+                "name": getattr(technique, "name", ""),
+                "categoryId": getattr(technique, "categoryId", ""),
+            },
+            embedding=embedding,
+        )
+    except EmbeddingsUnavailable:
+        logger.debug("Technique embedding skipped | reason=embedding_model_unavailable")
+        return True
+    except Exception as err:
+        logger.warning("Technique embedding store failed | error=%s", str(err)[:100])
+        return False
 
 
 async def retrieve_relevant_memories(
@@ -441,89 +532,53 @@ async def retrieve_relevant_memories(
     exclude_session_id: Optional[str] = None,
 ) -> list[dict]:
     """
-    Retrieve relevant past conversations based on semantic similarity.
-    
-    Args:
-        user_id: User's unique identifier
-        query: The current message to find relevant context for
-        k: Number of relevant memories to retrieve
-        session_id: Optional session ID to filter memories
-        exclude_session_id: Optional session ID to skip, usually the active
-            session because LangGraph already has those messages
-        
-    Returns:
-        List of relevant memory documents with content and metadata
+    Retrieve relevant past conversations/facts/summaries by pgvector similarity.
+
+    Falls back to the local JSONL store if pgvector is unavailable.
     """
     try:
-        vectorstore = _get_vectorstore(user_id)
-        
-        # Build filter if session_id is provided
-        filter_dict = None
-        if session_id:
-            filter_dict = {"session_id": session_id}
-        
-        # Search for similar documents with optional filter
-        if filter_dict:
-            results = vectorstore.similarity_search_with_score(
-                query, 
-                k=k,
-                filter=filter_dict
-            )
-        else:
-            results = vectorstore.similarity_search_with_score(query, k=k * 4)  # Fetch extra, filter below
-        
-        memories = []
-        for doc, score in results:
-            # Threshold: normalized embeddings use L2 distance in roughly 0-2.
-            # 1.3 keeps adjacent emotional/work themes while filtering weak matches.
-            if score < 1.3:
-                # Skip non-user messages (we no longer store assistant messages,
-                # but guard against old data in the store)
-                if doc.metadata.get("role") != "user":
-                    continue
-                if exclude_session_id and doc.metadata.get("session_id") == exclude_session_id:
-                    continue
-                
-                # Truncate long content to prevent context pollution
-                content = doc.page_content[:200]
-                if len(doc.page_content) > 200:
-                    content += "..."
-                
-                # Calculate recency bonus (memories from last 7 days score higher)
-                recency_bonus = 0.0
-                try:
-                    from datetime import datetime
-                    ts = doc.metadata.get("timestamp", "")
-                    if ts:
-                        mem_date = datetime.fromisoformat(ts)
-                        days_ago = (datetime.now() - mem_date).days
-                        if days_ago <= 7:
-                            recency_bonus = 0.1 * (1 - days_ago / 7)
-                except Exception:
-                    pass
-                
-                memories.append({
-                    "content": content,
-                    "role": doc.metadata.get("role", "unknown"),
-                    "emotion": doc.metadata.get("emotion", "neutral"),
-                    "timestamp": doc.metadata.get("timestamp", ""),
-                    "relevance_score": round(1 - (score / 2) + recency_bonus, 2)
-                })
-                
-                if len(memories) >= k:  # Cap at requested count
-                    break
-        
-        logger.info("Retrieved semantic memories | count=%s", len(memories))
-        return memories
-        
-    except Exception as e:
-        logger.warning("Chroma retrieve failed; trying fallback semantic store | error=%s", str(e)[:100])
-        try:
-            return await _retrieve_fallback_memories(user_id, query, k, session_id, exclude_session_id)
-        except Exception as fallback_err:
-            logger.warning("Semantic memory retrieve failed | error=%s", str(fallback_err)[:100])
-            return []
+        _get_embeddings()
+    except EmbeddingsUnavailable:
+        logger.debug("Semantic memory retrieval skipped | reason=embedding_model_unavailable")
+        return []
+    except Exception as err:
+        logger.warning("Semantic memory retrieval skipped | embedding error=%s", str(err)[:100])
+        return []
 
+    try:
+        from .pgvector_store import search_embeddings
+
+        rows = await search_embeddings(
+            query=query,
+            user_id=user_id,
+            source_types=["message", "user_fact", "session_summary"],
+            limit=k,
+            exclude_session_id=exclude_session_id,
+        )
+        memories = []
+        for row in rows:
+            metadata = row.get("metadata") or {}
+            content = (row.get("content") or "")[:200]
+            if len(row.get("content") or "") > 200:
+                content += "..."
+            memories.append({
+                "content": content,
+                "role": metadata.get("role", row.get("sourceType", "memory")),
+                "emotion": metadata.get("emotion", "neutral"),
+                "timestamp": metadata.get("timestamp", ""),
+                "relevance_score": round(float(row.get("similarity") or 0.0), 2),
+            })
+        if memories:
+            logger.info("Retrieved pgvector memories | count=%s", len(memories))
+            return memories
+    except Exception as err:
+        logger.warning("pgvector memory retrieve failed; using local fallback | error=%s", str(err)[:100])
+
+    try:
+        return await _retrieve_fallback_memories(user_id, query, k, session_id, exclude_session_id)
+    except Exception as err:
+        logger.warning("Memory retrieve failed | error=%s", str(err)[:100])
+        return []
 
 async def get_memory_context_for_prompt(
     user_id: str,
@@ -579,62 +634,53 @@ async def get_memory_context_for_prompt(
 
 async def delete_session_memories(user_id: str, session_id: str) -> dict:
     """
-    Delete semantic memories for a removed Prisma/Supabase session.
+    Delete local recall records for a removed Prisma/Supabase session.
 
-    This keeps the semantic index aligned with the source-of-truth database.
-    Non-fatal: callers should not fail user deletion if Chroma cleanup has an issue.
+    This keeps recall aligned with the source-of-truth database. Non-fatal:
+    callers should not fail user deletion if cleanup has an issue.
     """
-    deleted = {"chroma": 0, "fallback": 0}
+    deleted = {"pgvector": 0, "local": 0}
     if not user_id or not session_id:
         return deleted
 
     try:
-        vectorstore = _get_vectorstore(user_id)
-        collection = getattr(vectorstore, "_collection", None)
-        if collection is not None:
-            collection.delete(where={"session_id": session_id})
-            deleted["chroma"] = -1  # Chroma delete does not reliably return a count
-            logger.info("Deleted Chroma memories for session | session=%s", session_id[:12])
+        from .pgvector_store import delete_embeddings
+
+        deleted["pgvector"] = await delete_embeddings(user_id=user_id, session_id=session_id)
     except Exception as e:
-        logger.warning("Chroma session cleanup failed | error=%s", str(e)[:100])
+        logger.warning("pgvector session cleanup failed | error=%s", str(e)[:100])
 
     try:
-        deleted["fallback"] = await _delete_fallback_session_memories(user_id, session_id)
+        deleted["local"] = await _delete_fallback_session_memories(user_id, session_id)
     except Exception as e:
-        logger.warning("Fallback session cleanup failed | error=%s", str(e)[:100])
+        logger.warning("Memory session cleanup failed | error=%s", str(e)[:100])
 
     return deleted
 
 
 async def delete_user_memories(user_id: str) -> dict:
     """
-    Delete all semantic memories for a user during account/data erasure.
+    Delete all local recall records for a user during account/data erasure.
     """
-    deleted = {"chroma": False, "fallback": False}
+    deleted = {"pgvector": False, "local": False}
     if not user_id:
         return deleted
 
     try:
-        vectorstore = _get_vectorstore(user_id)
-        collection = getattr(vectorstore, "_collection", None)
-        if collection is not None:
-            ids = collection.get(include=[]) or {}
-            id_list = ids.get("ids", [])
-            if id_list:
-                collection.delete(ids=id_list)
-            deleted["chroma"] = True
-            _vectorstore_cache.pop(user_id, None)
-            logger.info("Deleted Chroma memories for user | user=%s", user_id[:8])
+        from .pgvector_store import delete_embeddings
+
+        await delete_embeddings(user_id=user_id)
+        deleted["pgvector"] = True
     except Exception as e:
-        logger.warning("Chroma user cleanup failed | error=%s", str(e)[:100])
+        logger.warning("pgvector user cleanup failed | error=%s", str(e)[:100])
 
     try:
         path = _fallback_path(user_id)
         if os.path.exists(path):
             os.remove(path)
-        deleted["fallback"] = True
+        deleted["local"] = True
     except Exception as e:
-        logger.warning("Fallback user cleanup failed | error=%s", str(e)[:100])
+        logger.warning("Memory user cleanup failed | error=%s", str(e)[:100])
 
     return deleted
 
@@ -652,6 +698,12 @@ def check_memory_health() -> dict:
             "embedding_model": "all-MiniLM-L6-v2",
             "embedding_dim": len(test_embedding),
             "storage_path": _MEMORY_DIR
+        }
+    except EmbeddingsUnavailable as e:
+        return {
+            "status": "degraded",
+            "error": f"embedding_model_unavailable: {str(e)[:160]}",
+            "storage_path": _MEMORY_DIR,
         }
     except Exception as e:
         return {

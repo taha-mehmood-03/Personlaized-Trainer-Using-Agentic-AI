@@ -8,6 +8,16 @@ All unique - different from your existing 8 + my previous 5
 Add these to your seed_techniques.py file
 """
 
+import sys
+from pathlib import Path
+
+
+SRC_DIR = Path(__file__).resolve().parents[1] / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from mental_health_wellness.techniques.emotion_metadata import annotate_technique_list
+
 
 # ============================================
 # CATEGORY 1: BREATHING TECHNIQUES (10 NEW)
@@ -1440,6 +1450,14 @@ advanced_behavioral_techniques = [
         "scientific_background": "Behavioral economics; research shows commitment devices significantly increase follow-through on goals."
     }
 ]
+
+
+annotate_technique_list(advanced_breathing_techniques, "Breathing")
+annotate_technique_list(advanced_mindfulness_techniques, "Mindfulness")
+annotate_technique_list(advanced_cbt_techniques, "CBT")
+annotate_technique_list(advanced_dbt_techniques, "DBT")
+annotate_technique_list(advanced_journaling_techniques, "Journaling")
+annotate_technique_list(advanced_behavioral_techniques, "Behavioral Activation")
 
 
 # ============================================

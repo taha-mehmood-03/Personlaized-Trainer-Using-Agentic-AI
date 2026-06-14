@@ -38,6 +38,8 @@ import time
 import uuid
 import asyncio
 import logging
+import os
+import re
 from typing import Optional
 
 from langchain_core.messages import HumanMessage, AIMessage
@@ -50,10 +52,54 @@ from ..nodes.parallel_intake import run_parallel_intake
 from ..nodes.parallel_persist import run_parallel_persist
 from ..nodes.analysis_and_planning import run_analysis_and_planning  # v6.0: fused
 from ..nodes.response_pipeline import run_response_pipeline          # v6.0: fused
+from ..nodes.conversation_context_resolver import commit_conversation_context, extract_last_question
 from ..db.client import ensure_user_exists_cached, create_new_session
 from ..llm.llm_classifier import llm_crisis_check, smart_pipeline_gate
+from ..utils.turn_signals import (
+    has_negative_feedback_signal,
+    has_positive_outcome_signal,
+    plain_text,
+)
+from ..utils.distress_anchor import anchor_write_policy
+from ..utils.turn_lifecycle import initial_turn_type_guess, last_assistant_text
 
 logger = logging.getLogger(__name__)
+
+
+def _fmt_list(values, limit: int = 4) -> str:
+    cleaned = [str(value) for value in (values or []) if value]
+    if not cleaned:
+        return "none"
+    suffix = f", +{len(cleaned) - limit}" if len(cleaned) > limit else ""
+    return ", ".join(cleaned[:limit]) + suffix
+
+
+def _clean_metadata_label(value, default=None):
+    if value is None:
+        return default
+    text = str(value).split(".")[-1].strip()
+    if text.lower() in {"", "0", "none", "null", "undefined", "nan", "n/a", "unknown"}:
+        return default
+    try:
+        float(text)
+        return default
+    except ValueError:
+        pass
+    return text
+
+
+def _clean_metadata_list(values):
+    if not isinstance(values, list):
+        return []
+    return [clean for item in values if (clean := _clean_metadata_label(item))]
+
+
+def _emotion_label(emotion, primary_sub_emotion):
+    core = _clean_metadata_label(emotion)
+    sub = _clean_metadata_label(primary_sub_emotion)
+    if core and sub and core.lower() != sub.lower():
+        return f"{core} / {sub}"
+    return core or sub
 
 
 # ============================================
@@ -65,10 +111,481 @@ logger = logging.getLogger(__name__)
 
 _message_store: dict[str, list] = {}    # {thread_id: [BaseMessage, ...]}
 _MAX_MESSAGE_HISTORY = 20               # Rolling window per thread
+_session_context_store: dict[str, dict] = {}  # compact stage/context fields per session
+
+_SESSION_CONTEXT_KEYS = (
+    "conversation_stage",
+    "primary_concern",
+    "concern_duration",
+    "triggering_subject",
+    "triggering_context",
+    "functional_impact",
+    "core_belief",
+    "latest_recommended_technique",
+    "latest_rejected_technique",
+    "pending_recommended_technique",
+    "pending_technique_reason",
+    "pending_technique_created_at_turn",
+    "technique_candidates",
+    "preferred_techniques",
+    "gate_confidence",
+    "gate_context_flags",
+    "gate_emotional_register",
+    "gate_intensity_hint",
+    "gate_should_skip_mood_analysis",
+    "gate_needs_full_pipeline",
+    "needs_technique",
+    "latest_referenced_entity",
+    "active_thread_summary",
+    "last_assistant_question",
+    "expected_answer_type",
+    "last_assistant_act",
+    "resolved_user_act",
+    "response_task",
+    "question_count_since_technique",
+    "active_technique",
+    "last_detected_emotion",
+    "last_detected_intensity",
+    "session_start_emotion",
+    "session_start_intensity",
+    "session_start_sub_emotion",
+    "session_start_symptoms",
+    "session_start_behaviors",
+    "technique_delivery_emotion",
+    "technique_delivery_intensity",
+    "technique_delivery_sub_emotion",
+    "technique_delivery_symptoms",
+    "technique_delivery_behaviors",
+    "peak_distress_intensity",   # highest confirmed distress this session (anchor for follow-ups)
+    "followup_turn_count",       # consecutive contextual follow-up turns since last disclosure
+    "raw_emotion_label",
+    "primary_sub_emotion",
+    "secondary_sub_emotions",
+    "detected_symptoms",
+    "detected_behaviors",
+    "detected_contexts",
+    "emotion_scores",
+    "emotion_reasoning",
+    "turn_type",
+    "turn_type_guess",
+    "technique_offered_this_turn",
+    "pending_outcome_id",
+    "previous_session_handoff",
+    "exercise_consent",
+    "solution_preference",
+    "suppressed_topics",
+    "active_issue_source",
+    "context_sufficiency",
+    "dialogue_solution_turn_count",
+    "dialogue_support_mode",
+)
+
+
+
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "0").lower() in {"1", "true", "yes", "on"}
+
+
+def _prior_assistant_technique_flag(prev_messages: list) -> bool:
+    for msg in reversed(prev_messages or []):
+        role = str(getattr(msg, "role", None) or getattr(msg, "type", "") or "").upper()
+        if "ASSISTANT" not in role and role != "AI":
+            continue
+        if bool(getattr(msg, "techniqueOfferedThisTurn", False)):
+            return True
+        if getattr(msg, "techniqueId", None):
+            return True
+        return False
+    return False
+
+
+def _turn_type_guess_for_gate(
+    *,
+    message: str,
+    gate_result: dict,
+    prev_messages: list,
+    session_context_state: dict,
+) -> str:
+    session_message_count = sum(
+        1 for msg in prev_messages or [] if str(getattr(msg, "type", "")).lower() == "human"
+    ) + 1
+    return initial_turn_type_guess(
+        current_message=message,
+        session_message_count=session_message_count,
+        gate_route=str((gate_result or {}).get("route") or ""),
+        gate_context_flags=list((gate_result or {}).get("context_flags") or []),
+        last_assistant_message=last_assistant_text(prev_messages),
+        previous_context=session_context_state,
+        expected_answer_type=session_context_state.get("expected_answer_type"),
+        prior_technique_offered=_prior_assistant_technique_flag(prev_messages),
+    )
+
+
+def _load_session_context_state(session_id: str) -> dict:
+    """Fast in-memory therapeutic context for same-session continuity."""
+    if not session_id:
+        return {}
+    return dict(_session_context_store.get(session_id, {}))
+
+
+def _remember_session_context(session_id: str, state: dict) -> None:
+    """Persist compact non-message state between turns without DB latency."""
+    if not session_id:
+        return
+
+    previous = _session_context_store.get(session_id, {})
+    updates = {key: state.get(key) for key in _SESSION_CONTEXT_KEYS if key in state}
+    updates.update(commit_conversation_context(state, previous))
+
+    def _as_string_list(value) -> list[str]:
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item or "").strip()]
+        if value is None:
+            return []
+        text = str(value).strip()
+        return [text] if text else []
+
+    technique = state.get("recommended_technique") or {}
+    if technique and technique.get("name"):
+        updates["latest_recommended_technique"] = technique
+        updates["active_technique"] = {**technique, "status": "offered"}
+
+    detected_emotion = state.get("fused_emotion") or state.get("emotion")
+    detected_intensity = state.get("fused_intensity", state.get("intensity"))
+    if not previous.get("session_start_emotion") and detected_emotion:
+        updates["session_start_emotion"] = detected_emotion
+        updates["session_start_intensity"] = detected_intensity
+        updates["session_start_sub_emotion"] = state.get("primary_sub_emotion")
+        updates["session_start_symptoms"] = _as_string_list(state.get("detected_symptoms"))
+        updates["session_start_behaviors"] = _as_string_list(state.get("detected_behaviors"))
+    if state.get("conversation_strategy") == "suggest_technique" and technique:
+        updates["technique_delivery_emotion"] = state.get("technique_selection_emotion") or detected_emotion
+        updates["technique_delivery_intensity"] = state.get("technique_selection_intensity") or detected_intensity
+        updates["technique_delivery_sub_emotion"] = state.get("primary_sub_emotion")
+        updates["technique_delivery_symptoms"] = _as_string_list(state.get("detected_symptoms"))
+        updates["technique_delivery_behaviors"] = _as_string_list(state.get("detected_behaviors"))
+    current_gate_route = state.get("gate_route", "")
+    # Routes where the current message is a contextual reply, not a fresh disclosure.
+    # We must NOT update last_detected_intensity on these turns — doing so causes
+    # circular drift where follow-up answers (e.g. "i want to enjoy a lil bit")
+    # overwrite the real anchor established at initial disclosure.
+    _FOLLOWUP_ROUTES = {"contextual_followup", "chitchat", "memory_query", "positive_feedback", "technique_follow_up"}
+    is_followup_route = current_gate_route in _FOLLOWUP_ROUTES
+    followup_sub_emotion_enriched = bool(state.get("followup_sub_emotion_enriched"))
+    if is_followup_route:
+        for key in (
+            "last_detected_emotion",
+            "last_detected_intensity",
+            "peak_distress_intensity",
+            "raw_emotion_label",
+            "primary_sub_emotion",
+            "secondary_sub_emotions",
+            "detected_symptoms",
+            "detected_behaviors",
+            "detected_contexts",
+            "emotion_scores",
+        ):
+            updates.pop(key, None)
+        if followup_sub_emotion_enriched:
+            if state.get("primary_sub_emotion"):
+                updates["primary_sub_emotion"] = state.get("primary_sub_emotion")
+            if state.get("secondary_sub_emotions") is not None:
+                updates["secondary_sub_emotions"] = state.get("secondary_sub_emotions") or []
+            if state.get("detected_symptoms") is not None:
+                updates["detected_symptoms"] = state.get("detected_symptoms") or []
+            if state.get("detected_behaviors") is not None:
+                updates["detected_behaviors"] = state.get("detected_behaviors") or []
+            if state.get("detected_contexts") is not None:
+                updates["detected_contexts"] = state.get("detected_contexts") or []
+    else:
+        for key in ("last_detected_emotion", "last_detected_intensity", "peak_distress_intensity"):
+            updates.pop(key, None)
+
+    should_write_anchor, anchor_intensity, anchor_reason = anchor_write_policy(
+        state,
+        previous,
+        detected_intensity,
+    )
+
+    if detected_emotion and not is_followup_route and should_write_anchor:
+        updates["last_detected_emotion"] = detected_emotion
+    # Only anchor intensity on genuine therapeutic disclosures — not follow-ups.
+    if detected_intensity is not None and not is_followup_route and should_write_anchor and anchor_intensity is not None:
+        updates["last_detected_intensity"] = anchor_intensity
+    elif not is_followup_route and not should_write_anchor:
+        print(f"[SESSION_CONTEXT] Anchor write skipped: {anchor_reason}")
+
+    # Track peak distress for anchoring: only raise, never lower.
+    if (
+        anchor_intensity is not None
+        and should_write_anchor
+        and anchor_intensity >= 0.5
+        and current_gate_route in {"therapeutic", "crisis", ""}
+    ):
+        current_peak = float(previous.get("peak_distress_intensity") or 0.0)
+        updates["peak_distress_intensity"] = max(current_peak, anchor_intensity)
+
+    # Track consecutive contextual follow-up turns for progressive decay calculation.
+    if current_gate_route == "contextual_followup":
+        prev_count = int(previous.get("followup_turn_count") or 0)
+        updates["followup_turn_count"] = prev_count + 1
+    elif current_gate_route in {"therapeutic", "crisis"}:
+        updates["followup_turn_count"] = 0  # Reset counter on new emotional disclosure
+
+    if not is_followup_route and state.get("primary_sub_emotion"):
+        updates["primary_sub_emotion"] = state.get("primary_sub_emotion")
+    if not is_followup_route and state.get("secondary_sub_emotions") is not None:
+        updates["secondary_sub_emotions"] = state.get("secondary_sub_emotions") or []
+    if not is_followup_route and state.get("detected_symptoms") is not None:
+        updates["detected_symptoms"] = state.get("detected_symptoms") or []
+    if not is_followup_route and state.get("detected_behaviors") is not None:
+        updates["detected_behaviors"] = state.get("detected_behaviors") or []
+    if not is_followup_route and state.get("detected_contexts") is not None:
+        updates["detected_contexts"] = state.get("detected_contexts") or []
+    if not is_followup_route and state.get("emotion_scores") is not None:
+        updates["emotion_scores"] = state.get("emotion_scores") or {}
+
+    intent = state.get("intent")
+    if intent == "reject_technique":
+        rejected = state.get("latest_recommended_technique") or previous.get("latest_recommended_technique") or technique
+        if rejected:
+            updates["latest_rejected_technique"] = rejected
+
+    if intent in {"technique_preference_update", "positive_feedback"}:
+        preferred = list(previous.get("preferred_techniques") or [])
+        preferred_candidate = (
+            state.get("active_technique")
+            or state.get("latest_recommended_technique")
+            or previous.get("latest_recommended_technique")
+            or technique
+        )
+        if preferred_candidate and preferred_candidate.get("name"):
+            if not any((p.get("name") or "").lower() == preferred_candidate["name"].lower() for p in preferred if isinstance(p, dict)):
+                preferred.append(preferred_candidate)
+        updates["preferred_techniques"] = preferred[-5:]
+
+    compact = dict(previous)
+    clearable = {"last_assistant_question", "expected_answer_type"}
+    for key, value in updates.items():
+        if key in clearable:
+            compact[key] = value
+        elif value not in (None, "", []):
+            compact[key] = value
+    _session_context_store[session_id] = compact
+
+
+def clear_session_context(session_id: str) -> None:
+    """
+    Purge ALL in-memory state for a given session_id.
+
+    Call this when the user starts a brand-new session so that:
+    - Emotional anchors (last_detected_emotion, peak_distress_intensity)
+    - Therapeutic thread (primary_concern, active_thread_summary, core_belief)
+    - Consent state (exercise_consent, solution_preference, suppressed_topics)
+    - Message history (_message_store)
+    ...do NOT bleed from a previous session into the new one.
+
+    The in-memory stores are the ONLY source of turn-to-turn context for the
+    v6.0 no-checkpointer architecture.  Clearing them guarantees a clean slate.
+    """
+    if not session_id:
+        return
+    removed_ctx = _session_context_store.pop(session_id, None)
+    removed_msg = _message_store.pop(session_id, None)
+    ctx_keys = len(removed_ctx) if isinstance(removed_ctx, dict) else 0
+    msg_count = len(removed_msg) if isinstance(removed_msg, list) else 0
+    print(
+        f"[SESSION_CLEAR] Purged in-memory state for session {session_id[:20]}... "
+        f"| context_keys={ctx_keys} | messages={msg_count}"
+    )
 
 
 def _elapsed_s(start: float) -> float:
     return time.time() - start
+
+
+def _voice_confidence(value) -> float:
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _latency_monitoring_enabled() -> bool:
+    """Return whether detailed agent-stage latency logs should be emitted."""
+    return os.getenv("SENTIMIND_LATENCY_MONITORING", "1").lower() not in {"0", "false", "no", "off"}
+
+
+def _latency_threshold_ms() -> int:
+    """Slow-stage warning threshold in milliseconds."""
+    raw = os.getenv("SENTIMIND_LATENCY_STAGE_WARN_MS", "800")
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 800
+
+
+def _latency_mark(trace: list, stage: str, start: float, **metadata) -> list:
+    """Append one stage timing to a trace and emit a structured log line."""
+    if not _latency_monitoring_enabled():
+        return trace
+
+    duration_ms = round(_elapsed_s(start) * 1000, 2)
+    threshold_ms = _latency_threshold_ms()
+    slow = duration_ms >= threshold_ms
+    item = {
+        "stage": stage,
+        "duration_ms": duration_ms,
+        "slow": slow,
+        **{k: v for k, v in metadata.items() if v not in (None, "", [], {})},
+    }
+    trace.append(item)
+
+    log = logger.warning if slow else logger.info
+    log(
+        "Latency AGENT | stage=%s duration_ms=%.2f slow=%s route=%s session=%s",
+        stage,
+        duration_ms,
+        slow,
+        metadata.get("route", "n/a"),
+        metadata.get("session_id", "n/a"),
+    )
+    return trace
+
+
+async def _timed_graph_node(stage: str, node_func, state: MentalHealthState) -> dict:
+    """Run a LangGraph node and append its duration to the state trace."""
+    stage_start = time.time()
+    try:
+        result = node_func(state)
+        if asyncio.iscoroutine(result):
+            result = await result
+    except Exception:
+        trace = list(state.get("latency_trace", []))
+        _latency_mark(trace, stage, stage_start, status="error", session_id=state.get("session_id"))
+        raise
+
+    if not isinstance(result, dict):
+        result = {}
+
+    trace = list(state.get("latency_trace", []))
+    _latency_mark(
+        trace,
+        stage,
+        stage_start,
+        route=state.get("gate_route"),
+        session_id=state.get("session_id"),
+        strategy=result.get("conversation_strategy") or state.get("conversation_strategy"),
+    )
+    result["latency_trace"] = trace
+    return result
+
+
+async def _run_parallel_intake_timed(state: MentalHealthState) -> dict:
+    return await _timed_graph_node("node.parallel_intake", run_parallel_intake, state)
+
+
+async def _run_analysis_and_planning_timed(state: MentalHealthState) -> dict:
+    return await _timed_graph_node("node.analysis_and_planning", run_analysis_and_planning, state)
+
+
+async def _run_response_pipeline_timed(state: MentalHealthState) -> dict:
+    return await _timed_graph_node("node.response_pipeline", run_response_pipeline, state)
+
+
+async def _handle_crisis_timed(state: MentalHealthState) -> dict:
+    return await _timed_graph_node("node.crisis_handler", handle_crisis, state)
+
+
+async def _generate_response_timed(state: MentalHealthState) -> dict:
+    return await _timed_graph_node("node.response_generator", generate_response, state)
+
+
+def _latency_summary(trace: list, total_start: float | None = None) -> dict:
+    """Build compact latency metadata for API responses and SSE final events."""
+    clean_trace = [item for item in trace or [] if isinstance(item, dict)]
+    bottleneck = max(clean_trace, key=lambda item: item.get("duration_ms", 0), default=None)
+    summary = {
+        "enabled": _latency_monitoring_enabled(),
+        "stage_count": len(clean_trace),
+        "slow_threshold_ms": _latency_threshold_ms(),
+        "slow_stages": [
+            {
+                "stage": item.get("stage"),
+                "duration_ms": item.get("duration_ms"),
+            }
+            for item in clean_trace
+            if item.get("slow")
+        ],
+        "bottleneck": {
+            "stage": bottleneck.get("stage"),
+            "duration_ms": bottleneck.get("duration_ms"),
+        } if bottleneck else None,
+    }
+    if total_start is not None:
+        summary["total_ms"] = round(_elapsed_s(total_start) * 1000, 2)
+    return summary
+
+
+def _extract_llm_str(response) -> str:
+    """
+    Safely extract a plain string from any LangChain LLM response object.
+
+    Gemini (and some other providers) can return `.content` as a *list* of
+    content-part dicts instead of a plain string when the model produces
+    multimodal or structured output.  Callers that blindly do
+    ``resp.content.split(" ")`` crash with 'list has no attribute split'.
+
+    This helper normalises all cases to a UTF-8 string.
+    """
+    if response is None:
+        return ""
+    # Standard LangChain message objects
+    content = getattr(response, "content", None)
+    if content is None:
+        # Fallback: raw string / unknown type
+        return str(response)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        # Gemini multimodal format: [{"type": "text", "text": "..."}] or ["...", ...]
+        parts = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                parts.append(part.get("text") or part.get("content") or "")
+            else:
+                parts.append(str(part))
+        return "".join(parts)
+    return str(content)
+
+
+async def _invoke_chat_llm(messages, *, max_tokens: int = 320, temperature: float = 0.7):
+    """LLM call with key rotation for graph bypass handlers. Always returns an AIMessage."""
+    from ..llm.groq_llm import get_llm_manager
+    from langchain_core.messages import AIMessage as _AI
+
+    manager = get_llm_manager()
+    if hasattr(manager, "ainvoke_openrouter_with_rotation"):
+        resp = await manager.ainvoke_openrouter_with_rotation(
+            messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+    elif hasattr(manager, "ainvoke_gemini_with_rotation"):
+        resp = await manager.ainvoke_gemini_with_rotation(
+            messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+    else:
+        llm = manager.get_llm().bind(max_output_tokens=max_tokens, temperature=temperature)
+        resp = await llm.ainvoke(messages)
+
+    # Normalise content to str so all callers are safe to call .split() / str ops
+    text = _extract_llm_str(resp)
+    return _AI(content=text)
 
 
 async def _load_messages_with_db_fallback(thread_id: str) -> list:
@@ -85,6 +602,8 @@ async def _load_messages_with_db_fallback(thread_id: str) -> list:
     """
     if thread_id in _message_store and _message_store[thread_id]:
         return _message_store[thread_id]
+    if _env_flag("SENTIMIND_TEST_DISABLE_DB_MESSAGE_FALLBACK"):
+        return list(_message_store.get(thread_id, []))
 
     # ── DB FALLBACK ────────────────────────────────────────────────────────
     # _message_store is empty (cold start / server restart).  Hydrate from DB.
@@ -216,7 +735,7 @@ async def _fast_casual_response(message: str, prev_messages: list) -> str:
     msgs.append(HumanMessage(content=message))
 
     try:
-        response = await llm.ainvoke(msgs)
+        response = await _invoke_chat_llm(msgs, max_tokens=int(os.getenv("SENTIMIND_BYPASS_CASUAL_MAX_TOKENS", "480")), temperature=0.6)
         return response.content if hasattr(response, 'content') else str(response)
     except Exception as e:
         print(f"[GATE] [WARN]  Casual response failed: {e}")
@@ -285,17 +804,143 @@ def _update_message_store(
     _message_store[thread_id] = all_msgs[-_MAX_MESSAGE_HISTORY:]
 
 
-def _is_short_acceptance(message: str) -> bool:
-    """True only for short affirmative replies that need prior context."""
-    text = (message or "").lower().strip()
-    if not text or len(text.split()) > 6:
-        return False
-    acceptance_signals = {
-        "yes", "yes i do", "yeah", "yep", "yup", "sure", "ok", "okay",
-        "please", "go ahead", "sounds good", "let's do it", "lets do it",
-        "i'm ready", "im ready", "guide me", "show me",
-    }
-    return text in acceptance_signals or any(text.startswith(s + " ") for s in acceptance_signals)
+def _is_explicit_exercise_request(message: str) -> bool:
+    text = (message or "").lower()
+    exercise_words = ("exercise", "technique", "breathing", "meditation", "mindfulness", "grounding", "relaxation")
+    return any(word in text for word in exercise_words)
+
+
+_FRESH_DISTRESS_MARKERS = (
+    "panic",
+    "panicking",
+    "can't breathe",
+    "can t breathe",
+    "cant breathe",
+    "terrified",
+    "hopeless",
+    "worthless",
+    "want to die",
+    "kill myself",
+    "hurt myself",
+    "self harm",
+    "self-harm",
+)
+
+_DIRECT_HELP_REQUEST_MARKERS = (
+    "what should i do",
+    "what can i do",
+    "how can i handle",
+    "how do i deal",
+    "any advice",
+    "can you help",
+    "suggest something",
+    "give me something",
+    "need something practical",
+)
+
+
+def _last_ai_text(messages: list) -> str:
+    for message in reversed(messages or []):
+        if getattr(message, "type", "") == "ai":
+            return getattr(message, "content", "") or ""
+    return ""
+
+
+def _established_distress_anchor(session_context_state: dict) -> float:
+    values = []
+    for key in ("last_detected_intensity", "peak_distress_intensity"):
+        try:
+            value = float(session_context_state.get(key))
+        except Exception:
+            continue
+        values.append(value)
+    return max(values, default=0.0)
+
+
+def _protect_contextual_followup_gate(
+    gate_result: dict,
+    message: str,
+    prev_messages: list,
+    session_context_state: dict,
+) -> dict:
+    """Correct obvious follow-up answers before mood analysis can overwrite anchors.
+
+    The LLM gate can sometimes see a contextual answer like
+    "i want to enjoy a lil bit but im all alone" as a fresh positive/joy
+    disclosure. If there is an established distress thread and the latest
+    message answers the assistant's previous question, keep the turn in the
+    contextual-follow-up lane so parallel_intake inherits the anchor instead
+    of rerunning mood analysis on a low-signal fragment.
+    """
+    route = str((gate_result or {}).get("route") or "therapeutic").lower()
+    if route != "therapeutic":
+        return gate_result
+
+    if not session_context_state:
+        return gate_result
+
+    anchor = _established_distress_anchor(session_context_state)
+    has_thread_context = bool(
+        session_context_state.get("active_thread_summary")
+        or session_context_state.get("primary_concern")
+        or session_context_state.get("core_belief")
+        or session_context_state.get("functional_impact")
+    )
+    if anchor < 0.5 and not has_thread_context:
+        return gate_result
+
+    last_question = (
+        session_context_state.get("last_assistant_question")
+        or extract_last_question(_last_ai_text(prev_messages))
+    )
+    if not last_question:
+        return gate_result
+
+    clean = plain_text(message)
+    if not clean or "?" in (message or ""):
+        return gate_result
+
+    if _is_explicit_exercise_request(message):
+        return gate_result
+    if has_negative_feedback_signal(message) or has_positive_outcome_signal(message):
+        return gate_result
+    if any(marker in clean for marker in _DIRECT_HELP_REQUEST_MARKERS):
+        return gate_result
+    if any(marker in clean for marker in _FRESH_DISTRESS_MARKERS):
+        return gate_result
+
+    word_count = len(re.findall(r"\w+", clean))
+    if word_count > 36:
+        return gate_result
+
+    corrected = dict(gate_result)
+    flags = list(corrected.get("context_flags") or [])
+    for flag in ("answering_previous_question", "gate_corrected_contextual_followup"):
+        if flag not in flags:
+            flags.append(flag)
+
+    try:
+        hint = min(float(corrected.get("intensity_hint", 0.2) or 0.2), 0.35)
+    except Exception:
+        hint = 0.2
+
+    corrected.update({
+        "route": "contextual_followup",
+        "context_flags": flags,
+        "intensity_hint": hint,
+        "needs_full_pipeline": True,
+        "run_full_pipeline": True,
+        "should_skip_mood_analysis": True,
+        "reasoning": (
+            f"{corrected.get('reasoning', '')} | deterministic correction: "
+            "latest message answers prior context question; preserving distress anchor"
+        ).strip(" |"),
+    })
+    print(
+        "[GATE] Corrected therapeutic -> contextual_followup "
+        f"(anchor={anchor:.0%}, last_question='{str(last_question)[:60]}')"
+    )
+    return corrected
 
 
 async def _resolve_accepted_technique_name(
@@ -304,9 +949,9 @@ async def _resolve_accepted_technique_name(
     """
     Validate that an accept_technique route points to a real DB technique.
 
-    Generic replies like "yes i do" are only accepted when the previous assistant
-    turn named an actual stored technique. This prevents random fallback delivery
-    when the previous turn merely offered to "explore an idea" or do a reframe.
+    The LLM gate decides whether the latest user message is an acceptance.
+    This helper only resolves the technique name and validates it against the DB
+    so a routed acceptance cannot invent or fallback to a random exercise.
     """
     from ..tools.technique_tools import get_technique_by_name
     import re
@@ -315,12 +960,15 @@ async def _resolve_accepted_technique_name(
     if accepted:
         candidates.append(str(accepted).strip())
 
-    # If the user explicitly typed a name, try that too.
-    if not _is_short_acceptance(message):
+    # If the user explicitly typed an exercise/technique request, try the full
+    # message too. Plain affirmations are resolved by the LLM gate, not by
+    # keyword-matching the user text here.
+    if _is_explicit_exercise_request(message):
         candidates.append(message.strip())
 
-    # For short yes/okay replies, inspect the last assistant turn for bolded or
-    # offer-style technique names, then validate each candidate against the DB.
+    # If the immediately previous assistant turn named a technique, validate
+    # that candidate. This is name resolution only; acceptance routing stays in
+    # the LLM gate and its context_flags.
     prev_ai_msgs = [m for m in prev_messages if getattr(m, "type", "") == "ai"]
     if prev_ai_msgs:
         prev_ai = getattr(prev_ai_msgs[-1], "content", "") or ""
@@ -416,15 +1064,61 @@ def _gate_route_to_intent(route: str, confidence: float, message: str) -> str:
         return "crisis_signal"
     if route == "chitchat":
         return "chitchat"
-    return "venting"
+    if route == "therapeutic":
+        return "therapeutic"
+    if route == "contextual_followup":
+        return "contextual_followup"
+    if route == "technique_request":
+        return "technique_request"
+    if route == "technique_follow_up":
+        return "technique_follow_up"
+    if route == "memory_query":
+        return "memory_query"
+    if route == "positive_feedback":
+        return "positive_feedback"
+    return "therapeutic"
+
+
+def _gate_state_fields(gate_result: dict) -> dict:
+    """Fields from smart_pipeline_gate that must survive into graph state."""
+    res = {
+        "gate_route": gate_result.get("route", "therapeutic"),
+        "gate_confidence": float(gate_result.get("confidence", 0.0) or 0.0),
+        "gate_emotional_register": gate_result.get("emotional_register"),
+        "gate_context_flags": list(gate_result.get("context_flags") or []),
+        "gate_intensity_hint": gate_result.get("intensity_hint"),
+        "gate_should_skip_mood_analysis": bool(gate_result.get("should_skip_mood_analysis", False)),
+        "gate_needs_full_pipeline": bool(gate_result.get("needs_full_pipeline", gate_result.get("run_full_pipeline", True))),
+       
+  
+    }
+    # Propagate consent/preference fields if present in gate result
+    for key in ["exercise_consent", "solution_preference", "active_issue_source", "suppression_signal", "suppressed_topic"]:
+        if gate_result.get(key) not in (None, ""):
+            res[key] = gate_result[key]
+    return res
+
 
 
 async def _memory_query_response(
     message: str, user_id: str, session_id: str, prev_messages: list, start_time: float
 ) -> dict:
-    """Load ChromaDB facts + session summaries and answer the user's memory question."""
+    """Load facts + session summaries and answer the user's memory question."""
     from ..llm.groq_llm import get_chat_llm
     from langchain_core.messages import SystemMessage as SysMsg
+
+    session_ctx = _load_session_context_state(session_id)
+    latest_tech = session_ctx.get("latest_recommended_technique") or {}
+    preferred = session_ctx.get("preferred_techniques") or []
+    lower = (message or "").lower()
+    if latest_tech and latest_tech.get("name") and any(k in lower for k in ("technique", "exercise", "breathing", "its name", "what was")):
+        if "first" in lower and preferred:
+            remembered = preferred[0] if isinstance(preferred[0], dict) else latest_tech
+        else:
+            remembered = latest_tech
+        reply = f"The technique was **{remembered.get('name')}**."
+        print(f"[GATE-BYPASS] memory_query answered from session technique context: {remembered.get('name')}")
+        return _wrap_bypass_result(reply, session_id, "gate:memory_query_bypass", start_time)
 
     facts_text   = ""
     summary_text = ""
@@ -463,7 +1157,7 @@ async def _memory_query_response(
             msgs.append(HumanMessage(content=c) if role == "human" else AIMessage(content=c))
     msgs.append(HumanMessage(content=message))
 
-    resp  = await llm.ainvoke(msgs)
+    resp  = await _invoke_chat_llm(msgs, max_tokens=int(os.getenv("SENTIMIND_BYPASS_MEMORY_MAX_TOKENS", "600")), temperature=0.5)
     reply = resp.content if hasattr(resp, "content") else str(resp)
     print(f"[GATE-BYPASS] memory_query replied in {int((time.time()-start_time)*1000)}ms")
     return _wrap_bypass_result(reply, session_id, "gate:memory_query_bypass", start_time)
@@ -523,7 +1217,7 @@ async def _list_techniques_response(
             msgs.append(HumanMessage(content=c) if role == "human" else AIMessage(content=c))
     msgs.append(HumanMessage(content=f"Please list the {category or 'available'} techniques"))
 
-    resp  = await llm.ainvoke(msgs)
+    resp  = await _invoke_chat_llm(msgs, max_tokens=int(os.getenv("SENTIMIND_BYPASS_LIST_MAX_TOKENS", "1024")), temperature=0.5)
     reply = resp.content if hasattr(resp, "content") else str(resp)
     print(f"[GATE-BYPASS] list_techniques replied ({len(techniques)} items) in {int((time.time()-start_time)*1000)}ms")
     return _wrap_bypass_result(reply, session_id, "gate:list_techniques_bypass", start_time)
@@ -534,6 +1228,7 @@ async def _accept_technique_response(
     user_id: str,
     session_id: str,
     prev_messages: list,
+    user_message: str,
     start_time: float,
     technique_data: Optional[dict] = None,
 ) -> dict:
@@ -569,7 +1264,8 @@ async def _accept_technique_response(
             f"Step count available in DB/sidebar: {len(steps) if isinstance(steps, list) else 0}"
         )
         system_content = (
-            f"You are SentiMind. The user just said YES to trying {technique.get('name')}.\n\n"
+            f"You are SentiMind. The router has resolved the latest user message as agreement "
+            f"to try {technique.get('name')}.\n\n"
             f"TECHNIQUE TO ACKNOWLEDGE:\n{tech_block}\n\n"
             "1. Respond warmly in 1 sentence (e.g. 'Great, let\u2019s do this together!')\n"
             "2. Name the technique and tell them the steps are ready in the exercise panel/sidebar.\n"
@@ -589,9 +1285,9 @@ async def _accept_technique_response(
         c    = getattr(m, "content", "")
         if c:
             msgs.append(HumanMessage(content=c) if role == "human" else AIMessage(content=c))
-    msgs.append(HumanMessage(content="yes"))
+    msgs.append(HumanMessage(content=user_message or "I agree to try it."))
 
-    resp  = await llm.ainvoke(msgs)
+    resp  = await _invoke_chat_llm(msgs, max_tokens=int(os.getenv("SENTIMIND_BYPASS_ACCEPT_MAX_TOKENS", "480")), temperature=0.5)
     reply = resp.content if hasattr(resp, "content") else str(resp)
     print(f"[GATE-BYPASS] accept_technique '{technique_name}' replied in {int((time.time()-start_time)*1000)}ms")
     return _wrap_bypass_result(reply, session_id, "gate:accept_technique_bypass", start_time, technique=technique)
@@ -621,10 +1317,190 @@ async def _rejection_response(
             msgs.append(HumanMessage(content=c) if role == "human" else AIMessage(content=c))
     msgs.append(HumanMessage(content=message))
 
-    resp  = await llm.ainvoke(msgs)
+    resp  = await _invoke_chat_llm(msgs, max_tokens=int(os.getenv("SENTIMIND_BYPASS_REJECTION_MAX_TOKENS", "480")), temperature=0.5)
     reply = resp.content if hasattr(resp, "content") else str(resp)
     print(f"[GATE-BYPASS] rejection replied in {int((time.time()-start_time)*1000)}ms")
     return _wrap_bypass_result(reply, session_id, "gate:rejection_bypass", start_time)
+
+
+async def _technique_rejection_response(
+    message: str, session_id: str, prev_messages: list, start_time: float
+) -> dict:
+    """Handle rejection of a specific prior technique without escalation."""
+    from ..llm.groq_llm import get_chat_llm
+    from langchain_core.messages import SystemMessage as SysMsg
+
+    session_ctx = _load_session_context_state(session_id)
+    latest = session_ctx.get("latest_recommended_technique") or session_ctx.get("active_technique") or {}
+    latest_name = latest.get("name") if isinstance(latest, dict) else ""
+
+    llm = get_chat_llm()
+    msgs = [SysMsg(content=(
+        "You are SentiMind, a warm AI wellness companion.\n"
+        "The user is rejecting or disliking a specific technique that was already offered.\n"
+        f"Latest technique name: {latest_name or 'unknown'}.\n\n"
+        "Rules:\n"
+        "1. Treat this as mild negative feedback, not anger, crisis, or a new emotional disclosure.\n"
+        "2. Acknowledge it without defensiveness.\n"
+        "3. Do not suggest a replacement yet.\n"
+        "4. Ask one short question about what felt unhelpful.\n"
+        "5. Keep it to 2-3 sentences."
+    ))]
+    for m in prev_messages[-4:]:
+        role = getattr(m, "type", "human")
+        c = getattr(m, "content", "")
+        if c:
+            msgs.append(HumanMessage(content=c) if role == "human" else AIMessage(content=c))
+    msgs.append(HumanMessage(content=message))
+
+    resp = await _invoke_chat_llm(msgs, max_tokens=int(os.getenv("SENTIMIND_BYPASS_TECH_REJECTION_MAX_TOKENS", "480")), temperature=0.5)
+    reply = resp.content if hasattr(resp, "content") else str(resp)
+    result = _wrap_bypass_result(reply, session_id, "gate:technique_rejection_bypass", start_time)
+    result.update({
+        "emotion": "neutral",
+        "sentiment": "negative",
+        "intensity": 0.35,
+        "confidence": 0.85,
+    })
+    print(f"[GATE-BYPASS] technique rejection replied in {int((time.time()-start_time)*1000)}ms")
+    return result
+
+
+async def _positive_feedback_response(
+    message: str, session_id: str, prev_messages: list, start_time: float
+) -> dict:
+    """Warmly acknowledge that a technique or step helped."""
+    from ..llm.groq_llm import get_chat_llm
+    from langchain_core.messages import SystemMessage as SysMsg
+
+    session_ctx = _load_session_context_state(session_id)
+    latest = session_ctx.get("latest_recommended_technique") or session_ctx.get("active_technique") or {}
+    latest_name = latest.get("name") if isinstance(latest, dict) else ""
+
+    llm = get_chat_llm()
+    msgs = [SysMsg(content=(
+        "You are SentiMind, a warm AI wellness companion.\n"
+        "The user is giving positive feedback after support or a technique.\n"
+        f"Latest technique name: {latest_name or 'unknown'}.\n\n"
+        "Rules:\n"
+        "1. Respond warmly and specifically.\n"
+        "2. If a latest technique name exists, mention it briefly.\n"
+        "3. Do not suggest a new technique.\n"
+        "4. Ask one gentle follow-up about what changed or what they noticed.\n"
+        "5. Keep it to 2-3 sentences."
+    ))]
+    for m in prev_messages[-4:]:
+        role = getattr(m, "type", "human")
+        c = getattr(m, "content", "")
+        if c:
+            msgs.append(HumanMessage(content=c) if role == "human" else AIMessage(content=c))
+    msgs.append(HumanMessage(content=message))
+
+    resp = await _invoke_chat_llm(msgs, max_tokens=int(os.getenv("SENTIMIND_BYPASS_POSITIVE_MAX_TOKENS", "480")), temperature=0.5)
+    reply = resp.content if hasattr(resp, "content") else str(resp)
+    result = _wrap_bypass_result(reply, session_id, "gate:positive_feedback_bypass", start_time)
+    result.update({
+        "emotion": "joy",
+        "sentiment": "positive",
+        "intensity": 0.15,
+        "confidence": 0.85,
+    })
+    print(f"[GATE-BYPASS] positive feedback replied in {int((time.time()-start_time)*1000)}ms")
+    return result
+
+
+async def _crisis_gate_response(
+    message: str,
+    user_id: str,
+    session_id: str,
+    prev_messages: list,
+    start_time: float,
+    gate_result: dict,
+) -> dict:
+    """
+    Crisis fast path.
+
+    If the smart gate has already routed the turn as crisis, do not run the
+    therapeutic graph. Crisis needs safety handling and a crisis response only;
+    mood/trend/clinical/distortion/technique work is not response-critical here.
+    """
+    metadata = gate_result.get("metadata") or {}
+    crisis_level = metadata.get("crisis_level") or "medium"
+    if crisis_level not in {"medium", "high"}:
+        crisis_level = "medium"
+
+    crisis_state = {
+        "messages": list(prev_messages) + [HumanMessage(content=message)],
+        "user_id": user_id,
+        "session_id": session_id,
+        "emotion": "sadness",
+        "fused_emotion": "sadness",
+        "raw_emotion_label": "crisis",
+        "primary_sub_emotion": "hopelessness",
+        "secondary_sub_emotions": ["distress"],
+        "emotion_scores": {"sadness": 0.95, "fear": 0.6},
+        "emotion_reasoning": "smart gate crisis route",
+        "sentiment": "negative",
+        "intensity": 0.95,
+        "fused_intensity": 0.95,
+        "confidence": gate_result.get("confidence", 0.8),
+        "crisis_detected": True,
+        "crisis_level": crisis_level,
+        "crisis_pre_screened": True,
+        "conversation_strategy": "crisis",
+        "conversation_phase": "venting",
+        "technique_readiness": 0.0,
+        "agent_role": "crisis_support",
+        "tools_used": ["smart_pipeline_gate"],
+        "recommended_technique": {},
+        "recommended_techniques_by_category": {},
+        "alternative_techniques": [],
+        "memory_context": gate_result.get("prefetched_user_context", ""),
+        "prefetched_session_context": gate_result.get("prefetched_session_context", {}),
+    }
+
+    print(f"[GATE-ROUTE] Crisis fast path | level={crisis_level} | skipping therapeutic graph")
+    crisis_updates = await handle_crisis(crisis_state)
+    response_state = {**crisis_state, **(crisis_updates or {})}
+    response_updates = await generate_response(response_state)
+    final_state = {**response_state, **(response_updates or {})}
+
+    reply = final_state.get("final_response") or (
+        "I'm really glad you told me. I want to stay with you through this moment. "
+        "Are you safe right now?"
+    )
+
+    if not _env_flag("SENTIMIND_DISABLE_BACKGROUND_PERSIST_FOR_TESTS"):
+        try:
+            asyncio.create_task(_background_persist(final_state))
+        except Exception as bg_err:
+            print(f"[GATE-CRISIS] Background persist scheduling failed: {bg_err}")
+
+    result = _wrap_bypass_result(reply, session_id, "gate:crisis_fast_path", start_time)
+    crisis_emotion = _clean_metadata_label(final_state.get("fused_emotion", final_state.get("emotion")), "sadness")
+    crisis_primary = _clean_metadata_label(final_state.get("primary_sub_emotion"))
+    result.update({
+        "emotion": crisis_emotion,
+        "raw_emotion_label": _clean_metadata_label(final_state.get("raw_emotion_label")),
+        "emotion_label": _emotion_label(crisis_emotion, crisis_primary),
+        "primary_sub_emotion": crisis_primary,
+        "secondary_sub_emotions": _clean_metadata_list(final_state.get("secondary_sub_emotions", [])),
+        "detected_symptoms": _clean_metadata_list(final_state.get("detected_symptoms", [])),
+        "detected_behaviors": _clean_metadata_list(final_state.get("detected_behaviors", [])),
+        "detected_contexts": _clean_metadata_list(final_state.get("detected_contexts", [])),
+        "emotion_scores": final_state.get("emotion_scores", {}),
+        "emotion_reasoning": final_state.get("emotion_reasoning"),
+        "sentiment": _clean_metadata_label(final_state.get("sentiment"), "negative"),
+        "intensity": final_state.get("fused_intensity", final_state.get("intensity", 0.95)),
+        "confidence": final_state.get("confidence", gate_result.get("confidence", 0.8)),
+        "crisis_detected": True,
+        "crisis_level": final_state.get("crisis_level", crisis_level),
+        "tools_used": final_state.get("tools_used", ["smart_pipeline_gate", "handle_crisis"]),
+        "node_trace": ["smart_gate", "crisis_handler", "response_generator"],
+        "conversation_strategy": "crisis",
+        "conversation_phase": "venting",
+    })
+    return result
 
 
 
@@ -637,6 +1513,15 @@ async def _background_extract_facts(user_id: str, message: str, session_id: str)
         print(f"[MEMORY:FACTS] Background extraction failed (non-fatal): {str(e)[:80]}")
 
 
+async def _background_record_technique_feedback(state: dict) -> None:
+    """Fire-and-forget personalization write for explicit technique feedback."""
+    try:
+        from ..nodes.outcome_tracker_node import record_explicit_technique_feedback
+        await record_explicit_technique_feedback(state)
+    except Exception as e:
+        print(f"[PERSIST] Positive technique feedback update failed (non-fatal): {str(e)[:100]}")
+
+
 async def _execute_gate_route(
     gate_result: dict,
     message: str,
@@ -644,30 +1529,66 @@ async def _execute_gate_route(
     actual_session_id: str,
     prev_messages: list,
     start_time: float,
+    voice_features: Optional[dict] = None,
+    audio_file_path: Optional[str] = None,
 ) -> Optional[dict]:
     """
     Dispatcher: maps the gate route to the right bypass handler.
     Returns a completed result dict (bypass ran), or None (run full pipeline).
     Also updates _message_store for every bypass route.
+
+    voice_features: when provided, all bypass handlers are skipped and None
+    is returned so the full pipeline runs with voice emotion data intact.
     """
     route    = gate_result.get("route", "therapeutic")
     conf     = gate_result.get("confidence", 0.5)
     metadata = gate_result.get("metadata") or {}
+    previous_context = _load_session_context_state(actual_session_id)
+    prior_exercise_consent = previous_context.get("exercise_consent", "unknown")
+    prior_solution_preference = previous_context.get("solution_preference", "unknown")
+    prior_blocks_exercises = (
+        prior_exercise_consent in {"denied_soft", "denied_hard"}
+        or prior_solution_preference == "listen_only"
+    )
+    explicit_current_exercise_request = _is_explicit_exercise_request(message)
+
+    if prior_blocks_exercises and not explicit_current_exercise_request:
+        flags = gate_result.get("context_flags") or []
+        blocked_acceptance = route in {"accept_technique", "list_techniques", "technique_request"} or (
+            route == "technique_follow_up" and "accept_technique" in flags
+        )
+        if blocked_acceptance and "reject_technique" not in flags and "technique_rejection" not in flags:
+            print(
+                "[GATE-ROUTE] Technique bypass blocked by prior listen-only/exercise refusal; "
+                "running full pipeline for consent-aware response"
+            )
+            return None
+
+    # If voice features or an audio file are present, the full pipeline MUST run so that:
+    # 1. voice_features are injected or extracted in input_state
+    # 2. emotion_fusion_node CASE 0 (therapeutic voice feature passthrough) executes
+    # 3. The response generator sees the voice emotion context
+    # Bypass routes (chitchat, memory, list, accept, reject) are NOT voice-aware
+    # and would silently drop all emotion data from the Gemini audio call.
+    if voice_features or audio_file_path:
+        print(f"[GATE-ROUTE] Voice message detected (audio={bool(audio_file_path)}, features={bool(voice_features)}) — forcing full pipeline (bypassing '{route}' gate)")
+        return None
 
     result: Optional[dict] = None
 
     if route == "chitchat":
-        if _is_short_acceptance(message):
-            print("[GATE-ROUTE] Chitchat rejected: short agreement needs conversation-state handling")
-            return None
-        # Fire-and-forget fact extraction even on bypass — LLM decides if there's a fact
-        asyncio.create_task(_background_extract_facts(user_id, message, actual_session_id))
+        # Fire-and-forget fact extraction even on bypass — LLM decides if there's a fact (skip if trivial/short)
+        if not _env_flag("SENTIMIND_DISABLE_BACKGROUND_PERSIST_FOR_TESTS"):
+            if len(message.split()) >= 8:
+                asyncio.create_task(_background_extract_facts(user_id, message, actual_session_id))
         print(f"[GATE-ROUTE] Chitchat bypass — LLM decision trusted directly (conf={conf:.0%})")
         reply  = await _fast_casual_response(message, prev_messages)
         result = _wrap_bypass_result(reply, actual_session_id, "gate:chitchat_bypass", start_time)
 
     elif route == "memory_query":
-        asyncio.create_task(_background_extract_facts(user_id, message, actual_session_id))
+        if not _env_flag("SENTIMIND_DISABLE_BACKGROUND_PERSIST_FOR_TESTS"):
+            if len(message.split()) >= 8:
+                asyncio.create_task(_background_extract_facts(user_id, message, actual_session_id))
         print(f"[GATE-ROUTE] Memory query bypass — LLM trusted (conf={conf:.0%})")
         result = await _memory_query_response(
             message, user_id, actual_session_id, prev_messages, start_time
@@ -678,6 +1599,70 @@ async def _execute_gate_route(
         print(f"[GATE-ROUTE] List techniques bypass — LLM trusted (conf={conf:.0%}) | category={category}")
         result = await _list_techniques_response(
             category, user_id, actual_session_id, prev_messages, start_time
+        )
+
+    elif route == "technique_request":
+        if "list_techniques" in (gate_result.get("context_flags") or []):
+            category = metadata.get("technique_category")
+            print(f"[GATE-ROUTE] Technique list request bypass | category={category}")
+            result = await _list_techniques_response(
+                category, user_id, actual_session_id, prev_messages, start_time
+            )
+        elif metadata.get("accepted_technique") and _is_explicit_exercise_request(message):
+            accepted = await _resolve_accepted_technique_name(
+                metadata.get("accepted_technique"), message, prev_messages
+            )
+            if accepted:
+                print(f"[GATE-ROUTE] Named technique request bypass | technique={accepted}")
+                result = await _accept_technique_response(
+                    accepted,
+                    user_id,
+                    actual_session_id,
+                    prev_messages,
+                    message,
+                    start_time,
+                    metadata.get("exercise_data"),
+                )
+            else:
+                print("[GATE-ROUTE] Technique request continues through stage machine")
+                return None
+        else:
+            return None
+
+    elif route == "technique_follow_up":
+        flags = gate_result.get("context_flags") or []
+        if "reject_technique" in flags or "technique_rejection" in flags:
+            if not _env_flag("SENTIMIND_DISABLE_BACKGROUND_PERSIST_FOR_TESTS"):
+                asyncio.create_task(_background_extract_facts(user_id, message, actual_session_id))
+            print(f"[GATE-ROUTE] Technique rejection bypass (conf={conf:.0%})")
+            result = await _technique_rejection_response(
+                message, actual_session_id, prev_messages, start_time
+            )
+        elif "accept_technique" in flags:
+            accepted = metadata.get("accepted_technique")
+            accepted = await _resolve_accepted_technique_name(accepted, message, prev_messages)
+            if not accepted:
+                print("[GATE-ROUTE] Technique follow-up accept needs full context")
+                return None
+            print(f"[GATE-ROUTE] Technique acceptance bypass | technique={accepted}")
+            result = await _accept_technique_response(
+                accepted,
+                user_id,
+                actual_session_id,
+                prev_messages,
+                message,
+                start_time,
+                metadata.get("exercise_data"),
+            )
+        else:
+            return None
+
+    elif route == "positive_feedback":
+        if not _env_flag("SENTIMIND_DISABLE_BACKGROUND_PERSIST_FOR_TESTS"):
+            asyncio.create_task(_background_extract_facts(user_id, message, actual_session_id))
+        print(f"[GATE-ROUTE] Positive feedback bypass (conf={conf:.0%})")
+        result = await _positive_feedback_response(
+            message, actual_session_id, prev_messages, start_time
         )
 
     elif route == "accept_technique":
@@ -692,20 +1677,115 @@ async def _execute_gate_route(
             user_id,
             actual_session_id,
             prev_messages,
+            message,
             start_time,
             metadata.get("exercise_data"),
         )
 
     elif route == "rejection":
-        asyncio.create_task(_background_extract_facts(user_id, message, actual_session_id))
+        if not _env_flag("SENTIMIND_DISABLE_BACKGROUND_PERSIST_FOR_TESTS"):
+            asyncio.create_task(_background_extract_facts(user_id, message, actual_session_id))
         print(f"[GATE-ROUTE] Rejection bypass — LLM trusted (conf={conf:.0%})")
         result = await _rejection_response(
             message, actual_session_id, prev_messages, start_time
         )
 
+    elif route == "crisis":
+        result = await _crisis_gate_response(
+            message,
+            user_id,
+            actual_session_id,
+            prev_messages,
+            start_time,
+            gate_result,
+        )
+
     if result is not None:
+        result.update(_gate_state_fields(gate_result))
+        flags = gate_result.get("context_flags") or []
+        if (
+            route in {"accept_technique", "technique_follow_up", "technique_request"}
+            and "reject_technique" not in flags
+            and result.get("recommended_technique")
+        ):
+            result.update({
+                "intent": "accept_technique",
+                "conversation_stage": "FOLLOW_UP",
+                "conversation_strategy": "suggest_technique",
+                "needs_technique": True,
+                "latest_recommended_technique": result.get("recommended_technique"),
+                "active_technique": {**result.get("recommended_technique", {}), "status": "active"} if result.get("recommended_technique") else None,
+                "gate_context_flags": flags or ["accept_technique"],
+                "response_task": "continue_active_technique",
+                "exercise_consent": "allowed",
+                "solution_preference": "exercise_requested",
+            })
+        elif route == "rejection" or (
+            route == "technique_follow_up"
+            and ("reject_technique" in flags or "technique_rejection" in flags)
+        ):
+            rejected = previous_context.get("latest_recommended_technique")
+            result.update({
+                "intent": "reject_technique",
+                "conversation_stage": "FOLLOW_UP",
+                "conversation_strategy": "encourage_reflection",
+                "needs_technique": False,
+                "latest_rejected_technique": rejected,
+                "latest_recommended_technique": previous_context.get("latest_recommended_technique"),
+                "gate_context_flags": flags or ["reject_technique", "technique_rejection"],
+                "response_task": "handle_technique_rejection",
+                "intensity": min(float(result.get("intensity", 0.0) or 0.0), 0.45),
+            })
+        elif route == "memory_query":
+            result.update({
+                "intent": "memory_query",
+                "conversation_stage": "FOLLOW_UP",
+                "conversation_strategy": "encourage_reflection",
+                "needs_technique": False,
+                "latest_recommended_technique": previous_context.get("latest_recommended_technique"),
+                "latest_rejected_technique": previous_context.get("latest_rejected_technique"),
+                "gate_context_flags": ["memory_query"],
+                "response_task": "answer_memory_query",
+            })
+        elif route == "positive_feedback":
+            result.update({
+                "intent": "positive_feedback",
+                "conversation_stage": "RECOVERY",
+                "conversation_strategy": "encourage_reflection",
+                "needs_technique": False,
+                "latest_recommended_technique": previous_context.get("latest_recommended_technique"),
+                "active_technique": previous_context.get("active_technique"),
+                "gate_context_flags": flags or ["positive_feedback"],
+                "response_task": "positive_feedback",
+            })
+            feedback_state = {
+                **result,
+                "messages": list(prev_messages) + [HumanMessage(content=message)],
+                "user_id": user_id,
+                "session_id": actual_session_id,
+            }
+            if not _env_flag("SENTIMIND_DISABLE_BACKGROUND_PERSIST_FOR_TESTS"):
+                asyncio.create_task(_background_record_technique_feedback(feedback_state))
+        elif route == "chitchat":
+            result.update({
+                "intent": "chitchat",
+                "conversation_stage": "CHITCHAT",
+                "needs_technique": False,
+                "gate_context_flags": ["chitchat"],
+                "response_task": "chitchat",
+            })
+        elif route == "crisis":
+            result.update({
+                "intent": "crisis",
+                "conversation_stage": "CRISIS",
+                "needs_technique": False,
+                "gate_context_flags": ["crisis"],
+                "response_task": "crisis_support",
+            })
+
         # Persist the new turn into the in-memory message store
         _update_message_store(actual_session_id, prev_messages, message, result["response"])
+        _remember_session_context(actual_session_id, result)
 
     return result  # None => caller must run full pipeline
 
@@ -761,7 +1841,7 @@ async def screen_for_crisis(state: MentalHealthState) -> dict:
     return {
         "crisis_detected": False,
         "crisis_level": "none",
-        "crisis_pre_screened": False,
+        "crisis_pre_screened": True,
     }
 
 
@@ -849,11 +1929,11 @@ def build_graph() -> StateGraph:
     # ADD NODES (5 graph nodes  down from 10)
     # ========================================
 
-    graph.add_node("run_parallel_intake", run_parallel_intake)
-    graph.add_node("run_analysis_and_planning", run_analysis_and_planning)      # v6.0 FUSED
-    graph.add_node("run_response_pipeline", run_response_pipeline)              # v6.0 FUSED
-    graph.add_node("handle_crisis", handle_crisis)
-    graph.add_node("generate_response", generate_response)
+    graph.add_node("run_parallel_intake", _run_parallel_intake_timed)
+    graph.add_node("run_analysis_and_planning", _run_analysis_and_planning_timed)
+    graph.add_node("run_response_pipeline", _run_response_pipeline_timed)
+    graph.add_node("handle_crisis", _handle_crisis_timed)
+    graph.add_node("generate_response", _generate_response_timed)
 
     # ========================================
     # ADD EDGES (v6.0 optimized flow)
@@ -951,12 +2031,24 @@ def _build_result_dict(result: dict, actual_session_id: str, node_trace: list, p
     final_response = result.get("final_response", "I'm here to listen. How are you feeling? [HEART]")
     tools_used = result.get("tools_used", [])
     recommended_techniques_by_category = result.get("recommended_techniques_by_category", {})
+    emotion = _clean_metadata_label(result.get("fused_emotion", result.get("emotion")), "neutral")
+    primary_sub_emotion = _clean_metadata_label(result.get("primary_sub_emotion"))
+    sentiment = _clean_metadata_label(result.get("sentiment"), "neutral")
 
     return {
         "response": final_response,
         "session_id": actual_session_id,
-        "emotion": result.get("fused_emotion", result.get("emotion", "neutral")),
-        "sentiment": result.get("sentiment", "neutral"),
+        "emotion": emotion,
+        "raw_emotion_label": _clean_metadata_label(result.get("raw_emotion_label")),
+        "emotion_label": _emotion_label(emotion, primary_sub_emotion),
+        "primary_sub_emotion": primary_sub_emotion,
+        "secondary_sub_emotions": _clean_metadata_list(result.get("secondary_sub_emotions", [])),
+        "detected_symptoms": _clean_metadata_list(result.get("detected_symptoms", [])),
+        "detected_behaviors": _clean_metadata_list(result.get("detected_behaviors", [])),
+        "detected_contexts": _clean_metadata_list(result.get("detected_contexts", [])),
+        "emotion_scores": result.get("emotion_scores", {}),
+        "emotion_reasoning": result.get("emotion_reasoning"),
+        "sentiment": sentiment,
         "intensity": result.get("fused_intensity", result.get("intensity", 0.5)),
         "confidence": result.get("confidence", 0.8),
         "crisis_detected": result.get("crisis_detected", False),
@@ -966,12 +2058,52 @@ def _build_result_dict(result: dict, actual_session_id: str, node_trace: list, p
         "recommended_technique": result.get("recommended_technique", {}),
         "recommended_techniques_by_category": recommended_techniques_by_category,
         "alternative_techniques": result.get("alternative_techniques", []),
+        "technique_candidates": result.get("technique_candidates", []),
+        "llm_selected_technique_id": result.get("llm_selected_technique_id"),
         "technique_reasoning": result.get("technique_reasoning", ""),
         "processing_time_ms": processing_time,
         "emotional_trend": result.get("emotional_trend", "stable"),
         "conversation_strategy": result.get("conversation_strategy", "validate_only"),
         "conversation_phase": result.get("conversation_phase", "venting"),
         "technique_readiness": result.get("technique_readiness", 0.0),
+        "intent": result.get("intent", result.get("prefetched_intent", {}).get("intent", "")) if isinstance(result.get("prefetched_intent", {}), dict) else result.get("intent", ""),
+        "conversation_stage": result.get("conversation_stage", "DISCOVERY"),
+        "needs_technique": result.get("needs_technique", False),
+        "primary_concern": result.get("primary_concern"),
+        "concern_duration": result.get("concern_duration"),
+        "triggering_subject": result.get("triggering_subject"),
+        "triggering_context": result.get("triggering_context"),
+        "functional_impact": result.get("functional_impact"),
+        "core_belief": result.get("core_belief"),
+        "latest_recommended_technique": result.get("latest_recommended_technique"),
+        "latest_rejected_technique": result.get("latest_rejected_technique"),
+        "preferred_techniques": result.get("preferred_techniques", []),
+        "gate_route": result.get("gate_route"),
+        "gate_confidence": result.get("gate_confidence"),
+        "gate_context_flags": result.get("gate_context_flags", []),
+        "gate_emotional_register": result.get("gate_emotional_register"),
+        "gate_intensity_hint": result.get("gate_intensity_hint"),
+        "gate_should_skip_mood_analysis": result.get("gate_should_skip_mood_analysis"),
+        "gate_needs_full_pipeline": result.get("gate_needs_full_pipeline"),
+        "latest_referenced_entity": result.get("latest_referenced_entity"),
+        "active_thread_summary": result.get("active_thread_summary"),
+        "last_assistant_question": result.get("last_assistant_question"),
+        "expected_answer_type": result.get("expected_answer_type"),
+        "last_assistant_act": result.get("last_assistant_act"),
+        "resolved_user_act": result.get("resolved_user_act"),
+        "response_task": result.get("response_task"),
+        "question_count_since_technique": result.get("question_count_since_technique"),
+        "active_technique": result.get("active_technique"),
+        "compact_analysis": result.get("compact_analysis"),
+        "last_detected_emotion": result.get("last_detected_emotion"),
+        "last_detected_intensity": result.get("last_detected_intensity"),
+        "has_voice": result.get("has_voice", False),
+        "voice_transcribed": result.get("voice_transcribed", False),
+        "voice_processed": result.get("voice_processed", False),
+        "voice_features": result.get("voice_features"),
+        "transcription": result.get("transcription", ""),
+        "latency_trace": result.get("latency_trace", []),
+        "latency_summary": result.get("latency_summary", {}),
     }
 
 
@@ -1117,9 +2249,10 @@ async def _fetch_user_context_for_gate(uid: str, session_id: Optional[str] = Non
             summary_lines = summaries.strip().splitlines()
             parts.append(f"PREVIOUS SESSIONS:\n" + "\n".join(summary_lines[:16]))
         
-        # Load CURRENT session messages from database (if session_id provided)
-        # This is the CRITICAL addition - gate now sees what's been discussed in THIS conversation
-        if session_id:
+        # Recent in-session turns are already supplied to smart_pipeline_gate via
+        # recent_context from _load_messages_with_db_fallback. Avoid querying the
+        # same session messages a second time unless explicitly enabled.
+        if session_id and os.getenv("SENTIMIND_GATE_DB_SESSION_MESSAGES", "0").lower() in {"1", "true", "yes"}:
             try:
                 from ..db.client import get_prisma_client
                 
@@ -1171,10 +2304,38 @@ async def _execute_smart_gate(message: str, user_id: str, session_id: Optional[s
           f"{len(session_context.get('facts', []))} facts")
 
     # ONE context-aware gate call  the LLM has FULL context for informed routing
-    gate_result = await smart_pipeline_gate(message, recent_context, user_context, session_context)
-    gate_result["prefetched_user_context"] = user_context
-    gate_result["prefetched_session_context"] = session_context
-    return gate_result
+    try:
+        gate_result = await smart_pipeline_gate(message, recent_context, user_context, session_context)
+        # Cache successful route for grace fallbacks
+        if session_id and gate_result and "route" in gate_result:
+            if session_id not in _session_context_store:
+                _session_context_store[session_id] = {}
+            _session_context_store[session_id]["last_successful_gate_route"] = gate_result["route"]
+            
+        gate_result["prefetched_user_context"] = user_context
+        gate_result["prefetched_session_context"] = session_context
+        return gate_result
+    except Exception as e:
+        print(f"[GATE] [ERROR] smart_pipeline_gate failed: {e}. Using cached fallback...")
+        cached_route = "therapeutic"
+        if session_id and session_id in _session_context_store:
+            cached_route = _session_context_store[session_id].get("last_successful_gate_route", "therapeutic")
+            
+        fallback = {
+            "route": cached_route,
+            "confidence": 0.5,
+            "reasoning": f"gate_error_cached_fallback_to_{cached_route}",
+            "emotional_register": "concern",
+            "context_flags": ["gate_error"],
+            "intensity_hint": 0.45,
+            "needs_full_pipeline": cached_route == "therapeutic",
+            "should_skip_mood_analysis": cached_route != "therapeutic",
+            "run_full_pipeline": cached_route == "therapeutic",
+            "metadata": {},
+            "prefetched_user_context": user_context,
+            "prefetched_session_context": session_context,
+        }
+        return fallback
 
 
 # ============================================
@@ -1185,7 +2346,8 @@ async def chat_with_agent(
     user_id: str,
     message: str,
     session_id: Optional[str] = None,
-    audio_file_path: Optional[str] = None
+    audio_file_path: Optional[str] = None,
+    voice_features: Optional[dict] = None,
 ) -> dict:
     """
     Process a user message through the mental health agent.
@@ -1197,6 +2359,7 @@ async def chat_with_agent(
       4. Fire-and-forget: parallel_persist runs as background task
     """
     start_time = time.time()
+    latency_trace: list[dict] = []
 
     print("\n" + "="*60)
     print(f"[CHAT] [NEW] New message from user: {user_id}")
@@ -1213,10 +2376,18 @@ async def chat_with_agent(
         stage_start = time.time()
         prev_messages = await _load_messages_with_db_fallback(session_id or "")
         print(f"[LATENCY] message_history={_elapsed_s(stage_start):.3f}s")
+        _latency_mark(latency_trace, "pre_graph.message_history", stage_start, session_id=session_id or "new")
 
         stage_start = time.time()
         gate_result = await _execute_smart_gate(message, user_id, session_id, prev_messages)
         print(f"[LATENCY] smart_gate={_elapsed_s(stage_start):.3f}s")
+        _latency_mark(
+            latency_trace,
+            "pre_graph.smart_gate",
+            stage_start,
+            route=gate_result.get("route"),
+            session_id=session_id or "new",
+        )
 
         # ── Setup session (needed for all paths) ─────────────────────────────
         stage_start = time.time()
@@ -1225,17 +2396,52 @@ async def chat_with_agent(
         if not actual_session_id:
             new_session = await create_new_session(user_id)
             actual_session_id = new_session["id"]
+        session_context_state = _load_session_context_state(actual_session_id)
+        gate_result = _protect_contextual_followup_gate(
+            gate_result,
+            message,
+            prev_messages,
+            session_context_state,
+        )
+        turn_type_guess = _turn_type_guess_for_gate(
+            message=message,
+            gate_result=gate_result,
+            prev_messages=prev_messages,
+            session_context_state=session_context_state,
+        )
+        gate_result["turn_type_guess"] = turn_type_guess
         print(f"[LATENCY] session_setup={_elapsed_s(stage_start):.3f}s")
+        _latency_mark(latency_trace, "pre_graph.session_setup", stage_start, session_id=actual_session_id)
 
         # ── Bypass dispatcher (chitchat / memory / list / accept / rejection) ─
+        # VOICE GUARD: if voice_features are present, _execute_gate_route returns None
+        # immediately so the full pipeline runs and emotion data is preserved.
         stage_start = time.time()
         bypass_result = await _execute_gate_route(
-            gate_result, message, user_id, actual_session_id, prev_messages, start_time
+            gate_result, message, user_id, actual_session_id, prev_messages, start_time,
+            voice_features=voice_features,
+            audio_file_path=audio_file_path,
         )
         print(f"[LATENCY] gate_route_dispatch={_elapsed_s(stage_start):.3f}s")
+        _latency_mark(
+            latency_trace,
+            "pre_graph.gate_route_dispatch",
+            stage_start,
+            route=gate_result.get("route"),
+            session_id=actual_session_id,
+        )
         if bypass_result is not None:
             proc_time = int((time.time() - start_time) * 1000)
             bypass_result["processing_time_ms"] = proc_time
+            _latency_mark(
+                latency_trace,
+                "total.chat",
+                start_time,
+                route=bypass_result.get("gate_route") or gate_result.get("route"),
+                session_id=actual_session_id,
+            )
+            bypass_result["latency_trace"] = latency_trace
+            bypass_result["latency_summary"] = _latency_summary(latency_trace, start_time)
             print(f"[GATE] Bypass replied in {proc_time}ms | trace={bypass_result.get('node_trace')}")
             return bypass_result
         #  THERAPEUTIC / CRISIS: fall through to full graph 
@@ -1249,6 +2455,7 @@ async def chat_with_agent(
 
         # Already loaded above (before bypass check) — reuse for pipeline input
         prev_messages_full = prev_messages
+        session_context_state = _load_session_context_state(actual_session_id)
 
         # Gate intent is AUTHORITATIVE — planner will see source="smart_gate" and
         # skip its own duplicate llm_intent_check call entirely.
@@ -1267,20 +2474,43 @@ async def chat_with_agent(
         }
 
         input_state = {
+            **session_context_state,
             "messages": prev_messages_full + [HumanMessage(content=message)],
+            "message": message,
             "user_id": user_id,
             "session_id": actual_session_id,
             "tools_used": [],
-            "gate_route": gate_route,
+            **_gate_state_fields(gate_result),
             "prefetched_intent": gate_prefetched_intent,  #  skips duplicate LLM call
             "prefetched_user_context": gate_result.get("prefetched_user_context", ""),
             "prefetched_session_context": gate_result.get("prefetched_session_context", {}),
-            "session_message_count": len(prev_messages_full) + 1,
+            "turn_type_guess": turn_type_guess,
+            "previous_turn_context": dict(session_context_state),
+            "latency_trace": latency_trace,
+            "session_message_count": sum(
+                1 for m in prev_messages_full if getattr(m, "type", "") == "human"
+            ) + 1,
         }
 
-        if audio_file_path:
-            input_state["audio_file_path"] = audio_file_path
-            print(f"[CHAT] [AUDIO] Audio file path included: {audio_file_path[:60]}...")
+        if audio_file_path or voice_features:
+            input_state["has_voice"] = True
+            input_state["gate_needs_full_pipeline"] = True
+            if audio_file_path:
+                input_state["audio_file_path"] = audio_file_path
+                print(f"[CHAT] [AUDIO] Audio file path included: {audio_file_path[:60]}...")
+        if voice_features:
+            input_state["voice_features"] = voice_features
+            input_state["voice_feature_snapshot"] = voice_features
+            input_state["transcription_confidence"] = _voice_confidence(voice_features.get("confidence", 0.0))
+            input_state["voice_processed"] = True
+            input_state["transcription"] = input_state.get("transcription") or message
+            input_state["voice_distress_index"] = voice_features.get("distress_index", 0.0)
+            input_state["voice_pause_density"] = voice_features.get("pause_density", 0.25)
+            input_state["voice_mfcc_vector"] = voice_features.get("mfcc_vector", [0.0] * 13)
+            print(
+                f"[CHAT] [AUDIO] Voice features injected | Emotion: {voice_features.get('emotion')} "
+                f"(conf={voice_features.get('confidence', 0):.0%})"
+            )
 
         print(f"[CHAT] [SEARCH] Messages in context: {len(input_state['messages'])} (prev: {len(prev_messages_full)})")
 
@@ -1292,8 +2522,13 @@ async def chat_with_agent(
         stage_start = time.time()
         result = await agent.ainvoke(input_state)
         print(f"[LATENCY] graph_pipeline={_elapsed_s(stage_start):.3f}s")
+        latency_trace = list(result.get("latency_trace", latency_trace))
+        _latency_mark(latency_trace, "graph.pipeline_total", stage_start, route=gate_route, session_id=actual_session_id)
 
         processing_time = int((time.time() - start_time) * 1000)
+        _latency_mark(latency_trace, "total.chat", start_time, route=gate_route, session_id=actual_session_id)
+        result["latency_trace"] = latency_trace
+        result["latency_summary"] = _latency_summary(latency_trace, start_time)
 
         # Determine node trace from the strategy/crisis fields
         strategy = result.get("conversation_strategy", "")
@@ -1314,19 +2549,30 @@ async def chat_with_agent(
         if final_response:
             all_messages.append(AIMessage(content=final_response))
         _message_store[thread_id] = all_messages[-_MAX_MESSAGE_HISTORY:]
+        _remember_session_context(thread_id, result)
 
         print("\n" + "-"*60)
         print(f"[CHAT] [OK] Processing complete in {processing_time}ms")
         print(f"[CHAT] [REFRESH] Node trace: {' -> '.join(node_trace)}")
-        print(f"[CHAT] [MSG] Response: \"{final_response[:80]}...\"" if len(final_response) > 80 else f"[CHAT] [MSG] Response: \"{final_response}\"")
+        print(
+            "[CHAT] [MOOD] "
+            f"core={result.get('fused_emotion', result.get('emotion', 'neutral'))} | "
+            f"sub={result.get('primary_sub_emotion') or 'none'} | "
+            f"secondary={_fmt_list(result.get('secondary_sub_emotions'))} | "
+            f"symptoms={_fmt_list(result.get('detected_symptoms'))}"
+        )
+        print(f"[CHAT] [MSG] Response ({len(final_response)} chars): \"{final_response}\"")
         print("-"*60 + "\n")
 
         # v6.0 FIX 3: Fire-and-forget persist  user gets response NOW.
         # parallel_persist runs as a background task.
-        try:
-            asyncio.create_task(_background_persist(result))
-        except Exception as bg_err:
-            print(f"[CHAT] [WARN] Background persist scheduling failed: {bg_err}")
+        if not _env_flag("SENTIMIND_DISABLE_BACKGROUND_PERSIST_FOR_TESTS"):
+            try:
+                asyncio.create_task(_background_persist(result))
+            except Exception as bg_err:
+                print(f"[CHAT] [WARN] Background persist scheduling failed: {bg_err}")
+        else:
+            print("[CHAT] Background persist disabled for test run")
 
         return _build_result_dict(result, actual_session_id, node_trace, processing_time)
 
@@ -1339,12 +2585,31 @@ async def chat_with_agent(
             "response": "I appreciate you reaching out. I'm here to support you. How are you feeling today? [HEART]",
             "session_id": session_id or f"user_{user_id}",
             "emotion": "neutral",
+            "raw_emotion_label": "neutral",
+            "emotion_label": "neutral",
+            "primary_sub_emotion": "neutral",
+            "secondary_sub_emotions": [],
+            "detected_symptoms": [],
+            "detected_behaviors": [],
+            "detected_contexts": [],
+            "emotion_scores": {"neutral": 1.0},
+            "emotion_reasoning": "pipeline error fallback",
             "sentiment": "neutral",
             "intensity": 0.5,
             "confidence": 0.5,
             "crisis_detected": False,
+            "crisis_level": "none",
+            "conversation_strategy": "validate_only",
+            "conversation_phase": "venting",
+            "conversation_stage": "DISCOVERY",
+            "response_task": "fallback_support",
+            "gate_route": "error_fallback",
+            "gate_context_flags": ["pipeline_error"],
+            "node_trace": ["error_fallback"],
             "tools_used": [],
+            "recommended_technique": {},
             "recommended_techniques_by_category": {},
+            "alternative_techniques": [],
             "processing_time_ms": 0,
         }
 
@@ -1379,6 +2644,7 @@ async def chat_with_agent_streaming(
     The outer async-generator drains the queue and yields to the HTTP response.
     """
     start_time = time.time()
+    latency_trace: list[dict] = []
     token_queue: asyncio.Queue = asyncio.Queue()
 
     async def _graph_worker():
@@ -1391,35 +2657,97 @@ async def chat_with_agent_streaming(
                 new_session = await create_new_session(user_id)
                 actual_session_id = new_session["id"]
             print(f"[LATENCY:STREAM] session_setup={_elapsed_s(stage_start):.3f}s")
+            _latency_mark(latency_trace, "stream.pre_graph.session_setup", stage_start, session_id=actual_session_id)
 
             thread_id = actual_session_id
             stage_start = time.time()
             prev_messages = await _load_messages_with_db_fallback(thread_id)
             print(f"[LATENCY:STREAM] message_history={_elapsed_s(stage_start):.3f}s")
+            _latency_mark(latency_trace, "stream.pre_graph.message_history", stage_start, session_id=actual_session_id)
 
             stage_start = time.time()
             gate_result = await _execute_smart_gate(message, user_id, actual_session_id, prev_messages)
             print(f"[LATENCY:STREAM] smart_gate={_elapsed_s(stage_start):.3f}s")
+            _latency_mark(
+                latency_trace,
+                "stream.pre_graph.smart_gate",
+                stage_start,
+                route=gate_result.get("route"),
+                session_id=actual_session_id,
+            )
 
+            session_context_state = _load_session_context_state(actual_session_id)
+            gate_result = _protect_contextual_followup_gate(
+                gate_result,
+                message,
+                prev_messages,
+                session_context_state,
+            )
+            turn_type_guess = _turn_type_guess_for_gate(
+                message=message,
+                gate_result=gate_result,
+                prev_messages=prev_messages,
+                session_context_state=session_context_state,
+            )
+            gate_result["turn_type_guess"] = turn_type_guess
             gate_route = gate_result.get("route", "therapeutic")
             gate_conf  = gate_result.get("confidence", 0.5)
 
             # ── Bypass dispatcher (all non-pipeline routes) ───────────────────
+            # VOICE GUARD: if voice_features are present, _execute_gate_route returns None
+            # immediately so the full pipeline runs and emotion data is preserved.
             stage_start = time.time()
             bypass_result = await _execute_gate_route(
-                gate_result, message, user_id, actual_session_id, prev_messages, start_time
+                gate_result, message, user_id, actual_session_id, prev_messages, start_time,
+                voice_features=voice_features,
+                audio_file_path=audio_file_path,
             )
             print(f"[LATENCY:STREAM] gate_route_dispatch={_elapsed_s(stage_start):.3f}s")
+            _latency_mark(
+                latency_trace,
+                "stream.pre_graph.gate_route_dispatch",
+                stage_start,
+                route=gate_route,
+                session_id=actual_session_id,
+            )
             if bypass_result is not None:
                 proc_time = int((time.time() - start_time) * 1000)
                 bypass_result["processing_time_ms"] = proc_time
+                _latency_mark(
+                    latency_trace,
+                    "stream.total.worker",
+                    start_time,
+                    route=gate_route,
+                    session_id=actual_session_id,
+                )
+                bypass_result["latency_trace"] = latency_trace
+                bypass_result["latency_summary"] = _latency_summary(latency_trace, start_time)
                 reply = bypass_result["response"]
+                # Defensive: normalise list/non-string content (Gemini multimodal responses)
+                if not isinstance(reply, str):
+                    reply = _extract_llm_str(reply) if reply else ""
                 # Stream the bypass reply word-by-word (uniform UX across all routes)
                 words = reply.split(" ") if reply else []
                 for i, word in enumerate(words):
                     await token_queue.put({"type": "token", "content": word if i == 0 else " " + word})
                     await asyncio.sleep(0.01)
                 await token_queue.put({"type": "done", "metadata": bypass_result})
+                # Persist gate-bypass turn to DB (memory_query, chitchat, accept/reject, etc.)
+                if not _env_flag("SENTIMIND_DISABLE_BACKGROUND_PERSIST_FOR_TESTS"):
+                    _persist_state = {
+                        **bypass_result,
+                        "messages": list(prev_messages) + [
+                            HumanMessage(content=message),
+                            AIMessage(content=reply),
+                        ],
+                        "user_id": user_id,
+                        "session_id": actual_session_id,
+                        "final_response": reply,
+                        "turn_type_guess": turn_type_guess,
+                        "turn_type": turn_type_guess,
+                    }
+                    asyncio.create_task(_background_persist(_persist_state))
+                    print(f"[PERSIST] [BYPASS] Scheduled DB persist for route={gate_route}")
                 return
 
             print(f"[GATE-STREAM] [PLAY] Route={gate_route.upper()} ({gate_conf:.0%}) — running full pipeline")
@@ -1439,29 +2767,44 @@ async def chat_with_agent_streaming(
 
             #  FULL PIPELINE 
             agent = get_agent()
+            session_context_state = _load_session_context_state(actual_session_id)
 
             input_state = {
+                **session_context_state,
                 "messages": prev_messages + [HumanMessage(content=message)],
+                "message": message,
                 "user_id": user_id,
                 "session_id": actual_session_id,
                 "tools_used": [],
-                "gate_route": gate_route,
+                **_gate_state_fields(gate_result),
                 "prefetched_intent": gate_prefetched_intent,
                 "prefetched_user_context": gate_result.get("prefetched_user_context", ""),
                 "prefetched_session_context": gate_result.get("prefetched_session_context", {}),
-                "session_message_count": len(prev_messages) + 1,
+                "turn_type_guess": turn_type_guess,
+                "previous_turn_context": dict(session_context_state),
+                "latency_trace": latency_trace,
+                "session_message_count": sum(
+                    1 for m in prev_messages if getattr(m, "type", "") == "human"
+                ) + 1,
             }
-            if audio_file_path:
-                input_state["audio_file_path"] = audio_file_path
+            if audio_file_path or voice_features:
+                input_state["has_voice"] = True
+                input_state["gate_needs_full_pipeline"] = True
+                if audio_file_path:
+                    input_state["audio_file_path"] = audio_file_path
+                    print(f"[CHAT-STREAM] [AUDIO] Audio file path included: {audio_file_path[:60]}...")
             if voice_features:
-                # Inject pre-extracted voice features directly so parallel_intake
-                # and emotion_fusion_node can use them without re-processing audio
+                # Backward-compatible legacy path for callers that already have
+                # route-approved voice features. Normal API voice flow passes
+                # audio_file_path and extracts features inside the therapeutic path.
                 input_state["voice_features"] = voice_features
+                input_state["voice_feature_snapshot"] = voice_features
+                input_state["transcription_confidence"] = _voice_confidence(voice_features.get("confidence", 0.0))
                 input_state["voice_processed"] = True
+                input_state["transcription"] = input_state.get("transcription") or message
                 input_state["voice_distress_index"] = voice_features.get("distress_index", 0.0)
                 input_state["voice_pause_density"] = voice_features.get("pause_density", 0.25)
                 input_state["voice_mfcc_vector"] = voice_features.get("mfcc_vector", [0.0] * 13)
-                input_state["has_voice"] = True
                 print(f"[CHAT-STREAM] [AUDIO] Voice features injected | Emotion: {voice_features.get('emotion')} "
                       f"(conf={voice_features.get('confidence', 0):.0%})")
 
@@ -1469,6 +2812,8 @@ async def chat_with_agent_streaming(
 
             final_state = None
             got_tokens = False
+            selection_prefix_buffer = ""
+            selection_prefix_checked = False
 
             try:
                 graph_stream_start = time.time()
@@ -1477,9 +2822,31 @@ async def chat_with_agent_streaming(
                     if kind == "on_chat_model_stream":
                         if "final_response_llm" in event.get("tags", []):
                             chunk = event["data"]["chunk"]
-                            if chunk.content:
+                            text = _extract_llm_str(chunk)
+                            if text:
+                                if not selection_prefix_checked:
+                                    selection_prefix_buffer += text
+                                    stripped = re.sub(
+                                        r"^\s*SELECTED_TECHNIQUE_ID\s*:\s*[^\s]+\s*(?:\r?\n)?",
+                                        "",
+                                        selection_prefix_buffer,
+                                        count=1,
+                                        flags=re.IGNORECASE,
+                                    )
+                                    if stripped != selection_prefix_buffer:
+                                        selection_prefix_checked = True
+                                        if stripped:
+                                            got_tokens = True
+                                            await token_queue.put({"type": "token", "content": stripped})
+                                        selection_prefix_buffer = ""
+                                        continue
+                                    if "\n" not in selection_prefix_buffer and len(selection_prefix_buffer) < 96:
+                                        continue
+                                    selection_prefix_checked = True
+                                    text = selection_prefix_buffer
+                                    selection_prefix_buffer = ""
                                 got_tokens = True
-                                await token_queue.put({"type": "token", "content": chunk.content})
+                                await token_queue.put({"type": "token", "content": text})
                     elif kind == "on_chain_end":
                         output = event.get("data", {}).get("output")
                         if isinstance(output, dict) and (
@@ -1488,7 +2855,18 @@ async def chat_with_agent_streaming(
                             or "conversation_strategy" in output
                         ):
                             final_state = output
+                if not selection_prefix_checked and selection_prefix_buffer:
+                    got_tokens = True
+                    await token_queue.put({"type": "token", "content": selection_prefix_buffer})
                 print(f"[LATENCY:STREAM] graph_pipeline_stream={_elapsed_s(graph_stream_start):.3f}s")
+                _latency_mark(
+                    latency_trace,
+                    "stream.graph.pipeline_events",
+                    graph_stream_start,
+                    route=gate_route,
+                    session_id=actual_session_id,
+                    streamed_tokens=got_tokens,
+                )
             except Exception as stream_err:
                 print(f"[CHAT-STREAM] [WARN] astream_events error: {stream_err}, falling back to ainvoke")
 
@@ -1498,6 +2876,20 @@ async def chat_with_agent_streaming(
                 stage_start = time.time()
                 final_state = await agent.ainvoke(input_state)
                 print(f"[LATENCY:STREAM] graph_pipeline_fallback={_elapsed_s(stage_start):.3f}s")
+                _latency_mark(
+                    latency_trace,
+                    "stream.graph.pipeline_fallback",
+                    stage_start,
+                    route=gate_route,
+                    session_id=actual_session_id,
+                )
+
+            if final_state:
+                merged_trace = list(final_state.get("latency_trace") or latency_trace)
+                for item in latency_trace:
+                    if item not in merged_trace:
+                        merged_trace.append(item)
+                latency_trace[:] = merged_trace
 
             # Fallback: if no streaming tokens received, simulate word-by-word streaming
             if not got_tokens:
@@ -1510,6 +2902,9 @@ async def chat_with_agent_streaming(
                     await asyncio.sleep(0.008)
 
             processing_time = int((time.time() - start_time) * 1000)
+            _latency_mark(latency_trace, "stream.total.worker", start_time, route=gate_route, session_id=actual_session_id)
+            final_state["latency_trace"] = latency_trace
+            final_state["latency_summary"] = _latency_summary(latency_trace, start_time)
             strategy = final_state.get("conversation_strategy", "")
             crisis_detected_fs = final_state.get("crisis_detected", False)
             crisis_pre_screened = final_state.get("crisis_pre_screened", False)
@@ -1526,14 +2921,23 @@ async def chat_with_agent_streaming(
             if final_response:
                 all_messages.append(AIMessage(content=final_response))
             _message_store[thread_id] = all_messages[-_MAX_MESSAGE_HISTORY:]
+            _remember_session_context(thread_id, final_state)
 
             print(f"[CHAT-STREAM] [OK] Streaming complete in {processing_time}ms")
             print(f"[CHAT-STREAM] [REFRESH] Node trace: {' -> '.join(node_trace)}")
+            print(
+                "[CHAT-STREAM] [MOOD] "
+                f"core={final_state.get('fused_emotion', final_state.get('emotion', 'neutral'))} | "
+                f"sub={final_state.get('primary_sub_emotion') or 'none'} | "
+                f"secondary={_fmt_list(final_state.get('secondary_sub_emotions'))} | "
+                f"symptoms={_fmt_list(final_state.get('detected_symptoms'))}"
+            )
 
-            try:
-                asyncio.create_task(_background_persist(final_state))
-            except Exception as bg_err:
-                print(f"[CHAT-STREAM] [WARN] Background persist scheduling failed: {bg_err}")
+            if not _env_flag("SENTIMIND_DISABLE_BACKGROUND_PERSIST_FOR_TESTS"):
+                try:
+                    asyncio.create_task(_background_persist(final_state))
+                except Exception as bg_err:
+                    print(f"[CHAT-STREAM] [WARN] Background persist scheduling failed: {bg_err}")
 
             result_dict = _build_result_dict(final_state, actual_session_id, node_trace, processing_time)
             await token_queue.put({"type": "done", "metadata": result_dict})
@@ -1550,6 +2954,15 @@ async def chat_with_agent_streaming(
                     "response": fallback_msg,
                     "session_id": session_id or f"user_{user_id}",
                     "emotion": "neutral",
+                    "raw_emotion_label": "neutral",
+                    "emotion_label": "neutral",
+                    "primary_sub_emotion": "neutral",
+                    "secondary_sub_emotions": [],
+                    "detected_symptoms": [],
+                    "detected_behaviors": [],
+                    "detected_contexts": [],
+                    "emotion_scores": {"neutral": 1.0},
+                    "emotion_reasoning": "stream worker error fallback",
                     "sentiment": "neutral",
                     "intensity": 0.5,
                     "confidence": 0.5,

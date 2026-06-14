@@ -1,286 +1,298 @@
 'use client'
 
-import React, { useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
+import { ChevronLeft, ChevronRight, Check, Clock, Flag, ListChecks, Sparkles, Star } from 'lucide-react'
 import { Technique } from '@/types'
-import { Star, Check, ChevronRight, ChevronLeft, Flag, Sparkles } from 'lucide-react'
+import { submitTechniqueRating } from '@/actions/technique'
 
 interface TechniquePanelProps {
   technique?: Technique | null
   alternativeTechniques?: Technique[]
   userId: string
+  sessionId?: string | null
 }
 
-// ─── Motivational quotes ──────────────────────────────────────────────────────
-const QUOTES = [
-  { text: 'The greatest glory in living lies not in never falling, but in rising every time we fall.', author: 'Nelson Mandela' },
-  { text: 'You don\'t have to control your thoughts. You just have to stop letting them control you.', author: 'Dan Millman' },
-  { text: 'Mental health is not a destination, but a process.', author: 'Noam Shpancer' },
-  { text: 'You are not your illness. You have an individual story to tell.', author: 'Julian Seifter' },
-  { text: 'There is hope, even when your brain tells you there isn\'t.', author: 'John Green' },
-]
-
-// ─── Category maps ─────────────────────────────────────────────────────────────
-const CATEGORY_ICON: Record<string, string> = {
-  breathing: '🌬️', meditation: '🧘', mindfulness: '🌿',
-  cbt: '🧠', dbt: '⚖️', journaling: '📝',
-  grounding: '🌍', 'behavioral activation': '⚡', general: '✨',
-  visualization: '🌅',
-}
-const CATEGORY_COLOR: Record<string, string> = {
-  breathing: 'from-cyan-400 to-blue-500',
-  meditation: 'from-purple-400 to-indigo-500',
-  mindfulness: 'from-green-400 to-teal-500',
-  grounding: 'from-orange-400 to-red-500',
-  cbt: 'from-indigo-400 to-purple-500',
-  journaling: 'from-blue-400 to-cyan-500',
-  dbt: 'from-blue-500 to-indigo-600',
-  'behavioral activation': 'from-green-500 to-emerald-600',
-  visualization: 'from-yellow-400 to-orange-400',
-  general: 'from-purple-400 to-teal-500',
+const CATEGORY_GRADIENT: Record<string, string> = {
+  breathing: 'from-cyan-500 to-blue-600',
+  meditation: 'from-cyan-700 to-slate-900',
+  mindfulness: 'from-emerald-500 to-cyan-700',
+  grounding: 'from-amber-500 to-orange-600',
+  cbt: 'from-slate-700 to-cyan-800',
+  journaling: 'from-sky-500 to-cyan-600',
+  dbt: 'from-blue-500 to-cyan-700',
+  'behavioral activation': 'from-emerald-500 to-green-600',
+  visualization: 'from-yellow-500 to-orange-500',
+  general: 'from-slate-700 to-slate-900',
 }
 
-// ─── Interactive step wizard ────────────────────────────────────────────────
-function StepWizard({ steps, onComplete }: { steps: string[]; onComplete: () => void }) {
-  const [step, setStep] = useState(0)
-  const [done, setDone] = useState(false)
+function StepWizard({ steps, onComplete, initialDone = false }: { steps: string[]; onComplete: () => void; initialDone?: boolean }) {
+  const [step, setStep] = useState(initialDone && steps.length ? steps.length - 1 : 0)
+  const [done, setDone] = useState(initialDone)
 
-  const handleNext = () => {
+  const progress = steps.length ? Math.round(((step + 1) / steps.length) * 100) : 0
+
+  const next = () => {
     if (step < steps.length - 1) {
-      setStep(s => s + 1)
-    } else {
-      setDone(true)
-      onComplete()
+      setStep((value) => value + 1)
+      return
+    }
+    setDone(true)
+    onComplete()
+  }
+
+  useEffect(() => {
+    setDone(initialDone)
+    setStep(initialDone && steps.length ? steps.length - 1 : 0)
+  }, [initialDone, steps.length])
+
+  if (!steps.length) {
+    return (
+      <div className="rounded-xl border border-dashed border-slate-200 bg-slate-50 p-4 text-sm text-slate-500">
+        No guided steps are attached to this technique yet.
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between text-xs text-slate-500">
+        <span>Step {step + 1} of {steps.length}</span>
+        <span>{progress}%</span>
+      </div>
+      <div className="h-2 overflow-hidden rounded-full bg-slate-100">
+        <div className="h-full rounded-full bg-slate-900 transition-all" style={{ width: `${progress}%` }} />
+      </div>
+      <div className="min-h-[112px] rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="mb-3 flex h-8 w-8 items-center justify-center rounded-lg bg-slate-900 text-xs font-black text-white">
+          {step + 1}
+        </div>
+        <p className="text-sm leading-6 text-slate-700">{steps[step]}</p>
+      </div>
+      <div className="flex items-center justify-between gap-2">
+        <button
+          onClick={() => setStep((value) => Math.max(0, value - 1))}
+          disabled={step === 0}
+          className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <ChevronLeft className="h-3.5 w-3.5" />
+          Back
+        </button>
+        <button
+          onClick={next}
+          disabled={done}
+          className="inline-flex items-center gap-1 rounded-xl bg-slate-900 px-3 py-2 text-xs font-bold text-white transition-colors hover:bg-slate-800 disabled:bg-emerald-600"
+        >
+          {done ? (
+            <>
+              <Check className="h-3.5 w-3.5" />
+              Done
+            </>
+          ) : step < steps.length - 1 ? (
+            <>
+              Next
+              <ChevronRight className="h-3.5 w-3.5" />
+            </>
+          ) : (
+            <>
+              Finish
+              <Flag className="h-3.5 w-3.5" />
+            </>
+          )}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function StarRating({
+  userId,
+  techniqueId,
+  wizardCompleted,
+  initialRating = 0,
+  sessionId,
+}: {
+  userId: string
+  techniqueId: string
+  wizardCompleted: boolean
+  initialRating?: number
+  sessionId?: string | null
+}) {
+  const [rating, setRating] = useState(initialRating)
+  const [hover, setHover] = useState(0)
+  const [saved, setSaved] = useState(false)
+
+  useEffect(() => {
+    setRating(initialRating)
+  }, [initialRating])
+
+  const handleClick = async (value: number) => {
+    if (!wizardCompleted) return
+    setRating(value)
+    try {
+      await submitTechniqueRating({
+        user_id: userId,
+        technique_id: techniqueId,
+        rating: value,
+        completed: wizardCompleted,
+        session_id: sessionId,
+      })
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2500)
+    } catch {
+      setSaved(false)
     }
   }
 
   return (
-    <div className="mt-3 space-y-3">
-      {/* Progress */}
-      <div className="flex items-center justify-between text-[11px] text-slate-400">
-        <span>Step {step + 1} of {steps.length}</span>
-        <div className="h-1 flex-1 mx-3 bg-slate-100 rounded-full overflow-hidden">
-          <div
-            className="h-full bg-gradient-to-r from-teal-400 to-purple-500 rounded-full transition-all duration-500"
-            style={{ width: `${((step + 1) / steps.length) * 100}%` }}
-          />
-        </div>
-        <span className="text-teal-600 font-semibold">Interactive</span>
-      </div>
-
-      {/* Step card */}
-      <div className="bg-white border border-slate-200 rounded-xl p-4 relative overflow-hidden min-h-[72px] flex items-center gap-3 shadow-sm">
-        <div className="absolute right-2 bottom-0 text-[64px] font-black text-slate-50 select-none pointer-events-none leading-none">
-          {step + 1}
-        </div>
-        <div className="w-7 h-7 rounded-full bg-gradient-to-br from-teal-500 to-purple-500 text-white flex items-center justify-center text-xs font-bold shrink-0 z-10">
-          {step + 1}
-        </div>
-        <p className="text-xs text-slate-800 leading-relaxed z-10">{steps[step]}</p>
-      </div>
-
-      {/* Nav buttons */}
-      <div className="flex justify-between">
-        <button
-          onClick={() => setStep(s => Math.max(0, s - 1))}
-          disabled={step === 0}
-          className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
-        >
-          <ChevronLeft className="w-3.5 h-3.5" /> Previous
-        </button>
-        <button
-          onClick={handleNext}
-          disabled={done}
-          className={`flex items-center gap-1 px-3 py-1.5 text-xs font-bold rounded-lg transition-all ${
-            done
-              ? 'bg-green-100 text-green-700 cursor-default'
-              : step < steps.length - 1
-                ? 'bg-slate-900 text-white hover:bg-slate-700'
-                : 'bg-gradient-to-r from-teal-500 to-emerald-500 text-white hover:shadow-md'
-          }`}
-        >
-          {done
-            ? <><Check className="w-3.5 h-3.5" /> Completed!</>
-            : step < steps.length - 1
-              ? <>Next Step <ChevronRight className="w-3.5 h-3.5" /></>
-              : <><Flag className="w-3.5 h-3.5" /> I&apos;m Done</>
-          }
-        </button>
-      </div>
-    </div>
-  )
-}
-
-// ─── Star rating ──────────────────────────────────────────────────────────────
-function StarRating({
-  userId, techniqueId, wizardCompleted,
-}: { userId: string; techniqueId: string; wizardCompleted: boolean }) {
-  const [rating, setRating] = useState(0)
-  const [hover, setHover] = useState(0)
-  const [saved, setSaved] = useState(false)
-
-  const isBlurred = !wizardCompleted // blur until wizard done
-
-  const handleClick = async (s: number) => {
-    if (isBlurred) return
-    setRating(s)
-    try {
-      await fetch(`${process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000/api'}/technique/rate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_id: userId, technique_id: techniqueId, rating: s, completed: wizardCompleted }),
-      })
-      setSaved(true)
-      setTimeout(() => setSaved(false), 2500)
-    } catch { }
-  }
-
-  return (
-    <div className={`pt-3 border-t border-dashed border-slate-200 transition-all duration-500 ${isBlurred ? 'opacity-30 blur-[1px] pointer-events-none' : ''}`}>
-      <p className="text-[10px] uppercase font-bold text-slate-400 mb-2 tracking-widest">Rate Impact</p>
-      <div className="flex items-center gap-1.5">
-        {[1, 2, 3, 4, 5].map(s => (
-          <button key={s} onClick={() => handleClick(s)} onMouseEnter={() => setHover(s)} onMouseLeave={() => setHover(0)}>
-            <Star className={`w-5 h-5 transition-all ${s <= (hover || rating) ? 'fill-amber-400 text-amber-400' : 'text-slate-200'}`} />
+    <div className="rounded-xl border border-slate-200 bg-white p-4">
+      <p className="text-xs font-bold uppercase tracking-wider text-slate-400">Rate impact</p>
+      <div className={`mt-3 flex items-center gap-1.5 ${wizardCompleted ? '' : 'opacity-40'}`}>
+        {[1, 2, 3, 4, 5].map((value) => (
+          <button
+            key={value}
+            onClick={() => handleClick(value)}
+            onMouseEnter={() => setHover(value)}
+            onMouseLeave={() => setHover(0)}
+            disabled={!wizardCompleted}
+            className="transition-transform hover:scale-110 disabled:cursor-not-allowed"
+          >
+            <Star
+              className={`h-5 w-5 ${
+                value <= (hover || rating) ? 'fill-amber-400 text-amber-400' : 'text-slate-200'
+              }`}
+            />
           </button>
         ))}
-        {saved && <span className="text-xs text-green-600 ml-1 font-medium">Saved!</span>}
+        {saved && <span className="ml-2 text-xs font-semibold text-emerald-600">Saved</span>}
       </div>
+      {!wizardCompleted && (
+        <p className="mt-2 text-xs text-slate-500">Complete the guided steps before rating.</p>
+      )}
     </div>
   )
 }
 
-// ─── Progress bars ─────────────────────────────────────────────────────────────
-function ProgressBar({ label, value, purple }: { label: string; value: number; purple?: boolean }) {
-  return (
-    <div>
-      <div className="flex justify-between items-center mb-1">
-        <span className="text-xs text-slate-600">{label}</span>
-        <span className={`text-xs font-bold ${purple ? 'text-purple-600' : 'text-teal-600'}`}>{Math.round(value)}%</span>
-      </div>
-      <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
-        <div
-          className={`h-full rounded-full transition-all duration-700 ${purple ? 'bg-gradient-to-r from-purple-400 to-purple-600' : 'bg-gradient-to-r from-green-400 to-teal-500'}`}
-          style={{ width: `${value}%` }}
-        />
-      </div>
-    </div>
+export function TechniquePanel({ technique, alternativeTechniques = [], userId, sessionId }: TechniquePanelProps) {
+  const allTechniques = useMemo(
+    () => (technique ? [technique, ...alternativeTechniques] : []),
+    [technique, alternativeTechniques]
   )
-}
-
-// ─── Main panel ────────────────────────────────────────────────────────────────
-export function TechniquePanel({ technique, alternativeTechniques = [], userId }: TechniquePanelProps) {
-  const allTechniques = technique ? [technique, ...alternativeTechniques] : []
   const [selectedIdx, setSelectedIdx] = useState(0)
   const [wizardCompleted, setWizardCompleted] = useState(false)
 
-  // When a new technique arrives from the stream, reset to first
-  React.useEffect(() => {
-    setSelectedIdx(0)
-    setWizardCompleted(false)
-  }, [technique?.id])
-
   const active = allTechniques[selectedIdx] ?? null
-  const catKey = active?.category?.toLowerCase() ?? ''
-  const gradient = CATEGORY_COLOR[catKey] ?? 'from-purple-400 to-teal-500'
-  const icon = CATEGORY_ICON[catKey] ?? '✨'
-  const quote = QUOTES[Math.floor(Date.now() / 86400000) % QUOTES.length]
+  const catKey = active?.category?.toLowerCase() ?? 'general'
+  const gradient = CATEGORY_GRADIENT[catKey] ?? CATEGORY_GRADIENT.general
+
+  useEffect(() => {
+    setSelectedIdx(0)
+    setWizardCompleted(technique?.user_completed ?? false)
+  }, [technique?.id, sessionId])
 
   return (
-    <div className="hidden xl:flex w-72 shrink-0 bg-white border-l border-slate-200 flex-col overflow-y-auto shadow-sm">
-      <div className="p-4 space-y-4">
-        {/* Header */}
-        <div className="flex items-center gap-2">
-          <span className="text-teal-500 text-base">✦</span>
-          <h2 className="text-sm font-bold text-slate-800">Healing Exercise</h2>
-        </div>
-
-        {active ? (
-          <>
-            {/* Hero gradient card */}
-            <div className={`rounded-xl bg-gradient-to-br ${gradient} text-white p-4 text-center relative overflow-hidden`}>
-              <div className="absolute -right-4 -top-4 w-16 h-16 bg-white/10 rounded-full" />
-              <div className="absolute -left-3 -bottom-4 w-12 h-12 bg-white/10 rounded-full" />
-              <div className="w-12 h-12 mx-auto bg-white/20 rounded-xl flex items-center justify-center text-2xl mb-2.5 backdrop-blur-sm border border-white/20">
-                {icon}
-              </div>
-              <h3 className="font-bold text-sm leading-tight">{active.name}</h3>
-              <p className="text-[11px] text-white/80 mt-1">{active.brief}</p>
-              <div className="flex justify-center gap-1.5 mt-2.5 flex-wrap">
-                <span className="px-2 py-0.5 bg-white/20 rounded-full text-[10px] font-semibold">⏱ {active.duration_minutes} min</span>
-                <span className="px-2 py-0.5 bg-white/20 rounded-full text-[10px] font-semibold capitalize">{active.difficulty ?? 'Easy'}</span>
-                <span className="px-2 py-0.5 bg-white/20 rounded-full text-[10px] font-semibold capitalize">{active.category}</span>
-              </div>
-            </div>
-
-            {/* Description */}
-            {active.description && (
-              <p className="text-xs text-slate-500 leading-relaxed">{active.description}</p>
-            )}
-
-            {/* Interactive step wizard */}
-            {active.steps?.length > 0 && (
-              <StepWizard
-                key={`${active.id}-wizard`}
-                steps={active.steps}
-                onComplete={() => setWizardCompleted(true)}
-              />
-            )}
-
-            {/* Star rating — locked until wizard done */}
-            <StarRating userId={userId} techniqueId={active.id} wizardCompleted={wizardCompleted} />
-
-            {/* Alternative exercises */}
-            {allTechniques.length > 1 && (
-              <>
-                <div className="border-t border-slate-100" />
-                <div>
-                  <p className="text-[10px] uppercase font-bold text-slate-400 mb-2 tracking-widest">Alternative Exercises</p>
-                  <div className="flex flex-col gap-1.5">
-                    {allTechniques.map((t, i) => (
-                      <button
-                        key={t.id}
-                        onClick={() => { setSelectedIdx(i); setWizardCompleted(false) }}
-                        className={`text-left px-3 py-2 rounded-lg text-xs font-medium border transition-all ${
-                          i === selectedIdx
-                            ? 'bg-purple-50 border-purple-300 text-purple-700'
-                            : 'bg-slate-50 border-slate-200 text-slate-600 hover:border-purple-200 hover:bg-purple-50/50'
-                        }`}
-                      >
-                        {i === selectedIdx && <span className="font-bold mr-1">✓</span>}
-                        {t.name}
-                        <span className="ml-1 opacity-60 text-[10px] capitalize">({t.category})</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </>
-            )}
-
-            {/* Divider */}
-            <div className="border-t border-slate-100" />
-
-            {/* Progress */}
-            <div>
-              <p className="text-[10px] uppercase font-bold text-slate-400 mb-3 tracking-widest">Your Progress</p>
-              <div className="space-y-3">
-                <ProgressBar label="Emotional Balance" value={65} purple />
-                <ProgressBar label="Resilience Score" value={42} />
-              </div>
-            </div>
-          </>
-        ) : (
-          <div className="flex flex-col items-center justify-center text-slate-400 text-sm py-10 px-2 text-center gap-2">
-            <Sparkles className="w-8 h-8 opacity-25" />
-            Tools and techniques will appear here automatically based on your conversation.
+    <aside className="hidden w-80 shrink-0 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm xl:flex xl:flex-col">
+      <div className="border-b border-slate-100 p-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-wider text-slate-400">Resources</p>
+            <h2 className="mt-1 text-base font-black text-slate-900">Technique Panel</h2>
           </div>
-        )}
-
-        {/* Motivational quote — always visible */}
-        <div className="bg-slate-50 rounded-xl p-3 border border-slate-100">
-          <p className="text-xs text-slate-600 italic leading-relaxed">"{quote.text}"</p>
-          <p className="text-[10px] text-purple-500 font-semibold mt-1.5">— {quote.author}</p>
+          <Sparkles className="h-5 w-5 text-slate-400" />
         </div>
       </div>
-    </div>
+
+      <div className="custom-scrollbar flex-1 overflow-y-auto p-4">
+        {active ? (
+          <div className="space-y-4">
+            <div className={`rounded-2xl bg-gradient-to-br ${gradient} p-5 text-white shadow-sm`}>
+              <p className="text-[11px] font-bold uppercase tracking-wider text-white/70">Active support</p>
+              <h3 className="mt-2 text-lg font-black leading-tight">{active.name}</h3>
+              <p className="mt-2 text-sm leading-6 text-white/85">{active.brief}</p>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <span className="inline-flex items-center gap-1 rounded-full bg-white/15 px-2.5 py-1 text-xs font-semibold">
+                  <Clock className="h-3.5 w-3.5" />
+                  {active.duration_minutes} min
+                </span>
+                <span className="rounded-full bg-white/15 px-2.5 py-1 text-xs font-semibold capitalize">
+                  {active.difficulty ?? 'easy'}
+                </span>
+                <span className="rounded-full bg-white/15 px-2.5 py-1 text-xs font-semibold capitalize">
+                  {active.category}
+                </span>
+              </div>
+            </div>
+
+            {allTechniques.length > 1 && (
+              <div className="grid grid-cols-2 gap-2">
+                {allTechniques.map((item, index) => (
+                  <button
+                    key={item.id}
+                    onClick={() => {
+                      setSelectedIdx(index)
+                      setWizardCompleted(item.user_completed ?? false)
+                    }}
+                    className={`rounded-xl border px-3 py-2 text-left text-xs font-semibold transition-colors ${
+                      index === selectedIdx
+                        ? 'border-slate-900 bg-slate-900 text-white'
+                        : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                    }`}
+                  >
+                    {item.name}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {active.description && (
+              <p className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm leading-6 text-slate-600">
+                {active.description}
+              </p>
+            )}
+
+            <div>
+              <div className="mb-3 flex items-center gap-2">
+                <ListChecks className="h-4 w-4 text-slate-500" />
+                <p className="text-sm font-bold text-slate-800">Guided steps</p>
+              </div>
+              <StepWizard
+                key={`${active.id}-${sessionId}`}
+                steps={active.steps ?? []}
+                onComplete={async () => {
+                  setWizardCompleted(true)
+                  try {
+                    await submitTechniqueRating({
+                      user_id: userId,
+                      technique_id: active.id,
+                      completed: true,
+                      session_id: sessionId,
+                    })
+                  } catch (err) {
+                    console.error('Failed to submit automatic technique completion:', err)
+                  }
+                }}
+                initialDone={active.user_completed ?? false}
+              />
+            </div>
+
+            {active.why_it_works && (
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <p className="text-xs font-bold uppercase tracking-wider text-slate-400">Why it can help</p>
+                <p className="mt-2 text-sm leading-6 text-slate-600">{active.why_it_works}</p>
+              </div>
+            )}
+
+            <StarRating key={`${active.id}-${sessionId}`} userId={userId} techniqueId={active.id} wizardCompleted={wizardCompleted} initialRating={active.user_rating ?? 0} sessionId={sessionId} />
+          </div>
+        ) : (
+          <div className="flex h-full min-h-[420px] flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-6 text-center">
+            <Sparkles className="h-8 w-8 text-slate-400" />
+            <h3 className="mt-4 text-sm font-black text-slate-800">No active technique</h3>
+            <p className="mt-2 text-sm leading-6 text-slate-500">
+              This panel will show exercise steps only when the conversation reaches the right support stage.
+            </p>
+          </div>
+        )}
+      </div>
+    </aside>
   )
 }

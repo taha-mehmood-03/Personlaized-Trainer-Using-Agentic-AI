@@ -1,7 +1,11 @@
-"""
-API Routes module
-"""
+"""FastAPI package for SentiMind HTTP boundaries."""
 
-from .crisis_routes import router as crisis_router
+__all__ = ["app"]
 
-__all__ = ["crisis_router"]
+
+def __getattr__(name: str):
+    if name == "app":
+        from .app import app
+
+        return app
+    raise AttributeError(name)

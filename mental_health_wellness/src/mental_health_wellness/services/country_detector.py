@@ -17,6 +17,9 @@ class Country(str, Enum):
     UNKNOWN = "PK"  # Default fallback
 
 
+DEFAULT_COUNTRY = Country.PK.value
+
+
 class CountryDetector:
     """Detect user country from various sources"""
     
@@ -51,7 +54,7 @@ class CountryDetector:
             if code in country_codes:
                 return country_codes[code]
         
-        return "US"  # Default fallback
+        return DEFAULT_COUNTRY
     
     @staticmethod
     def from_ip_address(ip_address: str) -> str:
@@ -73,7 +76,7 @@ class CountryDetector:
             
             if not db_path or not os.path.exists(db_path):
                 print(f"[GEO]  GeoIP database not found at {db_path}")
-                return "US"
+                return DEFAULT_COUNTRY
             
             with geoip2.database.Reader(db_path) as reader:
                 response = reader.country(ip_address)
@@ -83,7 +86,7 @@ class CountryDetector:
         
         except Exception as e:
             print(f"[GEO]  Could not detect country from IP: {str(e)}")
-            return "US"
+            return DEFAULT_COUNTRY
     
     @staticmethod
     def from_user_profile(user_data: Dict[str, Any]) -> str:
@@ -127,7 +130,7 @@ class CountryDetector:
                 if name in location:
                     return code
         
-        return "US"  # Default fallback
+        return DEFAULT_COUNTRY
     
     @staticmethod
     def detect(
@@ -150,7 +153,7 @@ class CountryDetector:
         
         if user_data:
             country = CountryDetector.from_user_profile(user_data)
-            if country != "US":  # If not default
+            if country:
                 return country
         
         if phone:
@@ -159,7 +162,7 @@ class CountryDetector:
         if ip_address:
             return CountryDetector.from_ip_address(ip_address)
         
-        return "US"  # Final fallback
+        return DEFAULT_COUNTRY
 
 
 def format_phone_for_country(phone: str, country: str) -> str:
@@ -184,11 +187,16 @@ def format_phone_for_country(phone: str, country: str) -> str:
         "PK": "+92",
     }
     
-    country_code = country_codes.get(country.upper(), "+1")
+    country_code = country_codes.get(country.upper(), "+92")
     
     # Check if already has country code
     if phone.startswith("+"):
         return phone
+
+    if country.upper() == "PK":
+        if phone_clean.startswith("92"):
+            phone_clean = phone_clean[2:]
+        phone_clean = phone_clean.lstrip("0")
     
     # Add country code if needed
     if not phone.startswith("1") and country.upper() in ["US", "CA"]:

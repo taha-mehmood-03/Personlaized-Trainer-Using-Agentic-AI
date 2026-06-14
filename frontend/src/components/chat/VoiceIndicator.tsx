@@ -15,8 +15,8 @@ const EMOTION_GRADIENT: Record<string, string> = {
   joy: 'from-yellow-400 to-orange-400',
   sadness: 'from-blue-400 to-indigo-500',
   anger: 'from-red-400 to-red-600',
-  fear: 'from-purple-400 to-purple-600',
-  disgust: 'from-green-400 to-teal-500',
+  fear: 'from-cyan-500 to-slate-700',
+  disgust: 'from-green-400 to-emerald-600',
   surprise: 'from-pink-400 to-rose-500',
   neutral: 'from-slate-400 to-slate-500',
 }

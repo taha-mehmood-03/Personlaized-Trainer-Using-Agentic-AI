@@ -434,7 +434,6 @@ async def classify_message_with_llm(message: str) -> Dict[str, any]:
         from langchain_core.messages import SystemMessage, HumanMessage
         
         manager = get_llm_manager()
-        llm = manager.get_llm()  # Single configured OpenRouter Llama 3.3 70B model
         
         classification_prompt = f"""Classify this user message semantically (NO keyword matching - understand intent).
 
@@ -453,12 +452,28 @@ Classify as JSON:
 
 Output ONLY valid JSON, no markdown."""
 
-        response = await llm.ainvoke([
+        messages = [
             SystemMessage(content="You are a semantic message classifier. Output only valid JSON."),
             HumanMessage(content=classification_prompt),
-        ])
+        ]
+        if hasattr(manager, "ainvoke_gemini_with_rotation"):
+            response = await manager.ainvoke_gemini_with_rotation(
+                messages,
+                model=getattr(manager, "model_gate", None),
+                max_tokens=512,
+                temperature=0.0,
+                response_format={"type": "json_object"},
+                response_format_models=[
+                    getattr(manager, "model_gate", None),
+                    getattr(manager, "model_alt", None),
+                ],
+            )
+        else:
+            llm = manager.get_llm(model=getattr(manager, "model_gate", None))
+            response = await llm.ainvoke(messages)
         
-        response_text = response.content if hasattr(response, 'content') else str(response)
+        from ..llm import message_content_to_text
+        response_text = message_content_to_text(response.content if hasattr(response, 'content') else response)
         
         # Parse JSON response
         classification = json.loads(response_text)

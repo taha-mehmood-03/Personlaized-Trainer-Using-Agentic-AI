@@ -1,3 +1,5 @@
+'use client'
+
 import React, { useState } from 'react'
 import { MessageSquare, MoreVertical, Pencil, Trash2, Check, X } from 'lucide-react'
 import { Session } from '@/types'
@@ -38,7 +40,7 @@ export function SessionItem({ session, isActive, onSelect, onDelete, onRename }:
     return (
       <div className={`group relative flex items-center gap-3 p-3 rounded-xl transition-all border ${
         isActive 
-          ? 'bg-white border-purple-200 shadow-sm ring-1 ring-purple-100' 
+          ? 'bg-white border-cyan-200 shadow-sm ring-1 ring-cyan-100' 
           : 'hover:bg-white border-transparent hover:border-slate-200 hover:shadow-sm'
       }`}>
         <form onSubmit={handleSaveRename} className="flex-1 flex items-center gap-2">
@@ -49,7 +51,7 @@ export function SessionItem({ session, isActive, onSelect, onDelete, onRename }:
             onChange={e => setEditTitle(e.target.value)}
             onKeyDown={handleKeyDown}
             onBlur={() => handleSaveRename()}
-            className="w-full text-sm font-medium text-slate-800 bg-transparent border-b-2 border-purple-400 focus:outline-none px-1 py-0.5"
+            className="w-full text-sm font-medium text-slate-800 bg-transparent border-b-2 border-cyan-500 focus:outline-none px-1 py-0.5"
           />
         </form>
       </div>
@@ -82,20 +84,20 @@ export function SessionItem({ session, isActive, onSelect, onDelete, onRename }:
   // Normal Display Mode
   return (
     <div 
-      className={`group relative flex flex-col gap-1 p-3 rounded-xl cursor-pointer transition-all border ${
+      className={`group relative flex cursor-pointer flex-col gap-1 rounded-xl border p-3 transition-all ${
         isActive 
-          ? 'bg-white border-purple-200 shadow-sm ring-1 ring-purple-100' 
-          : 'hover:bg-white border-transparent hover:border-slate-200 hover:shadow-sm'
+          ? 'border-slate-900 bg-slate-900 text-white shadow-sm' 
+          : 'border-transparent hover:border-slate-200 hover:bg-slate-50'
       }`}
       onClick={onSelect}
       onMouseLeave={() => setShowOptions(false)}
     >
       <div className="flex items-start justify-between gap-2">
         <div className="flex items-center gap-2 overflow-hidden flex-1">
-          <div className={`p-1.5 rounded-lg shrink-0 ${isActive ? 'bg-purple-100 text-purple-600' : 'bg-slate-100 text-slate-500 group-hover:bg-slate-200'}`}>
+          <div className={`p-1.5 rounded-lg shrink-0 ${isActive ? 'bg-white/10 text-white' : 'bg-slate-100 text-slate-500 group-hover:bg-slate-200'}`}>
             <MessageSquare className="w-3.5 h-3.5" />
           </div>
-          <p className={`text-sm font-semibold truncate ${isActive ? 'text-slate-900' : 'text-slate-700'}`}>
+          <p className={`text-sm font-semibold truncate ${isActive ? 'text-white' : 'text-slate-700'}`}>
             {session.title}
           </p>
         </div>
@@ -105,7 +107,7 @@ export function SessionItem({ session, isActive, onSelect, onDelete, onRename }:
           <button
             onClick={(e) => { e.stopPropagation(); setShowOptions(!showOptions) }}
             className={`p-1 rounded-md transition-colors ${
-              showOptions || isActive ? 'text-slate-500 hover:text-slate-800 hover:bg-slate-100' : 'text-transparent group-hover:text-slate-400 hover:text-slate-800'
+              showOptions || isActive ? 'text-slate-300 hover:bg-white/10 hover:text-white' : 'text-transparent group-hover:text-slate-400 hover:text-slate-800'
             }`}
           >
             <MoreVertical className="w-4 h-4" />
@@ -132,8 +134,8 @@ export function SessionItem({ session, isActive, onSelect, onDelete, onRename }:
       </div>
 
       <div className="flex items-center justify-between mt-1 pl-8 pr-1 opacity-70">
-        <p className="text-[10px] text-slate-400 font-medium">
-          {relativeDate(session.updatedAt)}
+        <p className={`text-[10px] font-medium ${isActive ? 'text-white/60' : 'text-slate-400'}`}>
+          {relativeDate(session.updatedAt ?? session.createdAt)}
         </p>
       </div>
     </div>

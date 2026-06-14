@@ -10,24 +10,82 @@ import requests
 
 from ..services import get_twilio_service, CountryDetector
 from ..services.twilio_whatsapp_crisis import get_crisis_whatsapp_service
-from ..tools.crisis_tools import get_crisis_resources
+from ..tools.crisis_tools import DEFAULT_CRISIS_COUNTRY, get_crisis_resources
+from ..db.client import get_prisma_client
+from ..security.compliance import effective_scoped_consent, enforce_user_scope
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/crisis", tags=["crisis"])
+
+
+def _whatsapp_to(phone: str) -> str:
+    return phone if phone.startswith("whatsapp:") else f"whatsapp:{phone}"
+
+
+async def _get_user_crisis_contacts(user_id: str) -> list[dict[str, str]]:
+    """Return active, consented emergency contacts for crisis alerts."""
+    try:
+        prisma = await get_prisma_client()
+        pref = await prisma.userpreference.find_unique(where={"userId": user_id})
+        has_contact_consent = await effective_scoped_consent(
+            prisma,
+            user_id=user_id,
+            scope="EMERGENCY_CONTACT_ALERTS",
+            fallback=bool(pref and getattr(pref, "emergencyContactConsent", False)),
+        )
+        if not has_contact_consent:
+            return []
+
+        contacts = await prisma.emergencycontact.find_many(
+            where={"userId": user_id, "active": True}
+        )
+        results: list[dict[str, str]] = []
+        for contact in contacts:
+            phone = str(getattr(contact, "phone", "") or "").strip()
+            if not phone:
+                continue
+            channel = str(getattr(contact, "channel", "sms") or "sms").lower()
+            results.append({
+                "name": str(getattr(contact, "name", "") or "Trusted contact"),
+                "phone": phone,
+                "channel": "whatsapp" if channel == "whatsapp" else "sms",
+            })
+        return results
+    except Exception as e:
+        print(f"[CRISIS-CONTACTS] Could not load saved contacts: {str(e)[:120]}")
+        return []
+
+
+async def _has_location_consent(user_id: str) -> bool:
+    try:
+        prisma = await get_prisma_client()
+        pref = await prisma.userpreference.find_unique(where={"userId": user_id})
+        return await effective_scoped_consent(
+            prisma,
+            user_id=user_id,
+            scope="CRISIS_LOCATION",
+            fallback=bool(pref and getattr(pref, "crisisLocationConsent", False)),
+        )
+    except Exception as e:
+        print(f"[CRISIS-CONSENT] Could not check location consent: {str(e)[:120]}")
+        return False
+
 
 
 # ============================================
 # IP-BASED GEOLOCATION HELPER
 # ============================================
 
-def get_location_from_ip(ip_address: Optional[str] = None) -> Dict[str, Any]:
+def get_location_from_ip(ip_address=None):
     """
-    Get precise location from IP address using free IP geolocation service
-    No user permission needed - works instantly
-    
+    Get approximate location from IP address using a geolocation service.
+
+    Callers must verify user scope and crisis-location consent before invoking
+    this helper because it sends the IP address to an external provider.
+
     Args:
         ip_address: Optional IP to lookup. If None, will use client's IP
-        
+
     Returns:
         Dictionary with latitude, longitude, city, region, country
     """
@@ -42,14 +100,14 @@ def get_location_from_ip(ip_address: Optional[str] = None) -> Dict[str, Any]:
             except Exception as e:
                 print(f"[GEO]  Could not auto-detect IP: {e}")
                 return {'success': False, 'error': 'Could not detect IP'}
-        
-        # Use ip-api.com for geolocation (free, no key needed, accurate)
+
+        # Use HTTPS to prevent plaintext IP leakage to third party (GDPR Art. 44)
         print(f"[GEO]  Looking up location for IP: {ip_address}")
         geo_response = requests.get(
-            f'http://ip-api.com/json/{ip_address}?fields=status,lat,lon,city,regionName,country,isp',
+            f'https://ip-api.com/json/{ip_address}?fields=status,lat,lon,city,regionName,country,isp',
             timeout=5
         )
-        
+
         if geo_response.status_code == 200:
             data = geo_response.json()
             if data.get('status') == 'success':
@@ -61,16 +119,16 @@ def get_location_from_ip(ip_address: Optional[str] = None) -> Dict[str, Any]:
                     'region': data.get('regionName', 'Unknown'),
                     'country': data.get('country', 'Unknown'),
                     'isp': data.get('isp', 'Unknown'),
-                    'accuracy': '500 metres',  # Typical IP geolocation accuracy
-                    'method': 'IP-based (automatic, no permission needed)',
+                    'accuracy': 'city-level approximation',
+                    'method': 'IP-based fallback (approximate)',
                     'ip': ip_address
                 }
                 print(f"[GEO] [OK] Location found: {location['city']}, {location['country']}")
                 return location
-        
-        print(f"[GEO]  ip-api returned: {data.get('message', 'Unknown error')}")
+
+        print("[GEO]  ip-api returned non-success response")
         return {'success': False, 'error': 'IP lookup failed'}
-        
+
     except Exception as e:
         logger.error(f"[GEO]  Error getting IP geolocation: {str(e)}")
         print(f"[GEO]  Exception: {e}")
@@ -82,15 +140,6 @@ def get_location_from_ip(ip_address: Optional[str] = None) -> Dict[str, Any]:
         }
 
 
-class LocationAlertRequest(BaseModel):
-    """Request to send a location-based WhatsApp alert"""
-    user_id: str = Field(..., description="User ID who triggered the crisis")
-    latitude: float = Field(..., description="GPS latitude from browser geolocation")
-    longitude: float = Field(..., description="GPS longitude from browser geolocation")
-    accuracy: Optional[float] = Field(None, description="Geolocation accuracy in metres")
-    crisis_level: str = Field("high", description="Crisis level: medium or high")
-
-
 class AutoLocationRequest(BaseModel):
     """Request to send location alert using automatic IP-based geolocation"""
     user_id: str = Field(..., description="User ID who triggered the crisis")
@@ -98,9 +147,18 @@ class AutoLocationRequest(BaseModel):
     ip_address: Optional[str] = Field(None, description="Optional IP address to lookup. If None, auto-detects.")
 
 
+class LocationAlertRequest(BaseModel):
+    """Request to send a consented GPS crisis-location alert."""
+    user_id: str = Field(..., description="User ID who triggered the crisis")
+    latitude: float = Field(..., ge=-90, le=90, description="Browser GPS latitude")
+    longitude: float = Field(..., ge=-180, le=180, description="Browser GPS longitude")
+    accuracy: Optional[float] = Field(None, ge=0, description="Browser-reported accuracy in meters")
+    crisis_level: str = Field("high", description="Crisis level: medium or high")
+
+
 class CrisisResourceRequest(BaseModel):
     """Request for crisis resources"""
-    country_code: Optional[str] = Field("US", description="ISO 3166-1 alpha-2 country code")
+    country_code: Optional[str] = Field(DEFAULT_CRISIS_COUNTRY, description="ISO 3166-1 alpha-2 country code")
     user_id: Optional[str] = Field("anonymous", description="User ID for tracking")
 
 
@@ -108,14 +166,14 @@ class CrisisCallRequest(BaseModel):
     """Request to initiate a crisis call"""
     user_phone: str = Field(..., description="User's phone in E.164 format (+1234567890)")
     hotline_number: Optional[str] = Field(None, description="Specific hotline to call. If None, uses primary hotline")
-    country_code: Optional[str] = Field("US", description="ISO 3166-1 alpha-2 country code")
+    country_code: Optional[str] = Field(DEFAULT_CRISIS_COUNTRY, description="ISO 3166-1 alpha-2 country code")
     user_id: Optional[str] = Field("anonymous", description="User ID for tracking")
 
 
 class CrisisSMSRequest(BaseModel):
     """Request to send crisis resources via SMS"""
     user_phone: str = Field(..., description="User's phone in E.164 format")
-    country_code: Optional[str] = Field("US", description="ISO 3166-1 alpha-2 country code")
+    country_code: Optional[str] = Field(DEFAULT_CRISIS_COUNTRY, description="ISO 3166-1 alpha-2 country code")
     user_id: Optional[str] = Field("anonymous", description="User ID for tracking")
 
 
@@ -200,7 +258,7 @@ async def initiate_crisis_call(request: CrisisCallRequest) -> Dict[str, Any]:
         hotline = request.hotline_number
         if not hotline:
             resources = get_crisis_resources(request.country_code)
-            hotline = resources.get("primary_hotline", {}).get("number", "988")
+            hotline = resources.get("primary_hotline", {}).get("number", "+92-311-7786264")
             print(f"[API]  Using primary hotline: {hotline}")
         
         # Initiate call via Twilio
@@ -566,7 +624,7 @@ async def test_whatsapp_alert(request: Dict[str, Any]) -> Dict[str, Any]:
 # ============================================
 
 @router.post("/send-location")
-async def send_location_alert(request: LocationAlertRequest) -> Dict[str, Any]:
+async def send_location_alert(request: LocationAlertRequest, http_request: Request) -> Dict[str, Any]:
     """
     Send a WhatsApp alert containing the user's GPS location when a crisis is detected.
 
@@ -583,6 +641,15 @@ async def send_location_alert(request: LocationAlertRequest) -> Dict[str, Any]:
         success flag, message_sid, channel used, and maps_link
     """
     try:
+        enforce_user_scope(http_request, request.user_id)
+        if not await _has_location_consent(request.user_id):
+            print("[CRISIS-LOC] User has not granted crisis location consent")
+            return {
+                "success": False,
+                "error": "User has not granted crisis location consent",
+                "message_sid": None,
+            }
+
         print(f"\n[CRISIS-LOC]  GPS LOCATION ALERT - Browser Geolocation")
         print(f"[CRISIS-LOC]  PRECISE LOCATION FROM USER'S BROWSER GPS")
         print(f"[CRISIS-LOC]   User:     {request.user_id}")
@@ -604,38 +671,67 @@ async def send_location_alert(request: LocationAlertRequest) -> Dict[str, Any]:
                 "configured": False,
             }
 
-        result = whatsapp_service.send_location_alert(
-            user_id=request.user_id,
-            latitude=request.latitude,
-            longitude=request.longitude,
-            accuracy=request.accuracy,
-            crisis_level=request.crisis_level,
-            method="GPS",  # Explicitly mark as GPS-based location from browser
-        )
+        contacts = await _get_user_crisis_contacts(request.user_id)
+        if not contacts:
+            print("[CRISIS-LOC]   No saved emergency contacts; using configured Twilio fallback recipient")
+            contacts = [{"name": "Configured fallback", "phone": "", "channel": "fallback"}]
 
-        if result.get("success"):
-            print(f"[CRISIS-LOC]  Location alert sent via {result.get('channel')}  SID: {result.get('message_sid')}")
-            print(f"[CRISIS-LOC]   Maps link: {result.get('maps_link')}")
+        sent_results = []
+        for contact in contacts:
+            channel = contact.get("channel", "sms")
+            phone = contact.get("phone", "")
+            recipient = _whatsapp_to(phone) if channel == "whatsapp" and phone else None
+            sms_recipient = phone if channel != "whatsapp" and phone else None
+            result = whatsapp_service.send_location_alert(
+                user_id=request.user_id,
+                latitude=request.latitude,
+                longitude=request.longitude,
+                accuracy=request.accuracy,
+                crisis_level=request.crisis_level,
+                method="GPS",  # Explicitly mark as GPS-based location from browser
+                recipient=recipient,
+                sms_recipient=sms_recipient,
+            )
+            sent_results.append({
+                "contact": contact.get("name"),
+                "phone": phone,
+                "channel": result.get("channel"),
+                "success": result.get("success", False),
+                "message_sid": result.get("message_sid"),
+                "error": result.get("error"),
+                "maps_link": result.get("maps_link"),
+                "timestamp": result.get("timestamp"),
+            })
+
+        successful = [item for item in sent_results if item.get("success")]
+        first_success = successful[0] if successful else {}
+
+        if successful:
+            print(f"[CRISIS-LOC]  Location alerts sent: {len(successful)}/{len(sent_results)}")
+            print(f"[CRISIS-LOC]   Maps link: {first_success.get('maps_link')}")
         else:
-            print(f"[CRISIS-LOC]  Location alert failed: {result.get('error')}")
+            print("[CRISIS-LOC]  All location alerts failed")
 
         # Ensure response is properly JSON serializable
         try:
             response = {
-                "success": result.get("success", False),
-                "message_sid": str(result.get("message_sid", "")),
-                "channel": str(result.get("channel", "")),
-                "maps_link": str(result.get("maps_link", "")),
-                "timestamp": str(result.get("timestamp", "")),
-                "latitude": float(result.get("latitude", 0.0)),
-                "longitude": float(result.get("longitude", 0.0)),
-                "error": str(result.get("error", "")) if result.get("error") else None,
+                "success": bool(successful),
+                "message_sid": str(first_success.get("message_sid", "")),
+                "channel": str(first_success.get("channel", "")),
+                "maps_link": str(first_success.get("maps_link", f"https://maps.google.com/?q={request.latitude},{request.longitude}")),
+                "timestamp": str(first_success.get("timestamp", "")),
+                "latitude": float(request.latitude),
+                "longitude": float(request.longitude),
+                "recipient_count": len(sent_results),
+                "sent_count": len(successful),
+                "results": sent_results,
+                "error": None if successful else "All crisis contact alerts failed",
             }
             return response
         except Exception as e:
             print(f"[CRISIS-LOC]  Error formatting response: {e}")
             return {
-                "success": result.get("success", False),
+                "success": bool(successful),
                 "error": "Error formatting response",
                 "message_sid": None
             }
@@ -652,105 +748,28 @@ async def send_location_alert(request: LocationAlertRequest) -> Dict[str, Any]:
         }
 
 # ============================================
-# IP-BASED AUTO LOCATION ALERT (NO PERMISSION NEEDED)
+# IP-BASED AUTO LOCATION ALERT (CONSENT REQUIRED)
 # ============================================
 
 @router.post("/send-location-auto")
 async def send_location_auto(request: AutoLocationRequest, req: Request) -> Dict[str, Any]:
     """
-    Send WhatsApp crisis alert with AUTOMATIC IP-based location.
+    Reject IP-based crisis location fallback.
     
-    NO browser permission required!
-    NO user action needed!
-    
-    Called automatically when crisis is detected.
-    Detects user's location from IP address and sends it to crisis center via WhatsApp.
-    
-    The resulting WhatsApp message includes:
-      - Crisis level badge
-      - User ID + timestamp
-      - City, Region, Country
-      - Latitude / Longitude
-      - Clickable Google Maps link
-      - Accuracy: 500 metres (typical IP geolocation accuracy)
-    
-    Args:
-        request: AutoLocationRequest with user_id, crisis_level, optional ip_address
-        req: FastAPI Request object to extract client IP if needed
-    
-    Returns:
-        success flag, message_sid, channel used, location details, and maps_link
+    SentiMind now sends crisis location only from browser GPS through
+    /send-location. This endpoint is kept as a compatibility no-op so older
+    clients do not leak approximate IP location.
     """
     try:
-        # Get IP address: priority is request.ip_address > client IP from request
-        ip_to_lookup = request.ip_address
-        if not ip_to_lookup:
-            # Extract client IP from request headers
-            client_ip = req.client.host if req.client else None
-            ip_to_lookup = client_ip
-        
-        print(f"\n[AUTO-LOC]  IP-BASED FALLBACK LOCATION ALERT")
-        print(f"[AUTO-LOC]  GPS PERMISSION DENIED OR UNAVAILABLE - Using IP-based fallback")
-        print(f"[AUTO-LOC]   User:     {request.user_id}")
-        print(f"[AUTO-LOC]   Level:    {request.crisis_level.upper()}")
-        print(f"[AUTO-LOC]   IP:       {ip_to_lookup}")
-        
-        # Get location from IP
-        location = get_location_from_ip(ip_to_lookup)
-        
-        if not location.get('success'):
-            print(f"[AUTO-LOC]  Location lookup failed: {location.get('error')}")
-            return {
-                "success": False,
-                "error": location.get('error', 'Could not determine location from IP'),
-                "message_sid": None,
-                "location": location
-            }
-        
-        print(f"[AUTO-LOC]  Location found: {location['city']}, {location['region']}, {location['country']}")
-        
-        # Send WhatsApp with location
-        whatsapp_service = get_crisis_whatsapp_service()
-        
-        if not whatsapp_service.client:
-            print(f"[AUTO-LOC]  Twilio not configured")
-            return {
-                "success": False,
-                "error": "WhatsApp service not configured  check Twilio credentials in .env",
-                "configured": False,
-                "location": location
-            }
-        
-        result = whatsapp_service.send_location_alert(
-            user_id=request.user_id,
-            latitude=location['latitude'],
-            longitude=location['longitude'],
-            city=location['city'],
-            region=location['region'],
-            country=location['country'],
-            accuracy=location['accuracy'],
-            crisis_level=request.crisis_level,
-            method=location['method']
-        )
-        
-        if result.get("success"):
-            print(f"[AUTO-LOC]  Auto location alert sent via {result.get('channel')}  SID: {result.get('message_sid')}")
-            print(f"[AUTO-LOC]   Location: {location['city']}, {location['country']}")
-            print(f"[AUTO-LOC]   LatLng: {location['latitude']}, {location['longitude']}")
-            print(f"[AUTO-LOC]   Maps: {result.get('maps_link')}")
-        else:
-            print(f"[AUTO-LOC]  WhatsApp send failed: {result.get('error')}")
-        
+        enforce_user_scope(req, request.user_id)
+        print("[AUTO-LOC] IP-based location fallback disabled; browser GPS is required")
         return {
-            "success": result.get("success", False),
-            "message_sid": result.get("message_sid"),
-            "channel": result.get("channel", "unknown"),
-            "status": result.get("status"),
-            "error": result.get("error"),
-            "location": location,
-            "maps_link": result.get("maps_link"),
+            "success": False,
+            "error": "IP-based location fallback is disabled. Browser GPS coordinates are required.",
+            "configured": True,
+            "location": None,
+            "message_sid": None,
             "user_id": request.user_id,
-            "timestamp": result.get("timestamp")
         }
     
     except Exception as e:

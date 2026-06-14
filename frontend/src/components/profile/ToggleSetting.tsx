@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState } from 'react'
+import React from 'react'
 
 interface ToggleSettingProps {
     label: string
@@ -33,9 +33,9 @@ export const ToggleSetting = ({
                 onClick={() => onChange(!checked)}
                 className={`
                     relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full
-                    transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-purple-400
+                    transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-cyan-400
                     focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed
-                    ${checked ? 'bg-purple-600' : 'bg-slate-200'}
+                    ${checked ? 'bg-cyan-700' : 'bg-slate-200'}
                 `}
             >
                 <span

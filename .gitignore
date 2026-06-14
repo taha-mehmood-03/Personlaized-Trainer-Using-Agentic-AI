@@ -1,6 +1,15 @@
 node_modules/
+.npm-cache/
+.venv/
+
+.env
 nul
 mental_health_wellness/nul
 mental_health_wellness/memory_store/
 mental_health_wellness/**/__pycache__/
 *.sqlite3
+*.log
+
+logs/
+frontend/.next/
+frontend/.next-*/

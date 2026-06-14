@@ -1,7 +1,4 @@
-'use client'
-
 import React from 'react'
-import { DashboardStats } from '@/types'
 import { TrendingUp, TrendingDown, Minus } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -13,10 +10,10 @@ interface StatCardProps {
     /** Optional subtext below value */
     sub?: string
     /** Trend indicator */
-    trend?: 'up' | 'down' | 'stable'
-    /** Highlight color class e.g. 'text-purple-600' */
+    trend?: 'up' | 'down' | 'stable' | 'insufficient_data'
+    /** Highlight color class e.g. 'text-cyan-700' */
     color?: string
-    /** Background gradient class e.g. 'from-purple-50 to-teal-50' */
+    /** Background gradient class e.g. 'from-white to-cyan-50' */
     gradient?: string
 }
 
@@ -27,7 +24,7 @@ export const StatCard = ({
     icon,
     sub,
     trend,
-    color = 'text-purple-600',
+    color = 'text-cyan-700',
     gradient = 'from-white to-white',
 }: StatCardProps) => {
     const TrendIcon =
@@ -43,7 +40,7 @@ export const StatCard = ({
     return (
         <div
             className={cn(
-                'relative p-5 bg-gradient-to-br border border-slate-100 rounded-2xl shadow-sm overflow-hidden group hover:shadow-md transition-shadow',
+                'relative overflow-hidden rounded-xl border border-slate-200 bg-gradient-to-br p-5 shadow-sm transition-shadow hover:shadow-md',
                 gradient
             )}
         >

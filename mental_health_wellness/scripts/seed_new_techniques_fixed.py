@@ -5,6 +5,19 @@ Seed New 60 Techniques - With Proper Emotion Mapping
 import asyncio
 from prisma import Prisma
 from datetime import datetime
+import sys
+from pathlib import Path
+
+
+SRC_DIR = Path(__file__).resolve().parents[1] / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from mental_health_wellness.techniques.emotion_metadata import (  # noqa: E402
+    annotate_technique_dict,
+    prisma_metadata_fields,
+    target_emotions_for_technique,
+)
 
 # ============================================
 # EMOTION MAPPING TO PRISMA ENUM
@@ -85,9 +98,6 @@ def normalize_target_emotions(emotions: list) -> list:
     return normalized if normalized else ["NEUTRAL"]
 
 
-import sys
-from pathlib import Path
-
 # Import techniques from the sibling seed_new_techniques.py file.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
@@ -155,6 +165,9 @@ async def seed_new_techniques():
         print(f"\n  [{category_name.upper()}] ({len(techniques_list)} techniques)")
         
         for tech_data in techniques_list:
+            annotate_technique_dict(tech_data, category_name)
+            metadata_fields = prisma_metadata_fields(tech_data, category_name)
+
             # Check if already exists
             existing = await prisma.technique.find_first(
                 where={"name": tech_data["name"]}
@@ -162,6 +175,13 @@ async def seed_new_techniques():
             
             if existing:
                 total_existing += 1
+                await prisma.technique.update(
+                    where={"id": existing.id},
+                    data={
+                        "targetEmotions": normalize_target_emotions(target_emotions_for_technique(tech_data, category_name)),
+                        **metadata_fields,
+                    },
+                )
                 print(f"    [OK] {tech_data['name']}")
                 continue
             
@@ -174,10 +194,11 @@ async def seed_new_techniques():
                 "steps": tech_data["steps"],
                 "durationMinutes": tech_data["duration_minutes"],
                 "difficulty": tech_data["difficulty"],
-                "targetEmotions": normalize_target_emotions(tech_data.get("target_emotions", [])),
+                "targetEmotions": normalize_target_emotions(target_emotions_for_technique(tech_data, category_name)),
                 "whyItWorks": tech_data.get("why_it_works", ""),
                 "effectiveness": tech_data.get("effectiveness", 0.8),
-                "isActive": True
+                "isActive": True,
+                **metadata_fields,
             }
             
             try:

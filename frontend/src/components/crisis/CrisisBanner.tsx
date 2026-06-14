@@ -1,83 +1,21 @@
-'use client'
-
+import Link from 'next/link'
 import { AlertTriangle, ExternalLink } from 'lucide-react'
-import { useEffect, useState } from 'react'
-import { api, CrisisResource } from '@/lib/api'
 
-// ─── Crisis Banner Component ──────────────────────────────────────────────────
 export function CrisisBanner() {
-  const [resources, setResources] = useState<CrisisResource | null>(null)
-  const [countryCode, setCountryCode] = useState<string>('US')
-
-  useEffect(() => {
-    const loadResources = async () => {
-      try {
-        // Detect country
-        const detectResult = await api.post<any>('/crisis/detect-country', {
-          user_data: {}
-        })
-        
-        const country = detectResult.data?.country_code || 'US'
-        setCountryCode(country)
-
-        // Load resources for country
-        const resourceResult = await api.post<CrisisResource>('/crisis/resources', {
-          country_code: country
-        })
-        
-        if (resourceResult.ok && resourceResult.data) {
-          setResources(resourceResult.data)
-        }
-      } catch (err) {
-        console.error('Error loading crisis banner resources:', err)
-        // Fallback to default resources
-        setResources({
-          primary_hotline: {
-            name: '988 Suicide & Crisis Lifeline',
-            number: '988',
-            available: '24/7'
-          }
-        })
-      }
-    }
-
-    loadResources()
-  }, [])
-
-  // Get resource link based on country
-  const getResourceLink = () => {
-    switch (countryCode) {
-      case 'PK':
-        return 'https://www.iasp.info/resources/Crisis_Centres/'
-      case 'GB':
-        return 'https://www.samaritans.org/'
-      case 'AU':
-        return 'https://www.lifeline.org.au/'
-      default:
-        return 'https://988lifeline.org/find-a-crisis-center/'
-    }
-  }
-
-  const hotline = resources?.primary_hotline?.number || '988'
-
   return (
-    <div className="w-full bg-red-600 text-white px-4 py-2.5 flex items-center justify-center gap-3 text-sm font-medium z-50 shrink-0 flex-wrap">
-      <AlertTriangle className="w-4 h-4 shrink-0" />
-      <span>
-        Feeling in crisis? Please reach out for immediate help.{' '}
-        <strong>{resources?.primary_hotline?.call_text || 'Call'}</strong>{' '}
-        <strong>{hotline}</strong>{' '}
-        anytime{countryCode === 'PK' ? ' in Pakistan' : countryCode === 'GB' ? ' in UK' : countryCode === 'AU' ? ' in Australia' : ' in the US & Canada'}.
+    <div className="flex w-full shrink-0 items-center justify-center gap-2 bg-red-600 px-3 py-1.5 text-xs font-semibold text-white sm:gap-3 sm:px-4 sm:py-2.5 sm:text-sm">
+      <AlertTriangle className="h-4 w-4 shrink-0" />
+      <span className="min-w-0 truncate">
+        Crisis support: <strong>+92-311-7786264</strong>
       </span>
-      <a
-        href={getResourceLink()}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="underline font-bold flex items-center gap-1 hover:text-red-100 transition-colors whitespace-nowrap"
+      <Link
+        href="/crisis"
+        prefetch={false}
+        className="flex shrink-0 items-center gap-1 whitespace-nowrap font-bold underline transition-colors hover:text-red-100"
       >
-        Find Local Resources
-        <ExternalLink className="w-3.5 h-3.5" />
-      </a>
+        Open resources
+        <ExternalLink className="h-3.5 w-3.5" />
+      </Link>
     </div>
   )
 }

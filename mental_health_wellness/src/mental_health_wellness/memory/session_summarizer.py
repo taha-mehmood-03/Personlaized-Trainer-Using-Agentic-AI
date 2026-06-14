@@ -2,11 +2,12 @@
 Layer 2: Session Summarizer Memory
 ChatGPT-style session summaries with rolling window.
 
-Generates concise summaries of past sessions using Groq LLM and stores them
+Generates concise summaries of past sessions using Gemini LLM and stores them
 in the Prisma SessionSummary table. Max 15 summaries  oldest deleted first.
 """
 
 import asyncio
+import os
 from datetime import datetime
 from typing import Optional
 
@@ -22,7 +23,7 @@ async def summarize_session(
     outcome: str = "neutral"
 ) -> None:
     """
-    Generate a concise session summary using Groq LLM and save to DB.
+    Generate a concise session summary using Gemini LLM and save to DB.
     Must always be called via asyncio.create_task()  never awaited directly.
 
     Args:
@@ -34,8 +35,16 @@ async def summarize_session(
         outcome: "helped", "neutral", or "no_change"
     """
     try:
+        background_enabled = (
+            os.getenv("SENTIMIND_BACKGROUND_LLM_ENABLED", "0").lower() in {"1", "true", "yes", "on"}
+            or os.getenv("SENTIMIND_BACKGROUND_SESSION_SUMMARY", "0").lower() in {"1", "true", "yes", "on"}
+        )
+        if not background_enabled:
+            print("[MEMORY:SUMMARIES] Summary skipped (background LLM disabled)")
+            return
+
         from ..db.client import get_prisma_client
-        from ..llm.groq_llm import get_llm_manager
+        from ..llm.groq_llm import get_llm_manager, message_content_to_text
         from langchain_core.messages import HumanMessage as LCHuman
 
         techniques = techniques or []
@@ -45,7 +54,7 @@ async def summarize_session(
         for msg in messages:
             role = getattr(msg, "type", None) or getattr(msg, "role", "")
             if role in ("human", "user"):
-                content = getattr(msg, "content", "")
+                content = message_content_to_text(getattr(msg, "content", ""))
                 if content and content.strip():
                     user_texts.append(content.strip())
 
@@ -56,8 +65,6 @@ async def summarize_session(
 
         # Build LLM summary
         manager = get_llm_manager()
-        llm = manager.get_llm()
-
         prompt = f"""You are a clinical session note writer for a mental health chatbot.
 Write a concise session summary based ONLY on these user messages.
 
@@ -71,8 +78,22 @@ Return a JSON object with:
 Return ONLY valid JSON: {{"title": "...", "summary": "..."}}"""
 
         from langchain_core.messages import HumanMessage
-        response = llm.invoke([HumanMessage(content=prompt)])
-        raw = response.content.strip()
+        if hasattr(manager, "invoke_gemini_with_rotation"):
+            response = manager.invoke_gemini_with_rotation(
+                [HumanMessage(content=prompt)],
+                model=getattr(manager, "model_mood", None),
+                max_tokens=512,
+                temperature=0.0,
+                response_format={"type": "json_object"},
+                response_format_models=[
+                    getattr(manager, "model_mood", None),
+                    getattr(manager, "model_alt", None),
+                ],
+            )
+        else:
+            llm = manager.get_llm(model=getattr(manager, "model_mood", None))
+            response = llm.invoke([HumanMessage(content=prompt)])
+        raw = message_content_to_text(response.content if hasattr(response, "content") else response).strip()
 
         # Parse JSON
         import json
@@ -103,7 +124,7 @@ Return ONLY valid JSON: {{"title": "...", "summary": "..."}}"""
 
         # Save new summary
         tech_names = [str(t) for t in techniques] if techniques else []
-        await prisma.sessionsummary.create(data={
+        created_summary = await prisma.sessionsummary.create(data={
             "userId": user_id,
             "sessionId": session_id,
             "title": title,
@@ -112,6 +133,26 @@ Return ONLY valid JSON: {{"title": "...", "summary": "..."}}"""
             "techniques": tech_names,
             "outcome": outcome,
         })
+        try:
+            from . import store_session_summary_embedding
+
+            asyncio.create_task(store_session_summary_embedding(
+                user_id=user_id,
+                session_id=session_id,
+                summary_id=created_summary.id,
+                title=title,
+                summary=summary,
+                emotion=emotion,
+            ))
+        except Exception:
+            pass
+
+        try:
+            from ..services.cache_state import invalidate_user_cache
+
+            invalidate_user_cache(user_id, session_id=session_id)
+        except Exception as cache_err:
+            print(f"[MEMORY:SUMMARIES] Cache invalidation skipped: {str(cache_err)[:100]}")
 
         print(f"[MEMORY:SUMMARIES]  Saved session summary: '{title}'")
 

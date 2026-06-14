@@ -2,6 +2,9 @@ import { type NextAuthOptions, type User as NextAuthUser } from 'next-auth'
 import CredentialsProvider from 'next-auth/providers/credentials'
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:8000/api'
+const CONSENT_VERSION = '2026-05-24'
+const PRIVACY_NOTICE_VERSION = '2026-05-24'
+const TERMS_VERSION = '2026-05-24'
 
 /**
  * Centralized NextAuth options.
@@ -17,6 +20,10 @@ export const authOptions: NextAuthOptions = {
                 password: { label: 'Password', type: 'password' },
                 name:     { label: 'Name',     type: 'text' },
                 mode:     { label: 'Mode',     type: 'text' }, // 'login' | 'signup'
+                consentAccepted: { label: 'Consent Accepted', type: 'text' },
+                consentVersion: { label: 'Consent Version', type: 'text' },
+                privacyNoticeVersion: { label: 'Privacy Notice Version', type: 'text' },
+                termsVersion: { label: 'Terms Version', type: 'text' },
             },
 
             async authorize(credentials): Promise<NextAuthUser | null> {
@@ -31,6 +38,12 @@ export const authOptions: NextAuthOptions = {
                 }
                 if (mode === 'signup' && credentials.name) {
                     body.name = credentials.name
+                }
+                if (mode === 'signup') {
+                    body.consent_accepted = credentials.consentAccepted === 'true' ? 'true' : 'false'
+                    body.consent_version = credentials.consentVersion || CONSENT_VERSION
+                    body.privacy_notice_version = credentials.privacyNoticeVersion || PRIVACY_NOTICE_VERSION
+                    body.terms_version = credentials.termsVersion || TERMS_VERSION
                 }
 
                 try {

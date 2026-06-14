@@ -1,288 +1,336 @@
 import React from 'react'
 import Link from 'next/link'
-import { Button } from '@/components/ui/button'
 import {
-    Sparkles,
-    Heart,
-    ShieldCheck,
-    Mic,
+    Activity,
+    ArrowRight,
     BarChart3,
-    MessageCircleHeart,
+    Brain,
+    Clock3,
+    HeartPulse,
+    MessageSquareText,
     Phone,
+    ShieldCheck,
+    Sparkles,
 } from 'lucide-react'
+import { Button } from '@/components/ui/button'
 
-const FEATURES = [
+const CAPABILITIES = [
     {
-        icon: <Mic className="w-6 h-6" />,
-        color: 'bg-purple-100 text-purple-600',
-        title: 'Emotion Detection',
-        body: 'Advanced analysis that understands how you really feel beneath the words.',
+        icon: MessageSquareText,
+        title: 'Context-aware chat',
+        body: 'Short replies, follow-ups, technique feedback, and memory questions stay tied to the active session.',
     },
     {
-        icon: <MessageCircleHeart className="w-6 h-6" />,
-        color: 'bg-teal-100 text-teal-600',
-        title: 'Personalized Support',
-        body: 'Dynamic conversation that adapts to your unique mental state in real-time.',
+        icon: BarChart3,
+        title: 'Long-term analytics',
+        body: 'Mood snapshots, symptoms, context signals, technique outcomes, and session trends become visible over time.',
     },
     {
-        icon: <ShieldCheck className="w-6 h-6" />,
-        color: 'bg-rose-100 text-rose-600',
-        title: 'Crisis Safe',
-        body: 'Equipped with safeguards to watch out for your immediate physical safety.',
+        icon: ShieldCheck,
+        title: 'Crisis resources',
+        body: 'Urgent language keeps support resources visible instead of hiding them behind normal coaching flows.',
     },
     {
-        icon: <BarChart3 className="w-6 h-6" />,
-        color: 'bg-amber-100 text-amber-600',
-        title: 'Tracks Progress',
-        body: 'Visualize your mood journey over weeks and months with intuitive charts.',
+        icon: Brain,
+        title: 'Personalized pacing',
+        body: 'The agent gathers enough context before suggesting techniques, then learns from what helped.',
     },
 ]
 
-const HOW_IT_WORKS = [
-    {
-        step: '01',
-        title: 'Tell us how you feel',
-        body: 'Start a conversation whenever you need it. No judgments, just listening.',
-    },
-    {
-        step: '02',
-        title: 'SentiMind listens',
-        body: 'Our AI processes your input with empathy and clinical-grade understanding.',
-    },
-    {
-        step: '03',
-        title: 'Get personalized support',
-        body: 'Receive mindfulness exercises, cognitive reframing, and mood-boosting tasks.',
-    },
+const PIPELINE_STEPS = [
+    { label: 'Gate', detail: 'Route safely', value: '< 1s' },
+    { label: 'Understand', detail: 'Use context', value: 'multi-turn' },
+    { label: 'Respond', detail: 'One next step', value: 'warm' },
+    { label: 'Persist', detail: 'Update analytics', value: 'background' },
 ]
 
-const TESTIMONIALS = [
-    {
-        quote:
-            'SentiMind has been a lifesaver during my late-night anxiety attacks. Having someone to talk to at 3 AM makes all the difference.',
-        author: 'Sarah K.',
-        role: 'Software Engineer',
-        avatar: 'SK',
-        color: 'from-purple-500 to-teal-400',
-    },
-    {
-        quote:
-            'The progress tracking feature helped me realize my triggers were related to work stress. It\'s like having a therapist in my pocket.',
-        author: 'Marcus T.',
-        role: 'Product Manager',
-        avatar: 'MT',
-        color: 'from-teal-500 to-cyan-400',
-    },
-    {
-        quote:
-            "I was skeptical about AI, but the empathy SentiMind shows is remarkable. It doesn't give generic advice; it truly adapts to me.",
-        author: 'Aisha R.',
-        role: 'Graduate Student',
-        avatar: 'AR',
-        color: 'from-rose-500 to-orange-400',
-    },
+const CHAT_LINES = [
+    { speaker: 'User', text: 'My final presentation is coming up and I feel tense.' },
+    { speaker: 'SentiMind', text: 'That sounds like a lot of pressure. What part feels most uncertain right now?' },
+    { speaker: 'User', text: 'The questions after the presentation.' },
 ]
 
-const FOOTER_LINKS = {
-    Product: ['Chatbot', 'Journaling', 'Mood Tracker', 'Enterprise'],
-    Resources: ['Help Center', 'Crisis Hotline', 'Wellness Blog', 'Research'],
-    Company: ['About Us', 'Privacy Policy', 'Terms of Service', 'Ethics'],
+const DASHBOARD_ROWS = [
+    { label: 'Mood stability', value: '72%', width: 'w-[72%]', color: 'bg-emerald-500' },
+    { label: 'Technique fit', value: '81%', width: 'w-[81%]', color: 'bg-cyan-500' },
+    { label: 'Session continuity', value: '94%', width: 'w-[94%]', color: 'bg-slate-900' },
+]
+
+const FOOTER_LINKS = [
+    { label: 'Dashboard', href: '/dashboard' },
+    { label: 'Chat', href: '/chat' },
+    { label: 'Crisis resources', href: '/crisis' },
+    { label: 'Profile', href: '/profile' },
+]
+
+function HeroMockup() {
+    return (
+        <div className="mx-auto mt-10 max-w-6xl rounded-[1.75rem] border border-white/10 bg-white/10 p-3 shadow-2xl shadow-cyan-950/40 backdrop-blur-md">
+            <div className="grid gap-3 lg:grid-cols-[1.05fr_0.95fr]">
+                <div className="rounded-2xl bg-white p-4 text-slate-950">
+                    <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                        <div>
+                            <p className="text-xs font-black uppercase tracking-[0.1em] text-cyan-700">Live conversation</p>
+                            <p className="mt-1 text-sm font-black">Presentation anxiety</p>
+                        </div>
+                        <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-950 text-white">
+                            <MessageSquareText className="h-5 w-5" />
+                        </div>
+                    </div>
+
+                    <div className="mt-4 space-y-3">
+                        {CHAT_LINES.map((line) => (
+                            <div key={`${line.speaker}-${line.text}`} className="rounded-2xl border border-slate-100 bg-slate-50 p-3">
+                                <p className="text-[11px] font-black uppercase tracking-[0.08em] text-slate-400">
+                                    {line.speaker}
+                                </p>
+                                <p className="mt-1 text-sm leading-6 text-slate-700">{line.text}</p>
+                            </div>
+                        ))}
+                    </div>
+
+                    <div className="mt-4 grid grid-cols-2 gap-2">
+                        <div className="rounded-2xl bg-cyan-50 p-3">
+                            <p className="text-[11px] font-bold uppercase tracking-[0.08em] text-cyan-700">Stage</p>
+                            <p className="mt-1 text-sm font-black text-cyan-950">Understanding</p>
+                        </div>
+                        <div className="rounded-2xl bg-emerald-50 p-3">
+                            <p className="text-[11px] font-bold uppercase tracking-[0.08em] text-emerald-700">Technique</p>
+                            <p className="mt-1 text-sm font-black text-emerald-950">Not yet</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div className="grid gap-3">
+                    <div className="rounded-2xl bg-white p-4 text-slate-950">
+                        <div className="flex items-center justify-between">
+                            <div>
+                                <p className="text-xs font-black uppercase tracking-[0.1em] text-emerald-700">Dashboard signals</p>
+                                <p className="mt-1 text-sm font-black">30-day wellness view</p>
+                            </div>
+                            <HeartPulse className="h-5 w-5 text-rose-500" />
+                        </div>
+                        <div className="mt-4 space-y-4">
+                            {DASHBOARD_ROWS.map((row) => (
+                                <div key={row.label}>
+                                    <div className="mb-1 flex items-center justify-between text-xs font-bold text-slate-600">
+                                        <span>{row.label}</span>
+                                        <span>{row.value}</span>
+                                    </div>
+                                    <div className="h-2.5 overflow-hidden rounded-full bg-slate-100">
+                                        <div className={`h-full rounded-full ${row.color} ${row.width}`} />
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-2">
+                        {PIPELINE_STEPS.map((item) => (
+                            <div key={item.label} className="rounded-2xl bg-slate-950 p-4 text-white">
+                                <p className="text-[11px] font-black uppercase tracking-[0.1em] text-cyan-200">{item.label}</p>
+                                <p className="mt-2 text-sm font-black">{item.detail}</p>
+                                <p className="mt-1 text-xs font-semibold text-slate-300">{item.value}</p>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            </div>
+        </div>
+    )
 }
 
 export default function LandingPage() {
     return (
-        <div className="min-h-screen bg-white flex flex-col">
-            {/* ── NAVBAR ── */}
-            <header className="px-6 py-4 flex items-center justify-between border-b border-slate-100 bg-white/90 backdrop-blur-md sticky top-0 z-50">
-                <div className="flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-purple-500 to-teal-400 flex items-center justify-center shadow-sm">
-                        <span className="text-white font-bold text-lg leading-none">S</span>
-                    </div>
-                    <span className="font-bold text-slate-800 tracking-tight text-xl">SentiMind</span>
-                </div>
-                <nav className="hidden md:flex items-center gap-8 text-sm font-medium text-slate-600">
-                    <a href="#features" className="hover:text-purple-600 transition-colors">Features</a>
-                    <a href="#how-it-works" className="hover:text-purple-600 transition-colors">How It Works</a>
-                    <a href="#testimonials" className="hover:text-purple-600 transition-colors">Testimonials</a>
-                </nav>
-                <div className="flex items-center gap-3">
-                    <Link href="/login" className="text-sm font-semibold text-slate-600 hover:text-slate-900 transition-colors">
-                        Log in
+        <main className="min-h-screen bg-slate-50 text-slate-900">
+            <header className="sticky top-0 z-50 border-b border-slate-200 bg-white/90 px-4 py-3 backdrop-blur-md sm:px-6">
+                <div className="mx-auto flex max-w-7xl items-center justify-between">
+                    <Link href="/" className="flex items-center gap-3">
+                        <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-950 text-white">
+                            <Activity className="h-5 w-5" />
+                        </div>
+                        <div>
+                            <p className="text-base font-black tracking-tight text-slate-950">SentiMind</p>
+                            <p className="text-xs font-medium text-slate-500">Personalized trainer</p>
+                        </div>
                     </Link>
-                    <Button asChild variant="primary" size="sm">
-                        <Link href="/signup">Get Started</Link>
-                    </Button>
+
+                    <nav className="hidden items-center gap-7 text-sm font-semibold text-slate-600 md:flex">
+                        <a href="#system" className="transition-colors hover:text-slate-950">System</a>
+                        <a href="#analytics" className="transition-colors hover:text-slate-950">Analytics</a>
+                        <a href="#resources" className="transition-colors hover:text-slate-950">Resources</a>
+                    </nav>
+
+                    <div className="flex items-center gap-2">
+                        <Button asChild variant="ghost" size="sm">
+                            <Link href="/login">Log in</Link>
+                        </Button>
+                        <Button asChild size="sm" className="bg-slate-950 text-white hover:bg-slate-800">
+                            <Link href="/signup">Get started</Link>
+                        </Button>
+                    </div>
                 </div>
             </header>
 
-            {/* ── HERO ── */}
-            <section className="flex-1 flex flex-col items-center justify-center text-center px-4 pt-24 pb-20 bg-gradient-to-b from-slate-50 via-white to-white">
-                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-purple-50 border border-purple-100 text-purple-600 text-xs font-bold mb-8 uppercase tracking-widest shadow-sm animate-fade-in">
-                    <Sparkles className="w-3 h-3" />
-                    The Future of Mental Wellness
-                </div>
+            <section className="relative overflow-hidden bg-slate-950 px-4 pb-10 pt-16 text-white sm:px-6 sm:pt-20">
+                <div className="absolute inset-0 bg-[linear-gradient(90deg,rgba(255,255,255,0.05)_1px,transparent_1px),linear-gradient(0deg,rgba(255,255,255,0.05)_1px,transparent_1px)] bg-[size:72px_72px]" />
+                <div className="absolute inset-x-0 bottom-0 h-40 bg-gradient-to-t from-cyan-950/50 to-transparent" />
 
-                <h1 className="text-5xl md:text-7xl font-black text-slate-900 tracking-tighter max-w-4xl leading-[1.05] mb-6 animate-slide-up">
-                    An AI-powered mental wellness companion that{' '}
-                    <span className="text-transparent bg-clip-text bg-gradient-to-r from-purple-600 to-teal-500">
-                        listens, understands, and supports.
-                    </span>
-                </h1>
+                <div className="relative mx-auto max-w-7xl">
+                    <div className="mx-auto max-w-4xl text-center">
+                        <span className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-3 py-1 text-xs font-semibold text-cyan-100 backdrop-blur-md">
+                            <Sparkles className="h-3.5 w-3.5" />
+                            Low-latency mental wellness agent
+                        </span>
+                        <h1 className="mt-7 text-5xl font-black leading-[1.02] tracking-tight sm:text-6xl lg:text-7xl">
+                            SentiMind
+                        </h1>
+                        <p className="mx-auto mt-5 max-w-3xl text-base font-medium leading-7 text-slate-200 sm:text-lg">
+                            A context-aware therapeutic companion that listens first, remembers the session, tracks detailed mood signals, and learns which support actually helps each user.
+                        </p>
+                        <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
+                            <Button asChild size="lg" className="h-12 w-full rounded-xl bg-white px-7 text-slate-950 shadow-xl shadow-cyan-950/30 hover:bg-cyan-50 sm:w-auto">
+                                <Link href="/signup">
+                                    Create account
+                                    <ArrowRight className="ml-2 h-4 w-4" />
+                                </Link>
+                            </Button>
+                            <Button asChild variant="outline" size="lg" className="h-12 w-full rounded-xl border-white/20 bg-white/10 px-7 text-white backdrop-blur-md hover:bg-white/15 sm:w-auto">
+                                <Link href="/chat">Open chat</Link>
+                            </Button>
+                        </div>
+                    </div>
 
-                <p className="text-lg md:text-xl text-slate-500 max-w-2xl mb-10 leading-relaxed font-medium animate-slide-up">
-                    Join 10,000+ users finding peace today. Available 24/7, no judgment, no appointments.
-                </p>
-
-                <div className="flex flex-col sm:flex-row gap-4 items-center justify-center animate-slide-up">
-                    <Button asChild variant="primary" size="lg" className="w-full sm:w-auto shadow-xl shadow-purple-200">
-                        <Link href="/signup">Start Your Journey — It&apos;s Free</Link>
-                    </Button>
-                    <Button asChild variant="outline" size="lg" className="w-full sm:w-auto bg-white">
-                        <Link href="/chat">Try Demo (Anonymous Mode)</Link>
-                    </Button>
+                    <HeroMockup />
                 </div>
             </section>
 
-            {/* ── FEATURES ── */}
-            <section id="features" className="py-24 px-4 bg-slate-50">
-                <div className="max-w-6xl mx-auto">
-                    <div className="text-center mb-14">
-                        <p className="text-xs font-bold text-purple-600 uppercase tracking-widest mb-3">Features</p>
-                        <h2 className="text-3xl md:text-4xl font-black text-slate-900 tracking-tight">
-                            Our AI understands the nuances of human emotion
-                        </h2>
-                        <p className="text-slate-500 mt-3 max-w-xl mx-auto">
-                            Built to provide the best possible psychological support, in real-time.
+            <section id="system" className="border-b border-slate-200 bg-white px-4 py-16 sm:px-6">
+                <div className="mx-auto max-w-7xl">
+                    <div className="grid gap-8 lg:grid-cols-[0.9fr_1.1fr] lg:items-end">
+                        <div>
+                            <p className="text-xs font-black uppercase tracking-[0.12em] text-cyan-700">System</p>
+                            <h2 className="mt-3 text-3xl font-black tracking-tight text-slate-950 sm:text-4xl">
+                                Built for multi-turn support, not one-turn advice.
+                            </h2>
+                        </div>
+                        <p className="text-base leading-7 text-slate-600">
+                            The experience is tuned around continuity, therapeutic pacing, and background personalization, so the user-facing response stays fast.
                         </p>
                     </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-                        {FEATURES.map((f) => (
-                            <div
-                                key={f.title}
-                                className="bg-white p-6 rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition-shadow group"
-                            >
-                                <div className={`w-12 h-12 ${f.color} rounded-xl flex items-center justify-center mb-4 group-hover:scale-110 transition-transform`}>
-                                    {f.icon}
+
+                    <div className="mt-10 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+                        {CAPABILITIES.map(({ icon: Icon, title, body }) => (
+                            <article key={title} className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
+                                <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-slate-950 text-white">
+                                    <Icon className="h-5 w-5" />
                                 </div>
-                                <h3 className="text-base font-bold text-slate-900 mb-2">{f.title}</h3>
-                                <p className="text-slate-500 text-sm leading-relaxed">{f.body}</p>
-                            </div>
+                                <h3 className="mt-5 text-base font-black text-slate-950">{title}</h3>
+                                <p className="mt-2 text-sm leading-6 text-slate-600">{body}</p>
+                            </article>
                         ))}
                     </div>
                 </div>
             </section>
 
-            {/* ── HOW IT WORKS ── */}
-            <section id="how-it-works" className="py-24 px-4 bg-white">
-                <div className="max-w-4xl mx-auto">
-                    <div className="text-center mb-14">
-                        <p className="text-xs font-bold text-teal-600 uppercase tracking-widest mb-3">How It Works</p>
-                        <h2 className="text-3xl md:text-4xl font-black text-slate-900 tracking-tight">
-                            Simple. Empathetic. Effective.
+            <section id="analytics" className="bg-slate-50 px-4 py-16 sm:px-6">
+                <div className="mx-auto grid max-w-7xl gap-8 lg:grid-cols-[0.9fr_1.1fr] lg:items-center">
+                    <div>
+                        <p className="text-xs font-black uppercase tracking-[0.12em] text-emerald-700">Analytics</p>
+                        <h2 className="mt-3 text-3xl font-black tracking-tight text-slate-950 sm:text-4xl">
+                            Long-term outcomes become part of the product.
                         </h2>
-                    </div>
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-                        {HOW_IT_WORKS.map((item, idx) => (
-                            <div key={item.step} className="relative flex flex-col items-center text-center">
-                                <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-purple-500 to-teal-400 flex items-center justify-center shadow-lg mb-5">
-                                    <span className="text-white font-black text-lg">{item.step}</span>
+                        <p className="mt-4 text-base leading-7 text-slate-600">
+                            Sessions feed mood statistics, technique preferences, outcome tracking, and profile insights without blocking the chat response.
+                        </p>
+                        <div className="mt-6 grid grid-cols-2 gap-3">
+                            {[
+                                ['Mood trend', '30 days'],
+                                ['Technique fit', 'per user'],
+                                ['Signal depth', 'symptoms'],
+                                ['Data quality', 'visible'],
+                            ].map(([label, value]) => (
+                                <div key={label} className="rounded-2xl border border-slate-200 bg-white p-4">
+                                    <p className="text-xs font-semibold text-slate-500">{label}</p>
+                                    <p className="mt-1 text-lg font-black text-slate-950">{value}</p>
                                 </div>
-                                {idx < HOW_IT_WORKS.length - 1 && (
-                                    <div className="hidden md:block absolute top-7 left-[calc(50%+2rem)] right-[-50%] h-px bg-gradient-to-r from-purple-200 to-teal-200" />
-                                )}
-                                <h3 className="text-lg font-bold text-slate-900 mb-2">{item.title}</h3>
-                                <p className="text-slate-500 text-sm leading-relaxed">{item.body}</p>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-xl shadow-slate-200/70">
+                        <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+                            <div>
+                                <p className="text-sm font-black text-slate-950">Dashboard preview</p>
+                                <p className="text-xs text-slate-500">Personalized wellness signals</p>
                             </div>
-                        ))}
+                            <Clock3 className="h-5 w-5 text-cyan-600" />
+                        </div>
+                        <div className="mt-5 grid grid-cols-3 gap-3">
+                            {['Stable', '8 sessions', '3 techniques'].map((item) => (
+                                <div key={item} className="rounded-2xl bg-slate-50 p-4 text-center">
+                                    <p className="text-sm font-black text-slate-950">{item}</p>
+                                    <p className="mt-1 text-[11px] font-semibold text-slate-500">current</p>
+                                </div>
+                            ))}
+                        </div>
+                        <div className="mt-5 space-y-4">
+                            {DASHBOARD_ROWS.map((row) => (
+                                <div key={row.label}>
+                                    <div className="mb-1 flex items-center justify-between text-sm font-semibold text-slate-700">
+                                        <span>{row.label}</span>
+                                        <span>{row.value}</span>
+                                    </div>
+                                    <div className="h-3 overflow-hidden rounded-full bg-slate-100">
+                                        <div className={`h-full rounded-full ${row.color} ${row.width}`} />
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
                     </div>
                 </div>
             </section>
 
-            {/* ── TESTIMONIALS ── */}
-            <section id="testimonials" className="py-24 px-4 bg-gradient-to-b from-purple-50 to-white">
-                <div className="max-w-5xl mx-auto">
-                    <div className="text-center mb-14">
-                        <p className="text-xs font-bold text-purple-600 uppercase tracking-widest mb-3">Testimonials</p>
-                        <h2 className="text-3xl md:text-4xl font-black text-slate-900 tracking-tight">
-                            &ldquo;Finally, an AI that actually gets me.&rdquo;
-                        </h2>
-                    </div>
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                        {TESTIMONIALS.map((t) => (
-                            <div
-                                key={t.author}
-                                className="bg-white rounded-2xl border border-slate-100 shadow-sm p-6 hover:shadow-md transition-shadow"
-                            >
-                                <p className="text-slate-600 text-sm leading-relaxed mb-5 italic">&ldquo;{t.quote}&rdquo;</p>
-                                <div className="flex items-center gap-3">
-                                    <div className={`w-9 h-9 rounded-full bg-gradient-to-br ${t.color} flex items-center justify-center shrink-0`}>
-                                        <span className="text-white text-xs font-bold">{t.avatar}</span>
-                                    </div>
-                                    <div>
-                                        <p className="text-sm font-bold text-slate-900">{t.author}</p>
-                                        <p className="text-xs text-slate-500">{t.role}</p>
-                                    </div>
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                </div>
-            </section>
-
-            {/* ── CRISIS STRIP ── */}
-            <div className="bg-red-600 text-white px-4 py-3.5 flex items-center justify-center gap-3 flex-wrap text-sm font-medium">
-                <Phone className="w-4 h-4 shrink-0" />
-                <span>
-                    In crisis? Call <strong>0311-7786264</strong> immediately. You are not alone.
-                </span>
-                <Link
-                    href="/crisis"
-                    className="underline font-bold hover:text-red-100 transition-colors whitespace-nowrap"
-                >
-                    See more resources →
-                </Link>
-            </div>
-
-            {/* ── FOOTER ── */}
-            <footer className="bg-slate-900 text-slate-400 pt-16 pb-8 px-6">
-                <div className="max-w-6xl mx-auto">
-                    <div className="grid grid-cols-1 md:grid-cols-4 gap-10 mb-12">
-                        {/* Brand */}
-                        <div className="md:col-span-1">
-                            <div className="flex items-center gap-2 mb-4">
-                                <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-purple-500 to-teal-400 flex items-center justify-center">
-                                    <span className="text-white font-bold text-lg leading-none">S</span>
-                                </div>
-                                <span className="font-bold text-white tracking-tight text-xl">SentiMind</span>
-                            </div>
-                            <p className="text-sm leading-relaxed">
-                                Empowering minds through empathetic AI. Available whenever you need a friend who understands.
+            <section id="resources" className="bg-white px-4 py-14 sm:px-6">
+                <div className="mx-auto flex max-w-7xl flex-col gap-5 rounded-3xl border border-rose-100 bg-rose-50 p-6 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex gap-4">
+                        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-rose-600 text-white">
+                            <Phone className="h-5 w-5" />
+                        </div>
+                        <div>
+                            <h2 className="text-xl font-black text-rose-950">Crisis support stays visible.</h2>
+                            <p className="mt-1 text-sm leading-6 text-rose-800">
+                                If someone is in immediate danger, call local emergency services or Pakistan emergency support at 0311-7786264.
                             </p>
                         </div>
+                    </div>
+                    <Button asChild className="bg-rose-600 hover:bg-rose-700">
+                        <Link href="/crisis">Open resources</Link>
+                    </Button>
+                </div>
+            </section>
 
-                        {/* Links */}
-                        {Object.entries(FOOTER_LINKS).map(([section, links]) => (
-                            <div key={section}>
-                                <h4 className="text-white font-bold text-sm mb-4">{section}</h4>
-                                <ul className="space-y-2.5">
-                                    {links.map((link) => (
-                                        <li key={link}>
-                                            <a href="#" className="text-sm hover:text-white transition-colors">
-                                                {link}
-                                            </a>
-                                        </li>
-                                    ))}
-                                </ul>
+            <footer className="border-t border-slate-200 bg-slate-950 px-4 py-10 text-white sm:px-6">
+                <div className="mx-auto flex max-w-7xl flex-col gap-6 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                        <div className="flex items-center gap-3">
+                            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-white text-slate-950">
+                                <Activity className="h-4 w-4" />
                             </div>
+                            <span className="text-lg font-black">SentiMind</span>
+                        </div>
+                        <p className="mt-3 text-sm text-slate-400">Supportive wellness software, not emergency medical care.</p>
+                    </div>
+                    <div className="flex flex-wrap gap-4 text-sm font-semibold text-slate-300">
+                        {FOOTER_LINKS.map((link) => (
+                            <Link key={link.href} href={link.href} className="hover:text-white">
+                                {link.label}
+                            </Link>
                         ))}
                     </div>
-
-                    <div className="border-t border-slate-800 pt-8 flex flex-col sm:flex-row items-center justify-between gap-4">
-                        <p className="text-xs">© {new Date().getFullYear()} SentiMind AI. All rights reserved.</p>
-                        <p className="text-xs">Not a replacement for professional clinical help.</p>
-                    </div>
+                    <p className="text-xs text-slate-500">Copyright {new Date().getFullYear()} SentiMind AI.</p>
                 </div>
             </footer>
-        </div>
+        </main>
     )
 }

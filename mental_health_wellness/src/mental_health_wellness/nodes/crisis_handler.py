@@ -6,8 +6,44 @@ HIGHEST PRIORITY - Handles all crisis situations
 from ..agent.state import MentalHealthState
 from ..agent.prompts import PROMPTS
 from ..services.twilio_whatsapp_crisis import get_crisis_whatsapp_service
+from ..db.client import get_prisma_client
+from ..security.compliance import effective_scoped_consent
 import requests
 import asyncio
+
+
+async def _get_saved_emergency_contacts(user_id: str) -> list[dict]:
+    """Load active emergency contacts when the user has granted contact consent."""
+    try:
+        prisma = await get_prisma_client()
+        pref = await prisma.userpreference.find_unique(where={"userId": user_id})
+        has_contact_consent = await effective_scoped_consent(
+            prisma,
+            user_id=user_id,
+            scope="EMERGENCY_CONTACT_ALERTS",
+            fallback=bool(pref and getattr(pref, "emergencyContactConsent", False)),
+        )
+        if not has_contact_consent:
+            print("[NODE: CRISIS_HANDLER]  Emergency contact consent not enabled")
+            return []
+
+        contacts = await prisma.emergencycontact.find_many(
+            where={"userId": user_id, "active": True}
+        )
+        results: list[dict] = []
+        for contact in contacts:
+            phone = str(getattr(contact, "phone", "") or "").strip()
+            if not phone:
+                continue
+            results.append({
+                "name": str(getattr(contact, "name", "") or "Emergency contact"),
+                "phone": phone,
+                "channel": str(getattr(contact, "channel", "whatsapp") or "whatsapp").lower(),
+            })
+        return results
+    except Exception as exc:
+        print(f"[NODE: CRISIS_HANDLER]  Could not load saved emergency contacts: {str(exc)[:160]}")
+        return []
 
 
 async def get_location_from_ip_async(ip_address: str = None) -> dict:
@@ -166,49 +202,55 @@ async def handle_crisis(state: MentalHealthState) -> dict:
                     user_details["source"] = "Text Message Only"
 
                 
-                alert_result = whatsapp_service.send_crisis_alert_voice_message(
-                    user_id=user_id,
-                    crisis_level=final_crisis_level,
-                    user_details=user_details
-                )
-                
+                saved_contacts = await _get_saved_emergency_contacts(user_id)
+                alert_results = []
+
+                if saved_contacts:
+                    print(f"[NODE: CRISIS_HANDLER]  Sending crisis alert to {len(saved_contacts)} saved emergency contact(s)")
+                    for contact in saved_contacts:
+                        phone = contact["phone"]
+                        recipient = phone if phone.startswith("whatsapp:") else f"whatsapp:{phone}"
+                        result = whatsapp_service.send_crisis_alert_voice_message(
+                            user_id=user_id,
+                            crisis_level=final_crisis_level,
+                            user_details=user_details,
+                            recipient=recipient,
+                            sms_recipient=phone.replace("whatsapp:", ""),
+                        )
+                        result["contact_name"] = contact.get("name")
+                        alert_results.append(result)
+                        if result.get("success"):
+                            print(
+                                f"[NODE: CRISIS_HANDLER]  Emergency contact alert sent "
+                                f"to {contact.get('name')} (SID: {result.get('message_sid')})"
+                            )
+                        else:
+                            print(
+                                f"[NODE: CRISIS_HANDLER]  Emergency contact alert failed "
+                                f"for {contact.get('name')}: {result.get('error')}"
+                            )
+                else:
+                    print("[NODE: CRISIS_HANDLER]  No saved emergency contacts found; using configured fallback recipient")
+                    alert_results.append(
+                        whatsapp_service.send_crisis_alert_voice_message(
+                            user_id=user_id,
+                            crisis_level=final_crisis_level,
+                            user_details=user_details
+                        )
+                    )
+
+                alert_result = next((item for item in alert_results if item.get("success")), alert_results[0] if alert_results else {})
+
                 if alert_result.get("success"):
                     print(f"[NODE: CRISIS_HANDLER]  WhatsApp alert sent (SID: {alert_result.get('message_sid')})")
                 else:
                     print(f"[NODE: CRISIS_HANDLER]  WhatsApp alert failed: {alert_result.get('error')}")
                 
-                # ============================================
-                # SEND LOCATION ALERT (IP-BASED AUTO)
-                # ============================================
-                # Send automatic IP-based location since GPS can't be requested from backend
-                # Frontend will handle GPS separately when available
-                print(f"[NODE: CRISIS_HANDLER]  Sending automatic IP-based location alert...")
-                try:
-                    location_data = await get_location_from_ip_async()
-                    
-                    if location_data.get('success'):
-                        location_result = whatsapp_service.send_location_alert(
-                            user_id=user_id,
-                            latitude=location_data['latitude'],
-                            longitude=location_data['longitude'],
-                            city=location_data.get('city'),
-                            region=location_data.get('region'),
-                            country=location_data.get('country'),
-                            accuracy=location_data.get('accuracy'),
-                            crisis_level=final_crisis_level,
-                            method="IP-based (automatic, no permission needed)"
-                        )
-                        
-                        if location_result.get("success"):
-                            print(f"[NODE: CRISIS_HANDLER]  Location alert sent via {location_result.get('channel')} (SID: {location_result.get('message_sid')})")
-                            print(f"[NODE: CRISIS_HANDLER]  Maps: {location_result.get('maps_link')}")
-                        else:
-                            print(f"[NODE: CRISIS_HANDLER]  Location alert failed: {location_result.get('error')}")
-                    else:
-                        print(f"[NODE: CRISIS_HANDLER]  Could not determine location: {location_data.get('error')}")
-                        
-                except Exception as location_error:
-                    print(f"[NODE: CRISIS_HANDLER]  Error sending location alert: {location_error}")
+                # Location alerts are intentionally not sent from this graph node.
+                # The graph has no trusted client IP or browser GPS consent signal.
+                # The API crisis-location endpoints enforce user scope and explicit
+                # crisis-location consent before any external geolocation lookup.
+                print("[NODE: CRISIS_HANDLER]  Location alert deferred to consent-aware API endpoint")
                 
             except Exception as alert_error:
                 print(f"[NODE: CRISIS_HANDLER]  Error sending WhatsApp alert: {alert_error}")
@@ -218,7 +260,10 @@ async def handle_crisis(state: MentalHealthState) -> dict:
                 "crisis_level": final_crisis_level,
                 "crisis_detected": True,
                 "tools_used": ["handle_crisis"],
-                "whatsapp_alert_sent": alert_result.get("success") if 'alert_result' in locals() else False
+                "whatsapp_alert_sent": alert_result.get("success") if 'alert_result' in locals() else False,
+                "whatsapp_alert_results": alert_results if 'alert_results' in locals() else [],
+                "location_alert_sent": False,
+                "location_alert_reason": "deferred_to_consent_aware_api",
             }
         else:
             # Not a crisis but high distress (e.g. panic attack, extreme anxiety).

@@ -93,7 +93,7 @@ export function LocationConsentModal({ onComplete }: LocationConsentModalProps) 
             </div>
             <div className="flex items-start gap-3">
               <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
-              <p className="text-sm text-slate-700">You may receive a browser prompt after clicking "Enable"</p>
+              <p className="text-sm text-slate-700">You may receive a browser prompt after clicking &quot;Enable&quot;</p>
             </div>
           </div>
 

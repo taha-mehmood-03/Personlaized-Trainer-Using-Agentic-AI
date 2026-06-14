@@ -7,22 +7,29 @@ requires-python = ">=3.10,<3.14"
 dependencies = [
     "langgraph>=0.2.0",
     "langchain>=0.3.0",
-    "langchain-groq>=0.2.0",
+    "langchain-google-genai>=2.0.0",
+    "google-genai>=1.0.0",
     "langchain-community>=0.3.0",
-    "langchain-chroma>=0.1.0",
     "langchain-huggingface>=0.1.0",
-    "chromadb>=0.5.0",
     "sentence-transformers>=3.0.0",
     "transformers>=4.36.0",
     "fastapi>=0.109.0",
     "uvicorn[standard]>=0.27.0",
+    "python-multipart>=0.0.6",
     "python-dotenv>=1.0.0",
     "prisma>=0.15.0",
     "pydantic>=2.5.0",
+    "bcrypt>=4.1.0",
+    "httpx>=0.26.0",
+    "requests>=2.31.0",
+    "numpy>=1.24.0",
+    "psycopg2-binary>=2.9.9",
+    "twilio>=8.10.0",
+    "geoip2>=4.7.0",
 ]
 
 [project.scripts]
-start = "uvicorn api_server:app --reload"
+start = "uvicorn src.mental_health_wellness.api.app:app --reload"
 
 [build-system]
 requires = ["hatchling"]

@@ -22,7 +22,7 @@ OUTPUT STATE FIELDS:
   - micro_action_category:  str | None
 """
 
-import datetime
+from datetime import datetime
 from ..agent.state import MentalHealthState
 
 
@@ -124,7 +124,7 @@ def activate_behavioral_intervention(state: MentalHealthState) -> dict:
         return _empty_activation()
 
     # Determine time of day
-    current_hour = datetime.datetime.now().hour
+    current_hour = datetime.now().hour
     is_daytime = 7 <= current_hour <= 21
     time_context = "daytime" if is_daytime else "night"
 

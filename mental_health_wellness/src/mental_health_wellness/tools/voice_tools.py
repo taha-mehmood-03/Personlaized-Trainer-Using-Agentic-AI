@@ -1,9 +1,9 @@
 """
-Voice Tools  LangChain tool wrapper for voice emotion analysis.
+LangChain tool wrapper for Gemini voice emotion analysis.
 
-Exposes the full acoustic feature set (including new psychoacoustic signals
-distress_index, pause_density, mfcc_vector) so the graph pipeline and
-system prompt can reason about them.
+The returned shape keeps the historical acoustic keys for graph compatibility,
+but the actual analysis is a single Gemini audio call that returns transcript,
+core emotion, sub-emotions, sentiment, confidence, and distress cues.
 """
 from langchain_core.tools import tool
 
@@ -11,17 +11,12 @@ from langchain_core.tools import tool
 @tool
 def analyze_voice(audio_path: str) -> dict:
     """
-    Analyze voice/speech audio for emotional signals and psychoacoustic distress.
+    Analyze voice/speech audio with Gemini for emotional signals and distress.
 
-    Extracts a rich feature set:
-    - Acoustic features: pitch (F0), loudness (RMS), jitter, shimmer, HNR
-    - MFCC vector: 13-dim mel-frequency cepstral coefficients via torchaudio
-    - Arousal: activation level derived from pitch, loudness, speech rate
-    - Valence: positivity derived from HNR, pitch mean, pitch variability
-    - Distress index: composite psychoacoustic distress score (0=healthy, 1=high)
-    - Pause density: proportion of silent/unvoiced frames (hesitancy indicator)
-    - Emotion label: classified via wav2vec2 (anger, sadness, joy, fear, etc.)
-    - Transcription: Deepgram Nova-2 text (reused; do NOT call a second STT tool)
+    Gemini uses both the transcript and vocal delivery cues such as tone, pace,
+    pauses, energy, strain, and hesitation. Compatibility fields like
+    acoustic_features and mfcc_vector are placeholders unless Gemini returns
+    higher-level estimates.
 
     Args:
         audio_path: Absolute path to the audio file (WAV, WebM, MP3).
@@ -36,11 +31,18 @@ def analyze_voice(audio_path: str) -> dict:
             "valence":        float   positivity/negativity 0-1
             "distress_index": float   composite psychoacoustic distress 0-1
             "pause_density":  float   silent frame proportion 0-1
-            "mfcc_vector":    list    13-dim MFCC mean vector
-            "acoustic_features": dict  raw pitch/loudness/jitter/shimmer/HNR
+            "mfcc_vector":    list    compatibility vector
+            "acoustic_features": dict  compatibility acoustic fields
             "all_scores":     dict    all emotion label scores
-            "transcription":  str     Deepgram Nova-2 transcription
-            "extraction_method": str  opensmile_egemaps | torchaudio_mfcc | librosa_fallback
+            "primary_sub_emotion": str nuanced emotion label
+            "secondary_sub_emotions": list extra nuanced labels
+            "detected_symptoms": list physical/cognitive signals
+            "detected_behaviors": list behavioral patterns
+            "detected_contexts": list situational contexts
+            "sentiment":      str     positive | negative | neutral
+            "intensity":      float   emotion intensity 0-1
+            "transcription":  str     Gemini audio transcription
+            "extraction_method": str  gemini_audio
         }
 
     CRITICAL: Must receive an actual file path, not a placeholder!
@@ -59,6 +61,15 @@ def analyze_voice(audio_path: str) -> dict:
             "loudness_mean": 0, "jitter": 0, "shimmer": 0, "hnr": 0,
         },
         "all_scores":        {},
+        "emotion_scores":     {},
+        "primary_sub_emotion": "neutral",
+        "secondary_sub_emotions": [],
+        "detected_symptoms":  [],
+        "detected_behaviors": [],
+        "detected_contexts":  [],
+        "sentiment":         "neutral",
+        "intensity":         0.5,
+        "emotion_reasoning": "",
         "extraction_method": "error",
         "transcription":     "",
         "error":             "Invalid audio path",
@@ -131,7 +142,16 @@ def analyze_voice(audio_path: str) -> dict:
                 "spectral_flux": float(acoustic.get("spectral_flux", 0)),
             },
             "all_scores":        result.get("all_scores", {}),
-            "extraction_method": result.get("extraction_method", "opensmile+wav2vec2"),
+            "emotion_scores":     result.get("emotion_scores", result.get("all_scores", {})),
+            "primary_sub_emotion": result.get("primary_sub_emotion", "neutral"),
+            "secondary_sub_emotions": result.get("secondary_sub_emotions", []),
+            "detected_symptoms":  result.get("detected_symptoms", []),
+            "detected_behaviors": result.get("detected_behaviors", []),
+            "detected_contexts":  result.get("detected_contexts", []),
+            "sentiment":         result.get("sentiment", "neutral"),
+            "intensity":         float(result.get("intensity", 0.5)),
+            "emotion_reasoning": result.get("emotion_reasoning", ""),
+            "extraction_method": result.get("extraction_method", "gemini_audio"),
             "transcription":     result.get("transcription", ""),
         }
 

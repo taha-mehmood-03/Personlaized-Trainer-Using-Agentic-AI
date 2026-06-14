@@ -5,8 +5,9 @@ Sends automated voice messages via WhatsApp when crisis is detected
 
 import os
 import json
+import logging
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Iterable
 
 # Twilio imports
 try:
@@ -16,6 +17,9 @@ try:
 except ImportError:
     print(" Twilio not installed. Install with: pip install twilio")
     Client = None
+
+
+logger = logging.getLogger("sentimind.twilio")
 
 
 class TwilioWhatsAppCrisisService:
@@ -28,7 +32,8 @@ class TwilioWhatsAppCrisisService:
         # Try primary credentials first
         self.account_sid = os.getenv("TWILIO_ACCOUNT_SID")
         self.auth_token = os.getenv("TWILIO_AUTH_TOKEN")
-        
+        _using_fallback = False
+
         # Fallback to secondary credentials if primary not available
         if not self.account_sid or not self.auth_token:
             print(" [TWILIO] Primary credentials not found, trying fallback...")
@@ -36,12 +41,25 @@ class TwilioWhatsAppCrisisService:
             self.auth_token = os.getenv("TWILIO_AUTH_TOKEN_2")
             if self.account_sid and self.auth_token:
                 print(" [TWILIO] Using fallback credentials (TWILIO_ACCOUNT_SID_2)")
-        
-        self.from_number = os.getenv("TWILIO_WHATSAPP_NUMBER", "")  # whatsapp:+12183574322
-        self.crisis_recipient = os.getenv("TWILIO_CRISIS_WHATSAPP_RECIPIENT", "")  # whatsapp:+923354815156
+                _using_fallback = True
 
-        # For SMS fallback: plain E.164 numbers (no whatsapp: prefix)
-        self.sms_from = os.getenv("TWILIO_PHONE_NUMBER", "")  # +12183574322
+        self.from_number = os.getenv("TWILIO_WHATSAPP_NUMBER", "")  # whatsapp:+14155238886
+        self.crisis_recipient = os.getenv("TWILIO_CRISIS_WHATSAPP_RECIPIENT", "")  # whatsapp:+923354815156
+        self.sandbox_join_codes = [
+            code.strip()
+            for code in os.getenv(
+                "TWILIO_WHATSAPP_JOIN_CODES",
+                "join horse-few,join on-theory",
+            ).split(",")
+            if code.strip()
+        ]
+
+        # For SMS fallback: use account-matched phone numbers so from/account don't mismatch
+        # When using account_2 credentials, prefer TWILIO_PHONE_NUMBER_2 if set
+        if _using_fallback and os.getenv("TWILIO_PHONE_NUMBER_2"):
+            self.sms_from = os.getenv("TWILIO_PHONE_NUMBER_2", "")
+        else:
+            self.sms_from = os.getenv("TWILIO_PHONE_NUMBER", "")  # +12183574322
         self.sms_crisis_recipient = os.getenv(
             "TWILIO_CRISIS_SMS_RECIPIENT",
             self.crisis_recipient.replace("whatsapp:", "")  # derive from WhatsApp number
@@ -49,31 +67,193 @@ class TwilioWhatsAppCrisisService:
 
         if not all([self.account_sid, self.auth_token]):
             print(" [TWILIO] Credentials not configured in .env")
-            print("   TWILIO_ACCOUNT_SID:", "" if self.account_sid else " MISSING")
-            print("   TWILIO_AUTH_TOKEN:", "" if self.auth_token else " MISSING")
-            print("   TWILIO_WHATSAPP_NUMBER:", "" if self.from_number else " MISSING")
-            print("   TWILIO_CRISIS_WHATSAPP_RECIPIENT:", "" if self.crisis_recipient else " MISSING")
+            print("   TWILIO_ACCOUNT_SID:", "set" if self.account_sid else " MISSING")
+            print("   TWILIO_AUTH_TOKEN:", "set" if self.auth_token else " MISSING")
+            print("   TWILIO_WHATSAPP_NUMBER:", "set" if self.from_number else " MISSING")
+            print("   TWILIO_CRISIS_WHATSAPP_RECIPIENT:", "set" if self.crisis_recipient else " MISSING")
             print("    Try setting TWILIO_ACCOUNT_SID_2 and TWILIO_AUTH_TOKEN_2 for fallback")
             self.client = None
         else:
             try:
                 self.client = Client(self.account_sid, self.auth_token)
-                cred_type = "fallback (2)" if os.getenv("TWILIO_ACCOUNT_SID") is None else "primary"
+                cred_type = "fallback (2)" if _using_fallback else "primary"
                 print(" [TWILIO] WhatsApp Crisis Service initialized successfully")
                 print(f"   Credentials: {cred_type}")
                 print(f"   WhatsApp from: {self.from_number}")
                 print(f"   WhatsApp to:   {self.crisis_recipient}")
-                print(f"   SMS fallback:  {self.sms_from}  {self.sms_crisis_recipient}")
+                print(f"   SMS fallback:  {self.sms_from}  ->  {self.sms_crisis_recipient}")
+                print(f"   Sandbox joins: {', '.join(self.sandbox_join_codes) or 'none'}")
             except Exception as e:
                 print(f" [TWILIO] Error initializing Twilio client: {e}")
                 self.client = None
+
+    @staticmethod
+    def _whatsapp_to(phone: str) -> str:
+        clean = str(phone or "").strip()
+        return clean if clean.startswith("whatsapp:") else f"whatsapp:{clean}"
+
+    @staticmethod
+    def _sms_to(phone: str) -> str:
+        return str(phone or "").replace("whatsapp:", "").strip()
+
+    @staticmethod
+    def _log_outbound_payload(
+        *,
+        label: str,
+        channel: str,
+        from_number: str,
+        to_number: str,
+        user_id: str,
+        crisis_level: str,
+        body: str,
+    ) -> None:
+        """
+        Log the exact emergency message payload before Twilio send.
+
+        These logs intentionally include the full alert body and recipient so
+        local testing can verify exactly what emergency contacts receive.
+        """
+        text = (
+            "\n[TWILIO-OUTBOUND] ===== EMERGENCY MESSAGE PREVIEW =====\n"
+            f"[TWILIO-OUTBOUND] Alert type: {label}\n"
+            f"[TWILIO-OUTBOUND] Channel:    {channel}\n"
+            f"[TWILIO-OUTBOUND] From:       {from_number or 'not configured'}\n"
+            f"[TWILIO-OUTBOUND] To:         {to_number or 'not configured'}\n"
+            f"[TWILIO-OUTBOUND] User ID:    {user_id}\n"
+            f"[TWILIO-OUTBOUND] Level:      {str(crisis_level or '').upper()}\n"
+            "[TWILIO-OUTBOUND] Body start\n"
+            f"{body}\n"
+            "[TWILIO-OUTBOUND] Body end\n"
+            "[TWILIO-OUTBOUND] ======================================\n"
+        )
+        print(text)
+        logger.info(text)
+
+    def build_sandbox_join_instruction(self) -> str:
+        sandbox_number = self.from_number.replace("whatsapp:", "") or "+14155238886"
+        # Build a wa.me deep-link for the first join code so the recipient can tap to open WhatsApp directly
+        first_code = self.sandbox_join_codes[0] if self.sandbox_join_codes else "join horse-few"
+        wa_link = f"https://wa.me/{sandbox_number.lstrip('+').replace(' ', '')}?text={first_code.replace(' ', '%20')}"
+        steps = "\n".join(
+            f"  Step {i+1}: Send \"{code}\" to {sandbox_number} on WhatsApp"
+            for i, code in enumerate(self.sandbox_join_codes)
+        )
+        return (
+            "ACTION REQUIRED — SentiMind Crisis Alert Setup\n\n"
+            "You have been added as an emergency contact for a SentiMind mental-health user.\n"
+            "To receive WhatsApp crisis alerts you MUST first join the SentiMind sandbox:\n\n"
+            f"{steps}\n\n"
+            f"Quick link (tap to open WhatsApp): {wa_link}\n\n"
+            "Once you send the join phrase, crisis alerts (including live GPS location) "
+            "will be delivered directly to your WhatsApp.\n"
+            "You only need to do this once."
+        )
+
+    def send_sandbox_join_instruction(
+        self,
+        phone: str,
+        *,
+        name: str = "Emergency contact",
+        prefer_whatsapp: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Send Twilio Sandbox opt-in instructions to a crisis contact.
+
+        Twilio Sandbox requires the recipient to send the join phrase to the
+        sandbox number. This helper sends the instruction via SMS and also tries
+        WhatsApp when possible, but it does not mark the recipient opted in.
+        """
+        if not self.client:
+            return {"success": False, "error": "Twilio client not initialized"}
+
+        body = self.build_sandbox_join_instruction()
+        sms_to = self._sms_to(phone)
+        whatsapp_to = self._whatsapp_to(phone)
+        results: list[dict[str, Any]] = []
+
+        def _record(channel: str, success: bool, message_sid: str | None = None, error: str | None = None):
+            results.append({
+                "channel": channel,
+                "success": success,
+                "message_sid": message_sid,
+                "error": error,
+            })
+
+        whatsapp_succeeded = False
+        if prefer_whatsapp and self.from_number:
+            try:
+                msg = self.client.messages.create(
+                    from_=self.from_number,
+                    to=whatsapp_to,
+                    body=body,
+                )
+                _record("whatsapp", True, getattr(msg, "sid", None))
+                whatsapp_succeeded = True
+            except Exception as exc:
+                _record("whatsapp", False, error=str(exc)[:300])
+
+        always_send_sms = os.getenv("TWILIO_ALWAYS_SEND_JOIN_SMS", "false").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if self.sms_from and sms_to and (always_send_sms or not whatsapp_succeeded):
+            try:
+                msg = self.client.messages.create(
+                    from_=self.sms_from,
+                    to=sms_to,
+                    body=body,
+                )
+                _record("sms", True, getattr(msg, "sid", None))
+            except Exception as exc:
+                _record("sms", False, error=str(exc)[:300])
+
+        successful = [item for item in results if item.get("success")]
+        print(
+            f"[TWILIO-BOOTSTRAP] Sandbox join instructions for {name} "
+            f"({sms_to}): {len(successful)}/{len(results)} delivered"
+        )
+        return {
+            "success": bool(successful),
+            "phone": sms_to,
+            "name": name,
+            "join_codes": self.sandbox_join_codes,
+            "results": results,
+        }
+
+    def send_sandbox_join_instructions(
+        self,
+        contacts: Iterable[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        sent: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for contact in contacts:
+            phone = self._sms_to(str(contact.get("phone") or ""))
+            if not phone or phone in seen:
+                continue
+            seen.add(phone)
+            sent.append(
+                self.send_sandbox_join_instruction(
+                    phone,
+                    name=str(contact.get("name") or "Emergency contact"),
+                    prefer_whatsapp=str(contact.get("channel") or "").lower() == "whatsapp",
+                )
+            )
+        return {
+            "success": any(item.get("success") for item in sent),
+            "count": len(sent),
+            "sent": sent,
+        }
 
 
     def send_crisis_alert_voice_message(
         self,
         user_id: str,
         crisis_level: str,
-        user_details: Optional[Dict[str, Any]] = None
+        user_details: Optional[Dict[str, Any]] = None,
+        recipient: Optional[str] = None,
+        sms_recipient: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Send automated voice message via WhatsApp when crisis detected
@@ -96,9 +276,15 @@ class TwilioWhatsAppCrisisService:
             }
 
         try:
+            target_whatsapp = recipient or self.crisis_recipient
+            target_sms = sms_recipient or (target_whatsapp or "").replace("whatsapp:", "") or self.sms_crisis_recipient
+
+            if target_whatsapp and not target_whatsapp.startswith("whatsapp:"):
+                target_whatsapp = f"whatsapp:{target_whatsapp}"
+
             # Validate recipient is configured
-            if not self.crisis_recipient:
-                error_msg = "TWILIO_CRISIS_WHATSAPP_RECIPIENT not configured in .env"
+            if not target_whatsapp and not target_sms:
+                error_msg = "No WhatsApp or SMS crisis recipient configured"
                 print(f" [TWILIO-WHATSAPP] {error_msg}")
                 return {
                     "success": False,
@@ -189,7 +375,7 @@ class TwilioWhatsAppCrisisService:
 
             print(f"\n[TWILIO-WHATSAPP]  Sending crisis alert...")
             print(f"[TWILIO-WHATSAPP] From: {self.from_number}")
-            print(f"[TWILIO-WHATSAPP] To: {self.crisis_recipient}")
+            print(f"[TWILIO-WHATSAPP] To: {target_whatsapp or target_sms}")
             print(f"[TWILIO-WHATSAPP] Level: {crisis_level.upper()}")
             print(f"[TWILIO-WHATSAPP] User ID: {user_id}")
 
@@ -199,9 +385,18 @@ class TwilioWhatsAppCrisisService:
             def _send_whatsapp():
                 # Ensure message is UTF-8 safe before sending
                 safe_body = final_message.encode('utf-8', errors='ignore').decode('utf-8')
+                self._log_outbound_payload(
+                    label="crisis-alert",
+                    channel="whatsapp",
+                    from_number=self.from_number,
+                    to_number=target_whatsapp,
+                    user_id=user_id,
+                    crisis_level=crisis_level,
+                    body=safe_body,
+                )
                 return self.client.messages.create(
                     from_=self.from_number,       # whatsapp:+12183574322
-                    to=self.crisis_recipient,     # whatsapp:+923354815156
+                    to=target_whatsapp,           # whatsapp:+923354815156
                     body=safe_body
                 )
 
@@ -209,9 +404,18 @@ class TwilioWhatsAppCrisisService:
                 # Use plain E.164 phone numbers (no whatsapp: prefix) for SMS
                 # Ensure message is UTF-8 safe before sending
                 safe_body = final_message.encode('utf-8', errors='ignore').decode('utf-8')
+                self._log_outbound_payload(
+                    label="crisis-alert",
+                    channel="sms",
+                    from_number=self.sms_from,
+                    to_number=target_sms,
+                    user_id=user_id,
+                    crisis_level=crisis_level,
+                    body=safe_body,
+                )
                 return self.client.messages.create(
                     from_=self.sms_from,
-                    to=self.sms_crisis_recipient,
+                    to=target_sms,
                     body=safe_body
                 )
 
@@ -241,7 +445,7 @@ class TwilioWhatsAppCrisisService:
                 "channel": channel_used,
                 "timestamp": datetime.now().isoformat(),
                 "crisis_level": crisis_level,
-                "recipient": self.crisis_recipient,
+                "recipient": target_whatsapp or target_sms,
             }
 
         except Exception as e:
@@ -266,7 +470,9 @@ class TwilioWhatsAppCrisisService:
         city: Optional[str] = None,
         region: Optional[str] = None,
         country: Optional[str] = None,
-        method: str = "GPS"
+        method: str = "GPS",
+        recipient: Optional[str] = None,
+        sms_recipient: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Send a WhatsApp alert with GPS or IP-based location when crisis is detected.
@@ -293,8 +499,16 @@ class TwilioWhatsAppCrisisService:
             print(f"[TWILIO-LOC] \u274c {error_msg}")
             return {"success": False, "error": error_msg, "message_sid": None}
 
-        if not self.crisis_recipient:
-            error_msg = "TWILIO_CRISIS_WHATSAPP_RECIPIENT not configured in .env"
+        target_whatsapp = recipient
+        target_sms = sms_recipient
+        if not target_whatsapp and not target_sms:
+            target_whatsapp = self.crisis_recipient
+            target_sms = self.sms_crisis_recipient or (target_whatsapp or "").replace("whatsapp:", "")
+        elif target_whatsapp and not target_sms:
+            target_sms = target_whatsapp.replace("whatsapp:", "")
+
+        if not target_whatsapp and not target_sms:
+            error_msg = "No crisis alert recipient configured or saved"
             print(f"[TWILIO-LOC] \u274c {error_msg}")
             return {"success": False, "error": error_msg, "message_sid": None}
 
@@ -333,15 +547,15 @@ class TwilioWhatsAppCrisisService:
             method_display = method
             if method == "GPS":
                 method_display = " GPS (Precise Location - User Allowed)"
-            elif method == "IP-based (automatic, no permission needed)":
-                method_display = " IP-Based (Fallback - User Denied GPS)"
+            elif method.startswith("IP-based"):
+                method_display = "IP-based fallback (approximate)"
             
             # Add emphasis for GPS-based alerts
             gps_notice = ""
             if method == "GPS":
                 gps_notice = " THIS IS A PRECISE GPS-BASED LOCATION (5-20 meters accuracy)\n\n"
-            elif method == "IP-based (automatic, no permission needed)":
-                gps_notice = " This is an IP-based fallback location (500 km accuracy). GPS was denied/unavailable.\n\n"
+            elif method.startswith("IP-based"):
+                gps_notice = "This is an approximate IP-based fallback location. GPS was denied or unavailable.\n\n"
 
             message_body = (
                 f"{level_icon} SentiMind CRISIS ALERT  LOCATION REPORT\n\n"
@@ -380,11 +594,11 @@ class TwilioWhatsAppCrisisService:
             # Highlight GPS vs IP-based
             if method == "GPS":
                 print(f"[TWILIO-LOC]  USING PRECISE GPS LOCATION (5-20m accuracy)")
-            elif method == "IP-based (automatic, no permission needed)":
-                print(f"[TWILIO-LOC]   USING IP-BASED FALLBACK (500km accuracy - user denied GPS)")
+            elif method.startswith("IP-based"):
+                print(f"[TWILIO-LOC]   USING APPROXIMATE IP-BASED FALLBACK")
             
             print(f"[TWILIO-LOC]   Maps:     {maps_link}")
-            print(f"[TWILIO-LOC]   To:       {self.crisis_recipient}")
+            print(f"[TWILIO-LOC]   To:       {target_whatsapp or target_sms}")
 
             message = None
             channel_used = "whatsapp"
@@ -397,9 +611,20 @@ class TwilioWhatsAppCrisisService:
                 safe_message_body = message_body.encode('ascii', errors='ignore').decode('ascii')
 
             try:
+                if not target_whatsapp or not self.from_number:
+                    raise ValueError("WhatsApp sender or recipient not configured")
+                self._log_outbound_payload(
+                    label="location-alert",
+                    channel="whatsapp",
+                    from_number=self.from_number,
+                    to_number=target_whatsapp,
+                    user_id=user_id,
+                    crisis_level=crisis_level,
+                    body=safe_message_body,
+                )
                 message = self.client.messages.create(
                     from_=self.from_number,
-                    to=self.crisis_recipient,
+                    to=target_whatsapp,
                     body=safe_message_body
                 )
                 print(f"[TWILIO-LOC]  WhatsApp location alert sent! SID: {message.sid}")
@@ -407,9 +632,20 @@ class TwilioWhatsAppCrisisService:
                 print(f"[TWILIO-LOC]  WhatsApp failed ({wa_err.__class__.__name__}): {str(wa_err)[:120]}")
                 print(f"[TWILIO-LOC]  Falling back to SMS...")
                 try:
+                    if not target_sms or not self.sms_from:
+                        raise ValueError("SMS sender or recipient not configured")
+                    self._log_outbound_payload(
+                        label="location-alert",
+                        channel="sms",
+                        from_number=self.sms_from,
+                        to_number=target_sms,
+                        user_id=user_id,
+                        crisis_level=crisis_level,
+                        body=safe_message_body,
+                    )
                     message = self.client.messages.create(
                         from_=self.sms_from,
-                        to=self.sms_crisis_recipient,
+                        to=target_sms,
                         body=safe_message_body
                     )
                     channel_used = "sms"
@@ -428,7 +664,7 @@ class TwilioWhatsAppCrisisService:
                 "latitude": float(latitude),
                 "longitude": float(longitude),
                 "maps_link": str(maps_link),
-                "recipient": str(self.crisis_recipient),
+                "recipient": str(target_whatsapp or target_sms),
             }
 
         except Exception as e:

@@ -80,6 +80,15 @@ enum ClinicalSeverity {
   SEVERE
 }
 
+// Turn type for per-turn EmotionSnapshot — drives turn-aware improvement analysis
+enum TurnType {
+  INITIAL_DISCLOSURE
+  FOLLOW_UP_DISCLOSURE
+  CONTEXT_GATHERING
+  POST_RECOMMENDATION_REACTION
+  CRISIS_DISCLOSURE
+}
+
 enum SleepQuality {
   POOR
   FAIR
@@ -93,6 +102,63 @@ enum EnergyLevel {
   HIGH
 }
 
+enum DataSensitivity {
+  PUBLIC
+  PERSONAL
+  SENSITIVE
+  PHI
+}
+
+enum LegalBasis {
+  CONSENT
+  CONTRACT
+  LEGAL_OBLIGATION
+  VITAL_INTERESTS
+  PUBLIC_TASK
+  LEGITIMATE_INTERESTS
+  HEALTH_CARE
+}
+
+enum ConsentScope {
+  WELLNESS_CHAT
+  MOOD_ANALYTICS
+  PERSONALIZATION
+  CRISIS_SAFETY
+  CRISIS_LOCATION
+  EMERGENCY_CONTACT_ALERTS
+  VOICE_ANALYSIS
+  RESEARCH_EXPORT
+}
+
+enum AuditEventType {
+  AUTH_LOGIN
+  AUTH_SIGNUP
+  DATA_ACCESS
+  DATA_EXPORT
+  DATA_ERASURE
+  CONSENT_GRANTED
+  CONSENT_WITHDRAWN
+  SESSION_DELETE
+  SECURITY_EVENT
+}
+
+enum DataSubjectRequestType {
+  ACCESS
+  ERASURE
+  RECTIFICATION
+  RESTRICTION
+  PORTABILITY
+  OBJECTION
+  CONSENT_WITHDRAWAL
+}
+
+enum DataSubjectRequestStatus {
+  RECEIVED
+  IN_PROGRESS
+  COMPLETED
+  REJECTED
+}
+
 // ============================================
 // CORE MODELS
 // ============================================
@@ -104,6 +170,12 @@ model User {
   passwordHash String?
   consentGiven Boolean  @default(false)
   consentDate  DateTime?
+  consentVersion String?
+  privacyNoticeVersion String?
+  termsVersion String?
+  processingRegion String?
+  dataRetentionDays Int @default(365)
+  deletedAt    DateTime?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -112,6 +184,7 @@ model User {
   moodLogs          MoodLog[]
   techniqueRatings  UserTechniqueRating[]
   crisisLogs        CrisisLog[]
+  emergencyContacts EmergencyContact[]
   preference        UserPreference?
   statistics        UserStatistics?
 
@@ -144,6 +217,10 @@ model Session {
   
   // LangGraph checkpoint data (for memory)
   checkpointData String?    @db.Text
+  sensitivity DataSensitivity @default(SENSITIVE)
+  retentionUntil DateTime?
+  peakIntensity Float?
+  peakIntensityTurnType TurnType?
   
   startedAt   DateTime      @default(now())
   endedAt     DateTime?
@@ -154,6 +231,7 @@ model Session {
   summaries             SessionSummary[]
   techniqueOutcomes     TechniqueOutcome[]
   clinicalAssessments  ClinicalAssessmentLog[]
+  techniqueRatings      UserTechniqueRating[]
 
   // v3: Emotion trajectory snapshots
   emotionSnapshots  EmotionSnapshot[]
@@ -171,16 +249,26 @@ model Message {
   
   role        MessageRole
   content     String      @db.Text
+  sensitivity DataSensitivity @default(SENSITIVE)
+  retentionUntil DateTime?
+  piiRedacted Boolean @default(false)
   
   // Mood analysis (for USER messages)
   emotion     Emotion?
   intensity   Float?
   sentiment   Sentiment?
   confidence  Float?
+  primarySubEmotion String?
+  secondarySubEmotions String[] @default([])
+  detectedSymptoms String[] @default([])
+  detectedBehaviors String[] @default([])
+  detectedContexts String[] @default([])
+  emotionScores Json?
   
   // Technique recommended (for ASSISTANT messages)
   techniqueId String?
   technique   Technique?  @relation(fields: [techniqueId], references: [id])
+  techniqueOfferedThisTurn Boolean @default(false)
   
   // Voice analysis (optional - only when voice input used)
   voiceEmotion    String?
@@ -211,10 +299,18 @@ model MoodLog {
   emotion   Emotion
   intensity Float
   sentiment Sentiment
+  primarySubEmotion String?
+  secondarySubEmotions String[] @default([])
+  detectedSymptoms String[] @default([])
+  detectedBehaviors String[] @default([])
+  detectedContexts String[] @default([])
+  emotionScores Json?
   
   // Context
   context   String?
   notes     String?
+  sensitivity DataSensitivity @default(SENSITIVE)
+  retentionUntil DateTime?
   
   // Analysis metadata
   method    String    @default("distilroberta")
@@ -253,6 +349,17 @@ model Technique {
   difficulty      Difficulty
   
   targetEmotions  Emotion[]
+  targetSubEmotions String[] @default([])
+  targetSymptoms    String[] @default([])
+  targetBehaviors   String[] @default([])
+  avoidSubEmotions  String[] @default([])
+  avoidSymptoms     String[] @default([])
+  avoidBehaviors    String[] @default([])
+  minIntensity      Float    @default(0.0)
+  maxIntensity      Float    @default(1.0)
+  pacingTier        String   @default("normal")
+  deliveryMode      String   @default("exercise")
+  bestForContexts   String[] @default([])
   
   whyItWorks      String?
   
@@ -285,15 +392,19 @@ model UserTechniqueRating {
   techniqueId String
   technique   Technique @relation(fields: [techniqueId], references: [id], onDelete: Cascade)
   
-  rating      Int
+  rating      Int?
   feedback    String?
   completed   Boolean   @default(false)
   
   usedAt      DateTime  @default(now())
 
+  sessionId   String?
+  session     Session?  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
   @@index([userId])
   @@index([techniqueId])
   @@index([rating])
+  @@index([sessionId])
 }
 
 // ============================================
@@ -308,6 +419,8 @@ model CrisisLog {
   riskLevel             CrisisRiskLevel
   triggeredKeywords     String[]
   messageContent        String          @db.Text
+  sensitivity           DataSensitivity @default(PHI)
+  retentionUntil        DateTime?
   
   actionTaken           String
   resourcesProvided     Boolean         @default(false)
@@ -338,8 +451,13 @@ model UserPreference {
   dailyCheckInEnabled  Boolean  @default(true)
   dailyCheckInTime     String   @default("09:00")
   moodRemindersEnabled Boolean  @default(true)
+  sessionAutoSave      Boolean  @default(true)
+  anonymousMode        Boolean  @default(false)
   
   preferredCategories  String[] @default([])
+  crisisLocationConsent Boolean  @default(false)
+  emergencyContactConsent Boolean @default(false)
+  voiceAnalysisConsent Boolean @default(false)
   
   theme                String   @default("light")
   
@@ -387,9 +505,15 @@ model SessionSummary {
   // ChatGPT-style summary fields
   title      String
   summary    String   @db.Text
+  sensitivity DataSensitivity @default(SENSITIVE)
+  retentionUntil DateTime?
   emotion    String   @default("neutral")
   techniques String[]
   outcome    String   @default("neutral")
+  finalEmotion String?
+  finalIntensity Float?
+  techniqueOffered Json?
+  turnTypeCounts Json?
 
   // Legacy field kept for backward compat
   keyThemes  String[]
@@ -412,6 +536,9 @@ model UserFact {
 
   fact      String
   category  String   // identity | preference | goal | clinical | context
+  sensitivity DataSensitivity @default(SENSITIVE)
+  legalBasis LegalBasis @default(CONSENT)
+  retentionUntil DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -428,9 +555,18 @@ model TechniqueOutcome {
   technique       Technique @relation(fields: [techniqueId], references: [id])
   emotionBefore   Emotion
   emotionAfter    Emotion?
+  subEmotionBefore String?
+  subEmotionAfter  String?
+  symptomsBefore String[] @default([])
+  symptomsAfter  String[] @default([])
+  behaviorsBefore String[] @default([])
+  behaviorsAfter  String[] @default([])
   intensityBefore Float
   intensityAfter  Float?
   effectiveness   Float?
+  followThrough   Boolean?
+  confidence      Float?
+  interventionType String?  @default("technique_delivery")
   createdAt       DateTime  @default(now())
 
   @@index([sessionId])
@@ -471,6 +607,24 @@ model PsychProfile {
   @@index([userId])
 }
 
+model EmergencyContact {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name      String
+  phone     String
+  relation  String?
+  channel   String   @default("sms")
+  active    Boolean  @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([phone])
+}
+
 model EmotionSnapshot {
   id        String   @id @default(cuid())
   sessionId String
@@ -481,13 +635,32 @@ model EmotionSnapshot {
   emotion        Emotion
   intensity      Float
   sentiment      Sentiment
+  primarySubEmotion String?
+  secondarySubEmotions String[] @default([])
+  detectedSymptoms String[] @default([])
+  detectedBehaviors String[] @default([])
+  detectedContexts String[] @default([])
+  emotionScores Json?
   distortionType String?
   phase          ConversationPhase?
+  conversationPhase String?
+  responseStrategy String?
+
+  // Turn classification — drives turn-type-filtered trend calculation
+  turnType  TurnType?
+  techniqueOfferedThisTurn Boolean @default(false)
+  techniqueId String?
+  mismatch Boolean @default(false)
+  possibleMasking Boolean @default(false)
+  fusionConfidence Float?
+  transcriptionConfidence Float?
+  voiceFeatureSnapshot Json?
 
   createdAt DateTime @default(now())
 
   @@index([sessionId])
   @@index([userId])
+  @@index([turnType])
 }
 
 // ============================================
@@ -506,10 +679,92 @@ model ClinicalAssessmentLog {
   indicators       String[]          // clinical indicators scoring >= 2
   confidence       Float             // 0.0-1.0 confidence in assessment
   justification    String?           // LLM reasoning for the severity
+  sensitivity      DataSensitivity   @default(PHI)
+  retentionUntil   DateTime?
 
   assessedAt       DateTime          @default(now())
 
   @@index([userId])
   @@index([sessionId])
   @@index([assessedAt])
+}
+
+// ============================================
+// COMPLIANCE, CONSENT, AND PRIVACY GOVERNANCE
+// ============================================
+
+model ConsentRecord {
+  id               String       @id @default(cuid())
+  userId           String
+  userIdHash       String
+  scope            ConsentScope
+  granted          Boolean
+  legalBasis       LegalBasis   @default(CONSENT)
+  policyVersion    String
+  noticeVersion    String
+  termsVersion     String
+  locale           String?
+  processingRegion String?
+  ipHash           String?
+  userAgentHash    String?
+  recordedAt       DateTime     @default(now())
+
+  @@index([userId])
+  @@index([userIdHash])
+  @@index([scope])
+  @@index([recordedAt])
+}
+
+model AuditEvent {
+  id                String         @id @default(cuid())
+  eventType         AuditEventType
+  actorUserIdHash   String?
+  subjectUserIdHash String?
+  resourceType      String?
+  resourceIdHash    String?
+  action            String
+  purpose           String?
+  legalBasis        LegalBasis?
+  status            String         @default("SUCCESS")
+  ipHash            String?
+  userAgentHash     String?
+  metadata          Json?
+  createdAt         DateTime       @default(now())
+
+  @@index([subjectUserIdHash])
+  @@index([eventType])
+  @@index([createdAt])
+}
+
+model DataSubjectRequest {
+  id              String                   @id @default(cuid())
+  userId          String
+  userIdHash      String
+  type            DataSubjectRequestType
+  status          DataSubjectRequestStatus @default(RECEIVED)
+  requestedAt     DateTime                 @default(now())
+  completedAt     DateTime?
+  requestMetadata Json?
+  resolutionNotes String?
+
+  @@index([userId])
+  @@index([userIdHash])
+  @@index([type])
+  @@index([status])
+  @@index([requestedAt])
+}
+
+model DataRetentionPolicy {
+  id              String          @id @default(cuid())
+  dataClass       DataSensitivity
+  resourceType    String
+  retentionDays   Int
+  legalBasis      LegalBasis
+  description     String
+  isActive        Boolean         @default(true)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  @@unique([dataClass, resourceType])
+  @@index([isActive])
 }

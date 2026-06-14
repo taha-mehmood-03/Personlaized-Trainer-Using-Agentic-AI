@@ -6,6 +6,9 @@ from langchain_core.tools import tool
 from typing import Dict, Any, Optional
 
 # Global crisis resources by country/region
+DEFAULT_CRISIS_COUNTRY = "PK"
+
+
 CRISIS_RESOURCES_BY_COUNTRY: Dict[str, Dict[str, Any]] = {
     "US": {
         "primary_hotline": {
@@ -41,30 +44,51 @@ CRISIS_RESOURCES_BY_COUNTRY: Dict[str, Dict[str, Any]] = {
     },
     "PK": {
         "primary_hotline": {
-            "name": "Aman Samaji Organization",
-            "number": "+92-316-1550000",
+            "name": "Umang Pakistan Mental Health Helpline",
+            "number": "+92-311-7786264",
             "available": "24/7",
             "call_text": "Call",
             "language": "Urdu & English"
         },
         "secondary_hotline": {
-            "name": "AASRA Crisis Line",
-            "number": "+92-333-2435639",
+            "name": "Rescue / Ambulance",
+            "number": "1122",
             "available": "24/7",
             "call_text": "Call",
-            "language": "Urdu & English"
+            "language": "Pakistan emergency service"
         },
         "tertiary_hotline": {
-            "name": "Pakistan Mental Health Network",
-            "number": "+92-42-37180109",
-            "available": "Office Hours",
-            "call_text": "Call"
+            "name": "Police Emergency",
+            "number": "15",
+            "available": "24/7",
+            "call_text": "Call",
+        },
+        "emergency_service": {
+            "name": "Edhi Ambulance",
+            "number": "115",
+            "available": "24/7",
+            "call_text": "Call",
         },
         "text_line": {
             "name": "Crisis Support via WhatsApp",
-            "action": "WhatsApp Aman: +92-316-1550000",
+            "action": "WhatsApp Umang: +92-311-7786264",
             "available": "24/7",
             "supported": True
+        },
+        "international": {
+            "name": "International Association for Suicide Prevention",
+            "website": "https://www.iasp.info/resources/Crisis_Centres/"
+        },
+        "message": (
+            "If someone is in immediate physical danger in Pakistan, call Rescue/Ambulance 1122, "
+            "Police 15, or Edhi Ambulance 115. For mental-health crisis support, contact Umang at "
+            "+92-311-7786264."
+        ),
+        "disclaimer": {
+            "text": (
+                "SentiMind is supportive wellness software, not an emergency response service. "
+                "Use local emergency services for immediate danger."
+            )
         }
     },
     "GB": {
@@ -98,10 +122,10 @@ CRISIS_RESOURCES_BY_COUNTRY: Dict[str, Dict[str, Any]] = {
 }
 
 
-def get_crisis_resources(country_code: str = "US") -> Dict[str, Any]:
+def get_crisis_resources(country_code: str = DEFAULT_CRISIS_COUNTRY) -> Dict[str, Any]:
     """
     Get crisis resources for a specific country.
-    Defaults to US resources if country not found.
+    Defaults to Pakistan resources if country not found.
     
     Args:
         country_code: ISO 3166-1 alpha-2 country code (e.g., 'US', 'PK', 'GB')
@@ -109,7 +133,11 @@ def get_crisis_resources(country_code: str = "US") -> Dict[str, Any]:
     Returns:
         Dictionary containing country-specific crisis resources
     """
-    return CRISIS_RESOURCES_BY_COUNTRY.get(country_code.upper(), CRISIS_RESOURCES_BY_COUNTRY["US"])
+    normalized = (country_code or DEFAULT_CRISIS_COUNTRY).upper()
+    return CRISIS_RESOURCES_BY_COUNTRY.get(
+        normalized,
+        CRISIS_RESOURCES_BY_COUNTRY[DEFAULT_CRISIS_COUNTRY],
+    )
 
 
 @tool
@@ -121,7 +149,7 @@ def handle_crisis(message: str = "", reason: str = "General concern", country_co
     Args:
         message: The user's message that triggered the crisis flag
         reason: Brief reason for flagging
-        country_code: Optional ISO country code (e.g., 'US', 'PK', 'GB'). Defaults to 'US'
+        country_code: Optional ISO country code (e.g., 'US', 'PK', 'GB'). Defaults to 'PK'
         
     Returns:
         Dictionary containing risk level, action, and country-specific resources.
@@ -129,8 +157,8 @@ def handle_crisis(message: str = "", reason: str = "General concern", country_co
     try:
         print(f"[CRISIS_TOOL]  CRISIS HANDLER CALLED: {reason}")
         
-        # Get country-specific resources (default to US if not provided)
-        country = country_code or "US"
+        # Get country-specific resources (default to Pakistan if not provided)
+        country = country_code or DEFAULT_CRISIS_COUNTRY
         resources = get_crisis_resources(country)
         print(f"[CRISIS_TOOL]  Using resources for: {country}")
         
@@ -158,7 +186,7 @@ def handle_crisis(message: str = "", reason: str = "General concern", country_co
     except Exception as e:
         print(f"[CRISIS_TOOL]  Error in handle_crisis: {str(e)[:100]}")
         # Always escalate on error - safety first
-        fallback_resources = get_crisis_resources(country_code or "US")
+        fallback_resources = get_crisis_resources(country_code or DEFAULT_CRISIS_COUNTRY)
         return {
             "risk_level": "high",
             "crisis_detected": True,

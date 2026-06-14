@@ -132,6 +132,31 @@ async def create_new_session(user_id: str, title: str = None) -> dict:
     )
     
     print(f"[DB] Created new session: {session.id} for user: {user_id}")
+
+    try:
+        await prisma.userstatistics.upsert(
+            where={"userId": user_id},
+            data={
+                "create": {
+                    "userId": user_id,
+                    "totalSessions": 1,
+                    "lastSessionAt": session.startedAt,
+                },
+                "update": {
+                    "totalSessions": {"increment": 1},
+                    "lastSessionAt": session.startedAt,
+                },
+            },
+        )
+    except Exception as e:
+        print(f"[DB] UserStatistics session refresh skipped: {str(e)[:100]}")
+
+    try:
+        from ..services.cache_state import invalidate_user_cache
+
+        invalidate_user_cache(user_id, session_id=session.id)
+    except Exception as cache_err:
+        print(f"[DB] Session cache invalidation skipped: {str(cache_err)[:100]}")
     
     return {
         "id": session.id,

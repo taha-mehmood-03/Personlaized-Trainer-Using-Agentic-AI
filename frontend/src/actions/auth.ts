@@ -28,9 +28,26 @@ export async function loginUser(email: string, pass: string): Promise<User | nul
     }
 }
 
-export async function signupUser(email: string, pass: string, name?: string): Promise<User | null> {
+const CONSENT_VERSION = '2026-05-24'
+const PRIVACY_NOTICE_VERSION = '2026-05-24'
+const TERMS_VERSION = '2026-05-24'
+
+export async function signupUser(
+    email: string,
+    pass: string,
+    name?: string,
+    consentAccepted = false
+): Promise<User | null> {
     try {
-        const res = await api.post('/auth/signup', { email, password: pass, name: name || email.split('@')[0] })
+        const res = await api.post('/auth/signup', {
+            email,
+            password: pass,
+            name: name || email.split('@')[0],
+            consent_accepted: consentAccepted,
+            consent_version: CONSENT_VERSION,
+            privacy_notice_version: PRIVACY_NOTICE_VERSION,
+            terms_version: TERMS_VERSION,
+        })
         const data = res.data as { status: string; user_id: string; name: string; email: string } | undefined
 
         if (res.ok && data?.status === 'success') {

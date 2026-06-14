@@ -3,7 +3,7 @@ Trend Analyzer Node - Emotional trajectory tracking over time
 
 ARCHITECTURE NODE 2.8:
 Purpose: Detect whether the user's emotional state is IMPROVING, WORSENING, or STABLE
-         by analyzing recent MoodLog entries from the database.
+         by analyzing recent user messages in the current session.
 Runs AFTER emotion_fusion, BEFORE conversation_planner
 No LLM call - pure Python linear regression on intensity
 
@@ -14,10 +14,73 @@ TREND CLASSIFICATION:
 
 Output:
   - emotional_trend: str ("improving" | "worsening" | "stable")
-  - trend_window: list[dict]  last N {emotion, intensity, timestamp} snapshots
+  - trend_window: list[dict]  current-session {emotion, intensity} snapshots
 """
 
 from ..agent.state import MentalHealthState
+import time
+
+
+_trend_cache: dict[str, dict] = {}
+_trend_cache_ttl = 180  # seconds
+
+
+def _current_trend_point(state: MentalHealthState) -> dict:
+    return {
+        "emotion": state.get("fused_emotion", state.get("emotion", "neutral")),
+        "intensity": state.get("fused_intensity", state.get("intensity", 0.5)),
+    }
+
+
+def get_cached_trend_snapshot(state: MentalHealthState) -> dict:
+    """
+    Return an immediate trend snapshot without DB work.
+
+    The response path uses this so the planner has a reasonable trend signal
+    while the fresh DB trend is recomputed in the background.
+    """
+    session_id = state.get("session_id", "")
+    current_point = _current_trend_point(state)
+
+    if not session_id:
+        return {"emotional_trend": "stable", "trend_window": [current_point]}
+
+    cached = _trend_cache.get(session_id)
+    if cached and time.time() - cached.get("timestamp", 0) < _trend_cache_ttl:
+        data = cached.get("data", {})
+        window = list(data.get("trend_window", []))
+        window.append(current_point)
+        return {
+            "emotional_trend": data.get("emotional_trend", "stable"),
+            "trend_window": window[-6:],
+            "trend_source": "cache",
+        }
+
+    return {
+        "emotional_trend": state.get("emotional_trend", "stable"),
+        "trend_window": [current_point],
+        "trend_source": "default",
+    }
+
+
+async def refresh_emotional_trend_cache(state: MentalHealthState) -> None:
+    """Refresh trend cache after the response path has moved on."""
+    session_id = state.get("session_id", "")
+    if not session_id:
+        return
+
+    try:
+        result = await analyze_emotional_trends(state)
+        _trend_cache[session_id] = {
+            "timestamp": time.time(),
+            "data": {
+                "emotional_trend": result.get("emotional_trend", "stable"),
+                "trend_window": result.get("trend_window", []),
+            },
+        }
+        print(f"[NODE: TREND_ANALYZER]  Background cache refreshed: {result.get('emotional_trend', 'stable')}")
+    except Exception as e:
+        print(f"[NODE: TREND_ANALYZER]  Background cache refresh failed: {str(e)[:80]}")
 
 
 async def analyze_emotional_trends(state: MentalHealthState) -> dict:
@@ -25,7 +88,7 @@ async def analyze_emotional_trends(state: MentalHealthState) -> dict:
     TREND ANALYZER NODE - Track emotional trajectory.
 
     Process:
-    1. Query last 5 MoodLog entries for this user from DB
+    1. Query last 5 user messages with intensity in this session from DB
     2. Compute linear slope of intensity values
     3. Classify trend: improving / worsening / stable
     4. Return trend + window for downstream decision-making
@@ -34,36 +97,21 @@ async def analyze_emotional_trends(state: MentalHealthState) -> dict:
     """
 
     user_id = state.get("user_id", "")
+    session_id = state.get("session_id", "")
     current_emotion = state.get("fused_emotion", state.get("emotion", "neutral"))
     current_intensity = state.get("fused_intensity", state.get("intensity", 0.5))
 
-    print(f"\n[NODE: TREND_ANALYZER]  Analyzing trend for user: {user_id[:20] if user_id else 'UNKNOWN'}...")
+    print(f"\n[NODE: TREND_ANALYZER]  Analyzing session trend: {session_id[:20] if session_id else 'UNKNOWN'}...")
 
-    if not user_id:
-        print("[NODE: TREND_ANALYZER]  No user_id  returning stable")
+    if not session_id:
+        print("[NODE: TREND_ANALYZER]  No session_id  returning stable")
         return {
             "emotional_trend": "stable",
             "trend_window": [],
         }
 
-    # FIX 10: Guard against anonymous users and insufficient session history.
-    # Mood logs for anonymous users may belong to a shared/test profile,
-    # making trend analysis unreliable. Require at least 3 real sessions.
-    session_count = state.get("session_count", 0)
-    if user_id == "anonymous" or session_count < 3:
-        trend_reason = "anonymous user" if user_id == "anonymous" else f"only {session_count} session(s) (need 3)"
-        print(f"[NODE: TREND_ANALYZER]  Insufficient data for trend ({trend_reason})  returning stable")
-        # Still append current data point so trend_window has at least 1 entry
-        return {
-            "emotional_trend": "stable",  # Safe default  don't escalate intervention on guessed trend
-            "trend_window": [{
-                "emotion": current_emotion,
-                "intensity": current_intensity,
-            }],
-        }
-
     # ============================================
-    # STEP 1: QUERY RECENT MOOD LOGS
+    # STEP 1: QUERY RECENT USER MESSAGES IN THIS SESSION
     # ============================================
 
     trend_window = []
@@ -71,22 +119,26 @@ async def analyze_emotional_trends(state: MentalHealthState) -> dict:
         from ..db.client import get_prisma_client
         prisma = await get_prisma_client()
 
-        recent_logs = await prisma.moodlog.find_many(
-            where={"userId": user_id},
+        recent_messages = await prisma.message.find_many(
+            where={
+                "sessionId": session_id,
+                "role": "USER",
+                "intensity": {"not": None},
+            },
             order={"createdAt": "desc"},
             take=5,
         )
 
         # Convert to chronological order (oldest first)
-        recent_logs.reverse()
+        recent_messages.reverse()
 
-        for log in recent_logs:
+        for msg in recent_messages:
             trend_window.append({
-                "emotion": log.emotion if hasattr(log, "emotion") else "neutral",
-                "intensity": float(log.intensity) if hasattr(log, "intensity") else 0.5,
+                "emotion": str(msg.emotion).lower() if getattr(msg, "emotion", None) else "neutral",
+                "intensity": float(msg.intensity) if getattr(msg, "intensity", None) is not None else 0.5,
             })
 
-        print(f"[NODE: TREND_ANALYZER]  Retrieved {len(trend_window)} mood logs")
+        print(f"[NODE: TREND_ANALYZER]  Retrieved {len(trend_window)} prior session emotion points")
 
     except Exception as e:
         print(f"[NODE: TREND_ANALYZER]  DB query failed: {str(e)[:80]}")

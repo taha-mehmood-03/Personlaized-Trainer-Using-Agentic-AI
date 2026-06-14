@@ -3,15 +3,14 @@ LLM-Assisted Classifier Module  SentiMind v8.7 FIXED
 
 Provides structured JSON classification helpers for sensitive pipeline nodes.
 Each function:
-  - Sends a minimal, focused prompt to OpenRouter using the single working model:
-    meta-llama/llama-3.3-70b-instruct
+  - Sends a minimal, focused prompt to Google AI Studio / Gemini.
   - Expects ONLY a valid JSON response
   - Returns a safe fallback dict on any failure (never crashes the pipeline)
 
-CRISIS NODE: OpenRouter meta-llama/llama-3.3-70b-instruct is the SOLE authoritative decision maker.
+CRISIS NODE: Gemini is the sole authoritative LLM decision maker.
              Local ELECTRA model disabled  LLM-only path active.
 
-GATE NODE: OpenRouter meta-llama/llama-3.3-70b-instruct (FIXED from 8b - 7-route classification needs 70b power)
+GATE NODE: Gemini Flash-Lite for low-latency structured routing.
 
 v8.7 FIXES vs v6.1:
   - smart_pipeline_gate  : uses llama-3.3-70b-instruct for stable routing
@@ -21,7 +20,7 @@ v8.7 FIXES vs v6.1:
   - Distortion prompt    : Added concrete examples for every distortion type
   - Intent prompt        : Unchanged (was already solid)
   - All prompts          : temperature=0.0 enforced everywhere, JSON-only output enforced
-  - LLM_PROVIDER=openrouter: All calls routed through OpenRouter.
+  - All LLM calls are routed through Google AI Studio / Gemini.
   - Local ELECTRA (sentinet/suicidality) model DISABLED (commented out).
 """
 
@@ -31,16 +30,98 @@ import os
 import logging
 from typing import Optional
 
-from .groq_llm import get_llm_manager
+from .groq_llm import get_llm_manager, message_content_to_text
+from ..utils.turn_signals import (
+    assistant_offered_technique,
+    
+    has_negative_feedback_signal,
+    has_positive_outcome_signal,
+    is_no_thanks,
+    is_polite_acknowledgement,
+    is_technique_acceptance_reply,
+    last_ai_from_recent_context,
+    plain_text,
+)
 
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────
 #  MODEL CONSTANTS  change once here, applies everywhere below
 # ─────────────────────────────────────────────────────────────
-MODEL_HEAVY = os.getenv("SENTIMIND_LLM_MODEL", "meta-llama/llama-3.3-70b-instruct")
-MODEL_CRISIS = MODEL_HEAVY
-MODEL_LIGHT = MODEL_HEAVY
+def _gemini_model_env(default: str, *names: str) -> str:
+    for name in names:
+        value = os.getenv(name)
+        if value and value.strip().startswith("gemini-"):
+            return value.strip()
+    return default
+
+
+MODEL_GATE = _gemini_model_env("gemini-3.1-flash-lite", "GEMINI_MODEL_GATE", "MODEL_GATE", "SENTIMIND_MODEL_GATE")
+MODEL_MOOD = _gemini_model_env("gemini-3.1-flash-lite", "GEMINI_MODEL_MOOD", "MODEL_MOOD", "SENTIMIND_MODEL_MOOD")
+MODEL_CRISIS = _gemini_model_env("gemini-3.1-flash-lite", "GEMINI_MODEL_CRISIS", "MODEL_CRISIS", "SENTIMIND_MODEL_CRISIS")
+MODEL_FALLBACK = _gemini_model_env("gemini-3.1-flash-lite", "GEMINI_MODEL_FALLBACK", "MODEL_FALLBACK", "SENTIMIND_MODEL_FALLBACK")
+
+# Backward-compatible names used by older call sites in this module.
+MODEL_HEAVY = MODEL_GATE
+MODEL_LIGHT = MODEL_MOOD
+
+
+def deterministic_crisis_safety_net(message: str) -> dict:
+    """
+    High-precision deterministic safety net for explicit self-harm language.
+
+    This is intentionally narrow. It does not replace semantic LLM screening;
+    it catches obvious crisis statements when the LLM router/classifier is
+    unavailable or before latency-sensitive routing.
+    """
+    text = re.sub(r"\s+", " ", (message or "").lower()).strip()
+    if not text:
+        return {
+            "crisis_detected": False,
+            "crisis_level": "low",
+            "reason": "empty message",
+            "source": "deterministic_safety_net",
+        }
+
+    high_patterns = (
+        r"\bi\s+(want|need|plan|intend)\s+to\s+(kill myself|end my life|take my own life|die)\b",
+        r"\bi\s+(am|m|'m)\s+(going|planning)\s+to\s+(kill myself|end my life|take my own life|die)\b",
+        r"\bi\s+have\s+a\s+plan\s+to\s+(kill myself|end my life|take my own life|die)\b",
+        r"\b(i have|i've got|ive got)\s+(pills|a knife|a gun|a rope|a blade).{0,40}\b(ready|tonight|to do it|to end it)\b",
+        r"\bi\s+(already\s+)?(cut|hurt)\s+myself\b",
+        r"\b(i've|ive)\s+been\s+cutting\s+(myself|again)\b",
+    )
+    for pattern in high_patterns:
+        if re.search(pattern, text):
+            return {
+                "crisis_detected": True,
+                "crisis_level": "high",
+                "reason": "explicit self-harm intent, plan, means, or recent self-harm matched deterministic safety net",
+                "source": "deterministic_safety_net",
+            }
+
+    medium_patterns = (
+        r"\bi\s+(do not|don't|dont)\s+want\s+to\s+(be here|exist|live)(\s+anymore|\s+any more)?\b",
+        r"\bi\s+want\s+to\s+disappear\s+forever\b",
+        r"\beveryone\s+would\s+be\s+better\s+off\s+without\s+me\b",
+        r"\bi\s+might\s+hurt\s+myself\b",
+        r"\bend\s+it\s+all\b",
+    )
+    for pattern in medium_patterns:
+        if re.search(pattern, text):
+            return {
+                "crisis_detected": True,
+                "crisis_level": "medium",
+                "reason": "passive suicidal ideation or self-harm risk matched deterministic safety net",
+                "source": "deterministic_safety_net",
+            }
+
+    return {
+        "crisis_detected": False,
+        "crisis_level": "low",
+        "reason": "no explicit deterministic crisis pattern matched",
+        "source": "deterministic_safety_net",
+    }
 
 
 # ============================================
@@ -156,7 +237,7 @@ async def _get_techniques_by_category(category_name: str) -> Optional[list]:
 
 # ============================================
 # CRISIS SPECIALIST: Local ELECTRA Model  DISABLED
-# LLM_PROVIDER=openrouter: OpenRouter LLM is now the sole decision maker.
+# Gemini LLM is now the sole decision maker.
 # The local sentinet/suicidality model is commented out for performance.
 # ============================================
 
@@ -167,7 +248,7 @@ def _get_crisis_classifier():
     """
     Local ELECTRA crisis classifier  DISABLED.
     Returns 'unavailable' immediately so llm_crisis_check falls through
-    to the LLM-only path (OpenRouter llama-3.3-70b-instruct).
+    to the LLM-only path.
     """
     global _crisis_classifier
     if _crisis_classifier is not None:
@@ -175,7 +256,7 @@ def _get_crisis_classifier():
 
     #  LOCAL MODEL DISABLED 
     # The sentinet/suicidality ELECTRA model is commented out.
-    # OpenRouter Llama 3.3 70B handles crisis detection as sole authoritative decision maker.
+    # Gemini handles crisis detection as the sole authoritative LLM decision maker.
     #
     # try:
     #     from transformers import pipeline as hf_pipeline
@@ -195,78 +276,154 @@ def _get_crisis_classifier():
 
     print("[CLASSIFIER] ")
     print("[CLASSIFIER]   LOCAL ELECTRA MODEL  DISABLED                    ")
-    print(f"[CLASSIFIER]   Crisis detection: OpenRouter {MODEL_CRISIS} ")
+    print(f"[CLASSIFIER]   Crisis detection: Gemini {MODEL_CRISIS} ")
     print("[CLASSIFIER] ")
     _crisis_classifier = "unavailable"
     return _crisis_classifier
 
 
 def _parse_json_from_llm(content: str) -> Optional[dict]:
-    """Extract JSON from LLM response, handling markdown fences."""
-    # Strip markdown code fences if present
-    content = re.sub(r"```(?:json)?", "", content).strip()
+    """Extract JSON from LLM response, handling markdown fences and preamble text.
+
+    Robust multi-strategy parser:
+      1. Direct parse (already clean JSON).
+      2. Extract JSON from a markdown code fence (```json ... ``` or ``` ... ```).
+      3. Brace-balanced extraction — finds the first '{' and walks to its
+         matching '}', correctly handling nested objects.
+      4. Broad first-'{' to last-'}' fallback.
+
+    Handles LLM preamble text such as "Here is the JSON requested:"
+    that sometimes precedes the actual JSON block.
+    """
+    if not content:
+        return None
+
+    content = content.strip()
+
+    # Strategy 1: direct parse (ideal — model returned clean JSON)
     try:
         return json.loads(content)
     except json.JSONDecodeError:
-        # Try to find JSON object within the response
-        match = re.search(r'\{.*\}', content, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group())
-            except json.JSONDecodeError:
-                pass
+        pass
+
+    # Strategy 2: extract from markdown code fence  ```[json]  ...  ```
+    import re as _re
+    fence_match = _re.search(r"```(?:json)?\s*([\s\S]*?)```", content)
+    if fence_match:
+        candidate = fence_match.group(1).strip()
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
+    # Strategy 3: brace-balanced extraction (handles nested objects correctly)
+    start = content.find("{")
+    if start != -1:
+        depth = 0
+        in_string = False
+        escape_next = False
+        for i, ch in enumerate(content[start:], start=start):
+            if escape_next:
+                escape_next = False
+                continue
+            if ch == "\\" and in_string:
+                escape_next = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = content[start:i + 1]
+                    try:
+                        return json.loads(candidate)
+                    except json.JSONDecodeError:
+                        break  # malformed — fall through to strategy 4
+
+    # Strategy 4: broad first-'{' to last-'}' fallback
+    first = content.find("{")
+    last = content.rfind("}")
+    if first != -1 and last != -1 and last > first:
+        candidate = content[first:last + 1]
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
     return None
 
 
-async def _call_groq_async(prompt: str, model: str = MODEL_LIGHT, temperature: float = 0.0, max_tokens: int = 128) -> Optional[str]:
+
+async def _call_gemini_async(prompt: str, model: str = MODEL_LIGHT, temperature: float = 0.0, max_tokens: int = 128) -> Optional[str]:
     """
-    Make an ASYNC OpenRouter LLM call via the unified LLM manager.
+    Make an ASYNC Gemini LLM call via the unified LLM manager.
     Returns raw content string or None on failure.
 
-    v8.7: All LLM classification calls use MODEL_HEAVY (llama-3.3-70b-instruct).
+    All LLM classification calls use Gemini model tiers.
     """
+    manager = get_llm_manager()
+    candidates = [model]
+    fallback = getattr(manager, "model_fallback", MODEL_FALLBACK)
+    if fallback and fallback not in candidates:
+        candidates.append(fallback)
+    alt_model = getattr(manager, "model_alt", None)
+    if alt_model and alt_model not in candidates:
+        candidates.append(alt_model)
+    json_models = [model]
+    if alt_model:
+        json_models.append(alt_model)
     try:
-        manager = get_llm_manager()
-        llm = manager.get_llm(model=model)
-        call_llm = llm.bind(max_tokens=max_tokens, temperature=temperature)
-        print(f"[CLASSIFIER]   Calling OpenRouter | model={model} | max_tokens={max_tokens}")
-        response = await call_llm.ainvoke(prompt)  # NON-BLOCKING  event loop free
+        print(f"[CLASSIFIER]   Calling Gemini | model={model} | max_tokens={max_tokens}")
+        response = await manager.ainvoke_gemini_with_rotation(
+            prompt,
+            model=model,
+            model_candidates=candidates,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            response_format={"type": "json_object"},
+            response_format_models=json_models,
+        )
         print(f"[CLASSIFIER]   Response received  | model={model}")
-        return response.content
+        return message_content_to_text(response.content if hasattr(response, "content") else response)
     except Exception as e:
-        logger.warning(f"[CLASSIFIER]  OpenRouter call FAILED | model={model} | error: {e}")
-        return None
+        logger.warning(f"[CLASSIFIER]  Gemini call FAILED | model={model} | error: {e}")
+    return None
 
 
 # Keep sync alias for any legacy callers (wraps async in thread executor)
-def _call_groq(prompt: str, model: str = MODEL_LIGHT, temperature: float = 0.0, max_tokens: int = 128) -> Optional[str]:
-    """Legacy sync wrapper  prefer _call_groq_async in async contexts."""
+def _call_gemini(prompt: str, model: str = MODEL_LIGHT, temperature: float = 0.0, max_tokens: int = 128) -> Optional[str]:
+    """Legacy sync wrapper; prefer _call_gemini_async in async contexts."""
     import asyncio
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(asyncio.run, _call_groq_async(prompt, model, temperature, max_tokens))
+                future = pool.submit(asyncio.run, _call_gemini_async(prompt, model, temperature, max_tokens))
                 return future.result(timeout=30)
         else:
-            return loop.run_until_complete(_call_groq_async(prompt, model, temperature, max_tokens))
+            return loop.run_until_complete(_call_gemini_async(prompt, model, temperature, max_tokens))
     except Exception as e:
-        logger.warning(f"[CLASSIFIER] Legacy sync Groq call failed: {e}")
+        logger.warning(f"[CLASSIFIER] Legacy sync Gemini call failed: {e}")
         return None
 
 
 # ============================================
-# CRISIS CLASSIFIER  OpenRouter Llama 3.3 70B (sole decision maker)
+# CRISIS CLASSIFIER  Gemini (sole LLM decision maker)
 # ============================================
 
 async def llm_crisis_check(message: str) -> dict:
     """
-    Semantic crisis detection  OpenRouter llama-3.3-70b-instruct as the authoritative decision maker.
+    Semantic crisis detection using Gemini as the authoritative LLM decision maker.
 
     ARCHITECTURE (v8.7  LLM-Only, Fully Async):
       Step 1: Keyword gate handled upstream (graph.py screen_for_crisis Layer 1).
-      Step 2: llama-3.3-70b-instruct runs async (await ainvoke)  best empathy + clinical reasoning.
+      Step 2: Gemini runs async (await ainvoke) for empathy + clinical reasoning.
               Local ELECTRA model is DISABLED (always returned 'unavailable').
 
     FIX v8.7: Crisis detection is safety-critical and uses MODEL_HEAVY (70b).
@@ -279,9 +436,17 @@ async def llm_crisis_check(message: str) -> dict:
         "source": "llm" | "fallback"
       }
     """
-    # ELECTRA disabled  OpenRouter Llama 3.3 70B is the sole decision maker
+    # ELECTRA disabled; Gemini is the sole LLM decision maker.
+    deterministic = deterministic_crisis_safety_net(message)
+    if deterministic.get("crisis_detected"):
+        print(
+            "[CLASSIFIER] SAFETY NET CRISIS RESULT  "
+            f"detected=True  level={deterministic.get('crisis_level', '?').upper()}  "
+            f"reason='{deterministic.get('reason', '')}'"
+        )
+        return deterministic
 
-    # ---- CRISIS ANALYSIS: OpenRouter Llama 3.3 70B ----
+    # ---- CRISIS ANALYSIS: Gemini ----
     print(f"[CLASSIFIER]   CRISIS CHECK    {MODEL_CRISIS} (MODEL_CRISIS) ")
     print("[CLASSIFIER]   3-step dimensional reasoning (desire/context/lethality) ")
     print("[CLASSIFIER]   for accurate mental health safety detection              ")
@@ -387,12 +552,17 @@ Message to classify: "{message}"
 JSON:"""
 
     try:
-        content = await _call_groq_async(prompt, model=MODEL_HEAVY, temperature=0.0, max_tokens=150)
+        content = await _call_gemini_async(prompt, model=MODEL_CRISIS, temperature=0.0, max_tokens=512)
         if content:
             parsed = _parse_json_from_llm(content)
             if parsed and "crisis_detected" in parsed:
+                parsed["crisis_level"] = str(parsed.get("crisis_level") or "low").lower()
+                if parsed.get("crisis_level") not in {"low", "medium", "high"}:
+                    parsed["crisis_level"] = "medium" if parsed.get("crisis_detected") else "low"
                 if parsed.get("crisis_level") == "low":
                     parsed["crisis_detected"] = False
+                elif parsed.get("crisis_level") in {"medium", "high"}:
+                    parsed["crisis_detected"] = True
                 parsed["source"] = "llm"
                 crisis_icon = "🚨" if parsed["crisis_detected"] else "✅"
                 print(f"[CLASSIFIER] {crisis_icon} CRISIS RESULT  detected={parsed['crisis_detected']}  level={parsed.get('crisis_level','?').upper()}  reason='{parsed.get('reason', '')}'")
@@ -400,17 +570,17 @@ JSON:"""
     except Exception as e:
         logger.error(f"[CLASSIFIER]  Crisis LLM call FAILED: {e}")
 
-    print("[CLASSIFIER]   ALL classifiers failed  returning safe non-crisis fallback")
+    print("[CLASSIFIER]   Crisis LLM unavailable; deterministic safety net found no explicit crisis pattern")
     return {
         "crisis_detected": False,
         "crisis_level": "low",
-        "reason": "All classifiers failed  defaulting to safe non-crisis",
+        "reason": "Crisis LLM unavailable and deterministic safety net found no explicit self-harm signal",
         "source": "fallback"
     }
 
 
 # ============================================
-# COGNITIVE DISTORTION CLASSIFIER  Groq 8b
+# COGNITIVE DISTORTION CLASSIFIER  Gemini
 # Stays on MODEL_LIGHT  lightweight pattern matching, not safety-critical
 # ============================================
 
@@ -418,7 +588,7 @@ async def llm_distortion_check(message: str) -> dict:
     """
     LLM-assisted cognitive distortion detection.
     Called when keyword confidence is low (< 0.4).
-    v5.3: Now truly async via _call_groq_async.
+    v5.3: Now truly async via _call_gemini_async.
 
     Returns:
       {
@@ -470,7 +640,7 @@ Message: "{message}"
 JSON:"""
 
         print(f"[CLASSIFIER]  DISTORTION CHECK  {MODEL_LIGHT}")
-        content = await _call_groq_async(prompt, model=MODEL_HEAVY, temperature=0.0, max_tokens=100)
+        content = await _call_gemini_async(prompt, model=MODEL_LIGHT, temperature=0.0, max_tokens=512)
         if content:
             parsed = _parse_json_from_llm(content)
             if parsed and "distortion_type" in parsed:
@@ -578,8 +748,10 @@ Current message: "{message}"
 
 JSON:"""
 
-        print(f"[CLASSIFIER] 🏥 CLINICAL SEVERITY CHECK → {MODEL_HEAVY}")
-        content = await _call_groq_async(prompt, model=MODEL_HEAVY, temperature=0.0, max_tokens=300)
+        high_risk_signal = intensity >= 0.85 or emotion in {"fear", "anger", "sadness"}
+        clinical_model = MODEL_HEAVY if high_risk_signal else MODEL_MOOD
+        print(f"[CLASSIFIER] 🏥 CLINICAL SEVERITY CHECK → {clinical_model}")
+        content = await _call_gemini_async(prompt, model=clinical_model, temperature=0.0, max_tokens=512)
         if content:
             parsed = _parse_json_from_llm(content)
             if parsed and "severity" in parsed:
@@ -607,18 +779,19 @@ JSON:"""
 
 
 # ============================================
-# CONVERSATION INTENT CLASSIFIER  Groq 8b
+# CONVERSATION INTENT CLASSIFIER  Gemini
 # Stays on MODEL_LIGHT  downstream from gate, lightweight classification
 # ============================================
 
 async def llm_intent_check(message: str, recent_context: str = "") -> dict:
     """
     LLM-assisted intent classification for the conversation planner.
-    v5.3: Now truly async via _call_groq_async.
+    v5.3: Now truly async via _call_gemini_async.
+    v9.1: Added positive_feedback intent for exercise feedback
 
     Returns:
       {
-        "intent": "technique_request" | "advice_seeking" | "reflection" | "venting" | "chitchat" | "crisis_signal",
+        "intent": "therapeutic" | "contextual_followup" | "technique_request" | "technique_follow_up" | "memory_query" | "advice_seeking" | "reflection" | "venting" | "chitchat" | "crisis_signal" | "positive_feedback",
         "confidence": float
       }
     """
@@ -628,11 +801,34 @@ async def llm_intent_check(message: str, recent_context: str = "") -> dict:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Choose EXACTLY ONE intent from this list:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  technique_request | advice_seeking | reflection | venting | chitchat | crisis_signal
+  therapeutic | contextual_followup | technique_request | technique_follow_up | memory_query | advice_seeking | reflection | venting | chitchat | crisis_signal | positive_feedback
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DEFINITIONS — be strict, read each carefully:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+positive_feedback (NEW v9.1):
+  User is expressing that an exercise/technique HELPED or is WORKING.
+  This is FEEDBACK on something the AI already provided, not a new request.
+  Key signals: 'it helped', 'it's helping', 'it's good', 'it works', 'i like this',
+               'that was good', 'feeling better', 'it's working', 'that helped',
+               'yes it helped', 'much better', 'calmer now', 'it is helping me'.
+  Context: Usually follows right after AI provided an exercise or technique.
+  IMPORTANT: This differs from 'venting' — user is NOT expressing distress,
+             they are confirming a POSITIVE OUTCOME.
+
+contextual_followup:
+  The latest message is short, pronoun-based, or clearly answers the previous
+  assistant question. Use recent context instead of treating it as standalone.
+  Examples: "About 3 weeks", "Maths", "yes i does have", "what do you think about it?"
+
+technique_follow_up:
+  The user is accepting, rejecting, discussing, or reporting on a technique
+  already offered. Examples: "yes go for it", "I didn't like that exercise".
+
+memory_query:
+  The user asks for something previously mentioned or stored. Examples:
+  "what was its name?", "which technique was that?"
 
 technique_request:
   User is EXPLICITLY asking for an exercise, breathing drill, meditation,
@@ -656,6 +852,8 @@ reflection:
 venting:
   User expresses strong emotion, complains, shares hardship, but is NOT
   asking for help yet. Just needs to be heard.
+  IMPORTANT: Do NOT classify positive_feedback as venting.
+  If user is saying exercise/technique HELPED → positive_feedback, not venting.
   Key signals: emotional statements, frustration, sadness, anger,
                "I feel...", "I can't...", "it's so hard".
 
@@ -670,32 +868,36 @@ crisis_signal:
   Key signals: "I want to die", "nobody cares", "disappear", "end it all".
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-KEY DISAMBIGUATION RULE:
+CRITICAL RULES FOR POSITIVE_FEEDBACK v9.1:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-If the Previous Conversation Context shows the AI recently suggested a technique/exercise,
-AND the user now says it didn't help OR asks to try something else → classify as technique_request.
-
-IMPORTANT: Name/identity corrections are ALWAYS chitchat regardless of how frustrated the wording sounds.
+1. If user says exercise/technique HELPED or is HELPING → positive_feedback
+2. If user confirms exercise WORKED or is WORKING → positive_feedback
+3. If user expresses IMPROVEMENT after exercise → positive_feedback
+4. If user likes an exercise they already tried → positive_feedback
+5. Do NOT confuse with venting (that's distress/emotional expression)
+6. Do NOT confuse with technique_request (that's asking for a new exercise)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 EXAMPLES — read context carefully:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-"I'm so stressed about my exams"                                           → venting
-"It didn't help me" [previous AI had NO technique]                         → venting
-"It didn't help me" [previous AI HAD suggested a technique]                → technique_request
-"That exercise didn't work, show me another one"                           → technique_request
-"Still feeling the same after trying it" [prev AI had technique]           → technique_request
-"What should I do to feel better?" [no specific exercise asked]            → advice_seeking
-"I am having difficulty expressing myself, what should I do?"              → advice_seeking
-"Can you give me a breathing exercise?"                                    → technique_request
-"That didn't help, can I try a different exercise?"                        → technique_request
-"Maybe my anxiety comes from my childhood"                                 → reflection
-"I realize I get anxious when I'm around my family"                        → reflection
-"Hey, how's it going?"                                                     → chitchat
-"im not taram im taha mehmood"                                             → chitchat (name correction)
-"my name is not sara its samira"                                           → chitchat (name correction)
-"call me Ali not Ahmed"                                                    → chitchat (name correction)
-"I don't want to exist anymore"                                            → crisis_signal
+"i like this one exercise its good"                                 → positive_feedback
+"yes it helped me"                                                  → positive_feedback
+"it is helping"                                                     → positive_feedback
+"feeling a bit better now"                                          → positive_feedback
+"that actually worked"                                              → positive_feedback
+"i feel calmer after doing that"                                    → positive_feedback
+"this exercise is good"                                             → positive_feedback
+"yeah that helped"                                                  → positive_feedback
+
+"I'm so stressed about my exams"                                    → venting
+"It didn't help me" [previous AI had NO technique]                  → venting
+"It didn't help me" [previous AI HAD suggested a technique]         → venting (negative feedback, not positive)
+"What should I do to feel better?" [no specific exercise asked]     → advice_seeking
+"Can you give me a breathing exercise?"                             → technique_request
+"Maybe my anxiety comes from my childhood"                          → reflection
+"Hey, how's it going?"                                              → chitchat
+"im not taram im taha mehmood"                                      → chitchat (name correction)
+"I don't want to exist anymore"                                     → crisis_signal
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 OUTPUT FORMAT
@@ -711,7 +913,7 @@ User's Latest Message: "{message}"
 JSON:"""
 
         print(f"[CLASSIFIER] 💬 INTENT CHECK → {MODEL_LIGHT}")
-        content = await _call_groq_async(prompt, model=MODEL_HEAVY, temperature=0.0, max_tokens=64)
+        content = await _call_gemini_async(prompt, model=MODEL_LIGHT, temperature=0.0, max_tokens=512)
         if content:
             parsed = _parse_json_from_llm(content)
             if parsed and "intent" in parsed:
@@ -746,9 +948,394 @@ async def llm_intent_pre_check(message: str, recent_context: str = "") -> dict:
 
 # ============================================================
 # SMART PIPELINE GATE - Pre-graph LLM Decision Router
-# FIX v8.7: Upgraded from MODEL_LIGHT (8b) to MODEL_HEAVY (70b)
-# 7-route priority classification is too complex for 8b  was causing misrouting
 # ============================================================
+
+_CORE_GATE_ROUTES = {
+    "chitchat",
+    "therapeutic",
+    "contextual_followup",
+    "technique_request",
+    "technique_follow_up",
+    "memory_query",
+    "crisis",
+    "positive_feedback",
+}
+
+_MOOD_SKIP_ROUTES = {
+    "chitchat",
+    "contextual_followup",
+    "technique_follow_up",
+    "memory_query",
+    "positive_feedback",
+}
+
+
+def _as_float(value, default: float = 0.0, *, lo: float = 0.0, hi: float = 1.0) -> float:
+    try:
+        numeric = float(value)
+    except Exception:
+        numeric = default
+    return max(lo, min(hi, numeric))
+
+
+def _as_bool(value, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return default
+
+
+def _normalize_context_flags(flags) -> list[str]:
+    if not isinstance(flags, list):
+        return []
+    normalized: list[str] = []
+    for flag in flags:
+        if not flag:
+            continue
+        clean = str(flag).strip().lower().replace(" ", "_")
+        if clean and clean not in normalized:
+            normalized.append(clean)
+    return normalized
+
+
+
+
+def _message_says_no_more_details(message: str) -> bool:
+    clean = re.sub(r"[^\w\s]", "", (message or "").lower()).strip()
+    if clean in {
+        "no nothing more",
+        "nothing more",
+        "nothing else",
+        "no more",
+        "nope nothing else",
+        "nah nothing else",
+        "thats all",
+        "that is all",
+        "thats it",
+        "that is it",
+        "no thats all",
+        "no that is all",
+        "no thats it",
+        "no that is it",
+        "i shared everything",
+        "i have shared everything",
+        "ive shared everything",
+        "i told you everything",
+        "i dont know what else",
+        "i do not know what else",
+        "nothing specific",
+    }:
+        return True
+    return any(
+        marker in clean
+        for marker in (
+            "shared everything with you",
+            "shared everything with u",
+            "told you everything",
+            "dont have any other details",
+            "do not have any other details",
+            "no other details",
+            "nothing else to add",
+            "nothing more to add",
+        )
+    )
+
+
+def _build_smart_gate_prompt(
+    *,
+    message: str,
+    recent_context: str,
+    user_context: str,
+    session_context: dict,
+) -> str:
+    session_formatted = (session_context or {}).get("formatted_context", "")
+    return f"""You are SentiMind's strict, context-aware routing gate.
+
+Your job is to classify ONLY the latest user message while using recent session context.
+Return strict JSON only. Do not include markdown, commentary, or extra keys.
+
+Core principle:
+UNDERSTAND FIRST -> CLARIFY -> FORMULATE -> INTERVENE -> FOLLOW UP
+
+Allowed routes:
+- chitchat
+- therapeutic
+- contextual_followup
+- technique_request
+- technique_follow_up
+- memory_query
+- crisis
+- positive_feedback
+
+Routing rules:
+1. Crisis overrides everything: direct self-harm intent, suicidal intent, recent self-harm, plan, means, or immediate danger -> crisis.
+2. If the message is short and depends on the previous assistant question, route contextual_followup.
+3. If it answers the previous assistant question, route contextual_followup.
+4. If it contains "it", "that", "that one", "that exercise", or "what do you think about it?", use recent context.
+5. If the user says there are no more details ("nothing else", "I shared everything", "that's all"), route contextual_followup with flags no_more_details and context_complete.
+6. Technique rejection ("I didn't like that exercise", "that didn't help") -> technique_follow_up, flags include reject_technique and technique_rejection. Do not treat as anger/crisis.
+7. Ambiguous affirmations are context-dependent. Do not classify by the word alone.
+   - If the assistant's immediately previous question asked whether the user wants to try a specific technique/exercise, an affirmation means technique_follow_up with accept_technique.
+   - If the assistant's immediately previous question asked for context/details, an affirmation means contextual_followup with answering_previous_question.
+   - If the user says the prior technique helped/worked/calmed them, route positive_feedback, not accept_technique.
+   - "thanks", "thank you", "ok thanks", or "thanks for it" alone are polite acknowledgement, not acceptance and not positive outcome feedback.
+   - "yes thanks" only means acceptance when the immediately previous assistant turn was a technique consent offer.
+   - "no thanks" after a technique offer means the user declined the exercise for now; set exercise_consent="denied" and solution_preference="listen_only".
+   - A stored older technique is not enough for accept_technique; the immediately previous assistant turn must be a technique consent offer.
+8. Positive result after a technique -> positive_feedback.
+9. Asking for a previously mentioned item/name ("what was its name?", "which technique was that?") -> memory_query.
+10. New emotional disclosure ("I feel anxious about exams") -> therapeutic, not technique_request.
+11. User explicitly asks for an exercise, technique, or practical coping tool -> technique_request.
+12. Casual greeting or small talk without distress -> chitchat.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CONSENT & CORRECTION DETECTION RULES:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+You MUST analyze if the user's latest message contains a change or expression of exercise consent, solution preferences, or memory corrections/suppressions:
+
+1. Exercise Consent (`exercise_consent`):
+   - "denied": User explicitly refuses exercises, meditation, breathing drills, or says they don't want any techniques right now. E.g., "no exercises", "I don't want exercises".
+   - "allowed": User explicitly accepts an exercise offered or wants to do one. E.g., "sure, let's try", "yes please".
+   - "unknown": Default if no clear consent or denial is expressed in this turn.
+
+2. Solution Preference (`solution_preference`):
+   - "listen_only": User explicitly states they just want to talk, vent, be heard, or don't want advice/solutions/exercises. E.g., "just listen to me", "just need to vent".
+   - "advice_allowed": User asks for general advice, suggestions, or what to do, without explicitly asking for a clinical exercise/technique. E.g., "what should I do?", "any suggestions?".
+   - "exercise_requested": User explicitly asks for an exercise, technique, breathing drill, or accepts an offered one.
+   - "unknown": Default if no preference is expressed in this turn.
+
+3. Topic Suppression & Corrections (`suppressed_topics` and `active_issue_source`):
+   - If the user explicitly corrects a past topic or reason (e.g., "that has nothing to do with my teacher", "stop talking about my brother", "I already told you that's not the reason"):
+     * Set `suppression_signal` to "corrects_history".
+     * Set `suppressed_topic` to the specific label/person/subject they are correcting (e.g. "teacher", "brother", "uncle").
+     * Set `active_issue_source` to the new correct reason they state (e.g., if they say "it is actually about my exam stress", set active_issue_source to "exam stress"). Otherwise, set to null.
+   - Otherwise, set `suppression_signal` to "none", `suppressed_topic` to null, and `active_issue_source` to null.
+
+Context flag examples:
+- "About 3 weeks" -> route contextual_followup, flags ["duration_answer", "answering_previous_question"]
+- "Maths" -> route contextual_followup, flags ["subject_answer", "answering_previous_question"]
+- "What do you think about it?" -> route contextual_followup, flags ["asking_opinion", "refers_to_previous_topic"]
+- Short affirmation answering a context question -> route contextual_followup, flags ["answering_previous_question"]
+- "No, I shared everything" -> route contextual_followup, flags ["answering_previous_question", "no_more_details", "context_complete"]
+- Short affirmation after a technique consent offer -> route technique_follow_up, flags ["accept_technique"]
+- "I didn't like that exercise." -> route technique_follow_up, flags ["reject_technique", "technique_rejection"]
+- "What was its name?" -> route memory_query, flags ["technique_name_query", "refers_to_previous_technique"]
+- "I have been feeling anxious about exams." -> route therapeutic, flags ["new_emotional_disclosure"]
+- "I want to die." -> route crisis, flags ["self_harm_risk"]
+
+Therapeutic pacing:
+- Do not classify first emotional disclosures as technique_request unless the user explicitly asks for a technique/help.
+- Technique suggestions are allowed later only when the planner has enough context.
+- Disapproval/rejection is a mild negative complaint unless the wording contains strong distress.
+
+Recent conversation:
+{recent_context[-1200:] if recent_context else "None"}
+
+Stored user context:
+{user_context[:1200] if user_context else "None"}
+
+Current session summary/context:
+{session_formatted[:1000] if session_formatted else "None"}
+
+Latest user message:
+"{message}"
+
+Return exactly this JSON shape:
+{{
+  "route": "chitchat | therapeutic | contextual_followup | technique_request | technique_follow_up | memory_query | crisis | positive_feedback",
+  "confidence": 0.0,
+  "reasoning": "short explanation",
+  "emotional_register": "neutral | concern | complaint | distress | crisis | positive",
+  "context_flags": [],
+  "intensity_hint": 0.0,
+  "needs_full_pipeline": true,
+  "should_skip_mood_analysis": false,
+  "exercise_consent": "unknown | denied | allowed",
+  "solution_preference": "unknown | listen_only | advice_allowed | exercise_requested",
+  "suppression_signal": "none | corrects_history",
+  "suppressed_topic": null,
+  "active_issue_source": null,
+  "metadata": {{
+    "accepted_technique": null,
+    "technique_category": null,
+    "feedback_sentiment": null
+  }}
+}}
+
+JSON:"""
+
+
+def _normalize_smart_gate_result(parsed: dict, message: str, recent_context: str = "") -> dict:
+    metadata = parsed.get("metadata") if isinstance(parsed.get("metadata"), dict) else {}
+    raw_route = str(parsed.get("route", "therapeutic") or "therapeutic").strip().lower()
+    raw_route = raw_route.replace("-", "_").replace(" ", "_")
+    flags = _normalize_context_flags(parsed.get("context_flags"))
+    last_ai = last_ai_from_recent_context(recent_context)
+    technique_offer_pending = assistant_offered_technique(last_ai)
+
+    # Backward compatibility for older route labels that may still appear in
+    # logs, tests, or cached prompts while the new gate prompt rolls out.
+    if raw_route == "accept_technique":
+        raw_route = "technique_follow_up"
+        flags.append("accept_technique")
+    elif raw_route == "rejection":
+        raw_route = "technique_follow_up"
+        flags.extend(["reject_technique", "technique_rejection"])
+    elif raw_route == "list_techniques":
+        raw_route = "technique_request"
+        flags.append("list_techniques")
+
+    if raw_route not in _CORE_GATE_ROUTES:
+        raw_route = "therapeutic"
+
+    lower = (message or "").lower()
+    # Deterministic short-turn guardrail. LLMs often over-read "yes/thanks" as
+    # acceptance or recovery. In this app those meanings require context.
+    if raw_route != "crisis":
+        if is_no_thanks(message) and technique_offer_pending:
+            raw_route = "contextual_followup"
+            flags.extend(["decline_technique_offer", "technique_declined"])
+            metadata["feedback_sentiment"] = "declined"
+            parsed["exercise_consent"] = "denied"
+            parsed["solution_preference"] = "listen_only"
+        elif has_negative_feedback_signal(message):
+            raw_route = "technique_follow_up"
+            flags.extend(["reject_technique", "technique_rejection"])
+            metadata["feedback_sentiment"] = "ineffective"
+            metadata["feedback_type"] = "negative"
+        elif has_positive_outcome_signal(message):
+            raw_route = "positive_feedback"
+            flags.extend(["positive_feedback", "outcome_feedback"])
+            metadata["feedback_sentiment"] = metadata.get("feedback_sentiment") or "helpful"
+            metadata["feedback_type"] = "positive"
+            parsed["exercise_consent"] = "unknown"
+        elif technique_offer_pending and is_technique_acceptance_reply(message):
+            raw_route = "technique_follow_up"
+            flags.extend(["accept_technique", "technique_acceptance_answer"])
+            parsed["exercise_consent"] = "allowed"
+            parsed["solution_preference"] = "exercise_requested"
+        elif "?" in last_ai and bool({"yes", "yeah", "yep", "yup"} & set(plain_text(message).split())):
+            raw_route = "contextual_followup"
+            flags.extend(["answering_previous_question"])
+            parsed["exercise_consent"] = "unknown"
+            parsed["solution_preference"] = "unknown"
+        elif is_polite_acknowledgement(message):
+            raw_route = "chitchat"
+            flags.extend(["acknowledgement", "gratitude_acknowledgement"])
+            metadata["feedback_sentiment"] = None
+            metadata["feedback_type"] = None
+            parsed["exercise_consent"] = "unknown"
+            parsed["solution_preference"] = "unknown"
+
+        if "gratitude_acknowledgement" in flags or "low_signal_affirmation" in flags:
+            flags = [
+                flag for flag in flags
+                if flag not in {"accept_technique", "positive_feedback", "outcome_feedback"}
+            ]
+        if "decline_technique_offer" in flags or (
+            raw_route == "contextual_followup" and "answering_previous_question" in flags
+        ):
+            flags = [flag for flag in flags if flag != "accept_technique"]
+        if raw_route == "positive_feedback":
+            flags = [flag for flag in flags if flag != "accept_technique"]
+
+    if raw_route != "crisis" and _message_says_no_more_details(message):
+        raw_route = "contextual_followup"
+        flags.extend(["answering_previous_question", "no_more_details", "context_complete"])
+
+    if raw_route == "technique_follow_up":
+        if any(s in lower for s in ("didn't like", "did not like", "didn't help", "did not help", "not helpful", "not useful", "not working", "doesn't suit me", "does not suit me", "style suits me", "not for me", "didn't land", "did not land", "my mind argued with it")):
+            flags.extend(["reject_technique", "technique_rejection"])
+
+    if raw_route == "memory_query" and any(s in lower for s in ("what was", "its name", "which technique", "which exercise", "what was that called", "what was it called", "remind me what", "name of that")):
+        flags.extend(["technique_name_query", "refers_to_previous_technique"])
+
+    if raw_route == "positive_feedback":
+        flags.append("positive_feedback")
+
+    # Deduplicate after compatibility additions.
+    flags = _normalize_context_flags(flags)
+
+    confidence = _as_float(parsed.get("confidence"), 0.5)
+    register = str(parsed.get("emotional_register") or "neutral").strip().lower()
+    if register not in {"neutral", "concern", "complaint", "distress", "crisis", "positive"}:
+        register = {
+            "technique_follow_up": "complaint" if "reject_technique" in flags else "neutral",
+            "positive_feedback": "positive",
+            "crisis": "crisis",
+            "therapeutic": "concern",
+        }.get(raw_route, "neutral")
+
+    default_hint = {
+        "chitchat": 0.0,
+        "memory_query": 0.05,
+        "contextual_followup": 0.2,
+        "technique_follow_up": 0.3,
+        "positive_feedback": 0.1,
+        "crisis": 0.95,
+        "therapeutic": 0.45,
+        "technique_request": 0.35,
+    }.get(raw_route, 0.2)
+    intensity_hint = _as_float(parsed.get("intensity_hint"), default_hint)
+    if raw_route == "contextual_followup":
+        intensity_hint = min(intensity_hint, 0.35)
+    if "reject_technique" in flags or "technique_rejection" in flags:
+        intensity_hint = min(intensity_hint, 0.45)
+    if raw_route in {"memory_query", "chitchat"}:
+        intensity_hint = min(intensity_hint, 0.1 if raw_route == "memory_query" else 0.0)
+
+    needs_full = _as_bool(
+        parsed.get("needs_full_pipeline"),
+        raw_route in {"therapeutic", "contextual_followup", "technique_request", "crisis"},
+    )
+    should_skip_mood = _as_bool(
+        parsed.get("should_skip_mood_analysis"),
+        raw_route in _MOOD_SKIP_ROUTES,
+    )
+
+    # v11.0 Consent and Suppression fields
+    ex_consent = str(parsed.get("exercise_consent") or "unknown").strip().lower()
+    if ex_consent not in {"unknown", "denied", "allowed"}:
+        ex_consent = "unknown"
+
+    sol_pref = str(parsed.get("solution_preference") or "unknown").strip().lower()
+    if sol_pref not in {"unknown", "listen_only", "advice_allowed", "exercise_requested"}:
+        sol_pref = "unknown"
+
+    sup_sig = str(parsed.get("suppression_signal") or "none").strip().lower()
+    if sup_sig not in {"none", "corrects_history"}:
+        sup_sig = "none"
+
+    sup_topic = parsed.get("suppressed_topic")
+    if sup_topic:
+        sup_topic = str(sup_topic).strip()
+    else:
+        sup_topic = None
+
+    act_issue = parsed.get("active_issue_source")
+    if act_issue:
+        act_issue = str(act_issue).strip()
+    else:
+        act_issue = None
+
+    return {
+        "route": raw_route,
+        "confidence": confidence,
+        "reasoning": str(parsed.get("reasoning") or ""),
+        "emotional_register": register,
+        "context_flags": flags,
+        "intensity_hint": intensity_hint,
+        "needs_full_pipeline": bool(needs_full),
+        "should_skip_mood_analysis": bool(should_skip_mood),
+        "run_full_pipeline": bool(needs_full),
+        "metadata": metadata,
+        "exercise_consent": ex_consent,
+        "solution_preference": sol_pref,
+        "suppression_signal": sup_sig,
+        "suppressed_topic": sup_topic,
+        "active_issue_source": act_issue,
+    }
 
 async def smart_pipeline_gate(message: str, recent_context: str = "", user_context: str = "", session_context: dict = None) -> dict:
     """
@@ -797,6 +1384,31 @@ async def smart_pipeline_gate(message: str, recent_context: str = "", user_conte
                 "formatted_context": ""
             }
 
+        deterministic = deterministic_crisis_safety_net(message)
+        if deterministic.get("crisis_detected"):
+            level = deterministic.get("crisis_level", "medium")
+            print(f"[GATE] Safety-net crisis route | level={level} | reason={deterministic.get('reason')}")
+            return {
+                "route": "crisis",
+                "confidence": 0.99,
+                "reasoning": deterministic.get("reason", "deterministic crisis safety net"),
+                "emotional_register": "crisis",
+                "context_flags": ["self_harm_risk", "deterministic_safety_net"],
+                "intensity_hint": 0.95,
+                "needs_full_pipeline": True,
+                "should_skip_mood_analysis": False,
+                "run_full_pipeline": True,
+                "exercise_consent": "unknown",
+                "solution_preference": "unknown",
+                "suppression_signal": "none",
+                "suppressed_topic": None,
+                "active_issue_source": None,
+               
+                "metadata": {"crisis_level": level, "source": deterministic.get("source")},
+            }
+
+      
+
         # Build context sections
         user_bg_section = ""
         if user_context and user_context.strip():
@@ -824,11 +1436,21 @@ async def smart_pipeline_gate(message: str, recent_context: str = "", user_conte
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
             "STEP 1 → accept_technique (HIGHEST NON-CRISIS PRIORITY — check after the safety override)\n"
-            "  Does the user EXPLICITLY name/request a specific stored exercise, OR give a short yes/okay\n"
-            "  immediately after the assistant named one specific exercise/technique from the database?\n"
-            "  → YES: route = accept_technique. STOP. Ignore mood, sadness, everything else.\n"
+            "  Does the user EXPLICITLY request/name a specific exercise, OR accept a technique the assistant already offered?\n"
+            "  Two cases:\n"
+            "    Case A: User names a specific exercise ('can i try box breathing', 'give me timeline journal')\n"
+            "            → route = accept_technique, accepted_technique = exercise name from user\n"
+            "    Case B: User explicitly asks for an exercise recommendation ('give me an exercise', 'what exercise should i try?')\n"
+            "            → route = accept_technique, BUT you MUST also recommend ONE specific exercise\n"
+            "            → REQUIRED: Populate accepted_technique with YOUR recommended exercise name\n"
+            "            → Pick the BEST exercise for their current emotional state/needs\n"
+            "            → Examples: if user is anxious → recommend 'Box Breathing'\n"
+            "                        if user wants journaling → recommend 'Timeline Journal'\n"
+            "                        if user is stressed → recommend '4-7-8 Breathing'\n\n"
+            "  → YES to either case: route = accept_technique. STOP. Ignore mood, sadness, everything else.\n"
             "  Key signals: exercise name mentioned, 'can I try X', 'I want X',\n"
-            "               'show me X', 'give me X exercise', 'yes' ONLY when AI just named a specific technique.\n"
+            "               'show me X', 'give me X exercise', 'yes' ONLY when AI just named a specific technique,\n"
+            "               'recommend an exercise', 'what exercise should i try', 'give me something to try'.\n"
             "  Generic agreement after advice/reframing/exploring an idea is NOT accept_technique.\n\n"
             "  ✅ MUST be accept_technique:\n"
             "    'can i try timeline journal'                 → accept_technique (user chose it)\n"
@@ -839,16 +1461,55 @@ async def smart_pipeline_gate(message: str, recent_context: str = "", user_conte
             "    'give me breathing exercise'                 → accept_technique\n"
             "    'im sad but can i try timeline journal'      → accept_technique (exercise named overrides mood)\n"
             "    'ok let me try the body scan'                → accept_technique\n"
-            "    'start the progressive muscle relaxation'    → accept_technique\n\n"
-            "  ❌ NOT accept_technique:\n"
-            "    'im sad' alone                               → therapeutic (no exercise mentioned)\n"
-            "    'show me exercises' (general/plural)         → list_techniques\n"
-            "    'what exercises help anxiety?' (browsing)    → list_techniques or therapeutic\n"
-            "    'the exercise helped a little'               → therapeutic (feedback, not request)\n"
+            "    'start the progressive muscle relaxation'    → accept_technique\n"
+            "    'can you recommend an exercise?'             → accept_technique (YOU recommend ONE — MUST populate accepted_technique)\n"
+            "    'i want to try an exercise'                  → accept_technique (YOU recommend ONE — MUST populate accepted_technique)\n"
+            "    'give me something to help'                  → accept_technique (YOU recommend ONE — MUST populate accepted_technique)\n"
+            "    'what exercise should i do?'                 → accept_technique (YOU recommend ONE — MUST populate accepted_technique)\n"
+            "    'im not sad but just want an exercise to try' → accept_technique (YOU recommend ONE — MUST populate accepted_technique)\n"
+            "    'give me an exercise'                        → accept_technique (YOU recommend ONE — MUST populate accepted_technique)\n\n"
+            "  ❌ NOT accept_technique — these are FEEDBACK (route = therapeutic):\n"
+            "  ★★★ CRITICAL RULE v9.0 ★★★ (STRICT — violating this breaks the pipeline)\n"
+            "  After AI gave exercise steps or explained a technique:\n"
+            "    'yes it is helping me'                       → MUST be therapeutic (positive feedback)\n"
+            "    'yes it helped'                              → MUST be therapeutic (positive feedback)\n"
+            "    'it is helping'                              → MUST be therapeutic (positive feedback)\n"
+            "    'this is helping'                            → MUST be therapeutic (positive feedback)\n"
+            "    'yes it's good'                              → MUST be therapeutic (positive feedback)\n"
+            "    'yes its good'                               → MUST be therapeutic (positive feedback)\n"
+            "    'yes that's good'                            → MUST be therapeutic (positive feedback)\n"
+            "    'yes, that's good'                           → MUST be therapeutic (positive feedback)\n"
+            "    'yeah it worked'                             → MUST be therapeutic (positive feedback)\n"
+            "    'feeling a bit better'                       → MUST be therapeutic (improvement feedback)\n"
+            "    'it helped a little'                         → MUST be therapeutic (partial positive)\n"
+            "    'that was good'                              → MUST be therapeutic (positive feedback)\n"
+            "    'i feel calmer now'                          → MUST be therapeutic (outcome feedback)\n"
+            "    'yes that helped'                            → MUST be therapeutic (positive feedback)\n"
+            "    'much better thank you'                      → MUST be therapeutic (positive outcome)\n"
+            "    'ok that actually worked'                    → MUST be therapeutic (positive feedback)\n"
+            "    'yes it's working'                           → MUST be therapeutic (positive feedback)\n"
+            "    'feeling better'                             → MUST be therapeutic (positive feedback)\n\n"
+            "    WHY: These ALL indicate the EXERCISE ALREADY WORKED. The user is not requesting a new exercise.\n"
+            "    They are giving FEEDBACK on the exercise the AI ALREADY PROVIDED.\n"
+            "    Misrouting to accept_technique causes the system to try fetching the same exercise again (pipeline error).\n"
+            "    Route to therapeutic so the system can LOG this feedback as a positive outcome.\n\n"
+            "  KEY DISTINCTION:\n"
+            "    'yes' AFTER AI named a specific technique not yet given steps    → accept_technique (new request)\n"
+            "    'yes' AFTER AI already gave the exercise steps                  → therapeutic (feedback)\n"
+            "    'yes it helped' in ANY form, ANY timing                         → ALWAYS therapeutic (feedback)\n"
+            "    'can i try X' or 'give me X' (NEW exercise name)              → ALWAYS accept_technique\n"
+            "    'yes it's good' after AI provided steps                         → ALWAYS therapeutic (feedback)\n\n"
+            "  Other NOT accept_technique cases:\n"
+            "    'im sad' alone                               → therapeutic (no exercise mentioned, no recommendation requested)\n"
+            "    'show me exercises' (general/plural)         → list_techniques (user wants to browse, not single recommendation)\n"
+            "    'what exercises help anxiety?' (browsing)    → list_techniques or therapeutic (user exploring options, not requesting one)\n"
+            "    'the exercise helped a little'               → therapeutic (positive feedback)\n"
             "    'yes i do' after AI said 'explore this idea' → therapeutic (not a named DB technique)\n"
             "    'yes' after AI offered a reframe/perspective → therapeutic (not a technique acceptance)\n\n"
-            "  Metadata: accepted_technique = exact exercise name from user OR exact technique name from AI's last message.\n"
-            "  If no exact technique name exists, do NOT use accept_technique.\n\n"
+            "  Metadata: accepted_technique = MUST BE POPULATED with exact exercise name from user OR your recommended exercise name.\n"
+            "  CRITICAL: If user asks for a recommendation, you MUST choose ONE best-fit exercise and put its name here.\n"
+            "  Do NOT leave accepted_technique as null for accept_technique route.\n"
+            "  If no exact technique name exists AND user didn't ask for recommendation, do NOT use accept_technique.\n\n"
             "STEP 2 → crisis (OVERRIDES all non-technique routes)\n"
             "  Does the message contain self-harm, suicidal ideation, or immediate danger?\n"
             "  → YES: route = crisis. STOP.\n"
@@ -867,11 +1528,25 @@ async def smart_pipeline_gate(message: str, recent_context: str = "", user_conte
             "    'i hate myself sometimes'                    → therapeutic (self-criticism)\n\n"
 
             "STEP 3 → list_techniques\n"
-            "  Does the user want a LIST of multiple exercises (NOT one specific)?\n"
-            "  → YES: route = list_techniques. STOP.\n"
-            "  Key signals: 'list exercises', 'show me all techniques',\n"
-            "               'what exercises do you have', 'show me breathing techniques',\n"
-            "               'what can help me?', 'what options do I have?'\n"
+            "  IMPORTANT NEW RULE v9.0: This route is NOW for explicit list/browse requests ONLY.\n"
+            "  Does the user explicitly ask for a LIST or BROWSE multiple exercises?\n"
+            "  → YES: route = list_techniques. STOP. Metadata will include category list.\n"
+            "  Key signals: 'list exercises', 'show me all techniques', 'what exercises do you have',\n"
+            "               'show me all breathing techniques', 'browse exercises', 'what options?'\n\n"
+            "  CRITICAL: If user says 'can you recommend an exercise?' or 'give me an exercise to try'\n"
+            "  → This is STILL accept_technique with metadata.accepted_technique = null initially.\n"
+            "  The AI will select ONE best-fit exercise and populate metadata.accepted_technique.\n"
+            "  Do NOT route to list_techniques for single recommendations.\n\n"
+            "  ❌ NOT list_techniques:\n"
+            "    'can you recommend an exercise?'             → accept_technique (AI picks ONE)\n"
+            "    'i want to try an exercise'                  → accept_technique (AI recommends ONE)\n"
+            "    'give me something to help'                  → accept_technique (AI picks ONE)\n"
+            "    'what exercise should i do?'                 → accept_technique (AI recommends ONE)\n\n"
+            "  ✅ MUST be list_techniques:\n"
+            "    'what exercises do you have?'                → list_techniques (user wants to browse)\n"
+            "    'show me all breathing techniques'           → list_techniques (user wants options)\n"
+            "    'list all the exercises'                     → list_techniques (user wants full list)\n"
+            "    'what are my options?'                       → list_techniques (browsing)\n\n"
             "  Metadata: technique_category = the category they asked about (Breathing/Mindfulness/CBT/DBT/Journaling/Behavioral Activation) or null if general\n\n"
 
             "STEP 4 → chitchat\n"
@@ -930,6 +1605,17 @@ async def smart_pipeline_gate(message: str, recent_context: str = "", user_conte
             "    'that exercise helped a little but im still anxious' → therapeutic (post-exercise feedback)\n"
             "    'i feel stuck in negative thinking'          → therapeutic\n"
             "    'im having a really hard day'                → therapeutic\n\n"
+            "  ★★★ FEEDBACK RESPONSES (v9.0) ★★★\n"
+            "  These indicate an exercise ALREADY WORKED. Log as positive feedback (NOT new exercise request):\n"
+            "    'yes it is helping me' [AI gave exercise]    → therapeutic (positive feedback)\n"
+            "    'yes it helped' [AI gave exercise]           → therapeutic (exercise worked feedback)\n"
+            "    'yes it's good' [AI gave exercise steps]     → therapeutic (positive feedback)\n"
+            "    'yes its good' [AI gave exercise steps]      → therapeutic (positive feedback)\n"
+            "    'feeling better after that'                  → therapeutic (positive outcome feedback)\n"
+            "    'that actually worked'                       → therapeutic (positive feedback)\n"
+            "    'yes it's working'                           → therapeutic (positive feedback)\n"
+            "    'feeling calmer now'                         → therapeutic (positive feedback)\n"
+            "    'feeling a bit better'                       → therapeutic (positive feedback)\n\n"
 
             + user_bg_section
             + session_context_section
@@ -957,86 +1643,97 @@ async def smart_pipeline_gate(message: str, recent_context: str = "", user_conte
             "    \"accepted_technique\": \"<exact exercise name or null>\",\n"
             "    \"technique_category\": \"<Breathing|Mindfulness|CBT|DBT|Journaling|Behavioral Activation or null>\",\n"
             "    \"feedback_category\": \"<category if post-exercise feedback, or null>\",\n"
-            "    \"feedback_sentiment\": \"<ineffective|partially_helpful|not_suitable or null>\"\n"
-            "  }\n"
+"    \"feedback_sentiment\": \"<helpful|partially_helpful|ineffective|not_suitable or null>\"\n"
+"    \"feedback_type\": \"<positive|negative|neutral or null>  — set positive when user confirms exercise helped\"\n"            "  }\n"
             "}\n\n"
             "JSON:"
         )
 
+        # v10.1: use the compact context-aware therapeutic gate prompt. The
+        # older long prompt above is kept only as historical fallback text; this
+        # assignment is what the LLM actually receives.
+        prompt = _build_smart_gate_prompt(
+            message=message,
+            recent_context=recent_context,
+            user_context=user_context,
+            session_context=session_context,
+        )
+
         # FIX v8.7: Was calling MODEL_LIGHT (8b) — 7-route classification needs MODEL_HEAVY (70b)
         print(f"[GATE v8.7] LLM-based priority routing starting ({MODEL_HEAVY})...")
-        content = await _call_groq_async(
+        content = await _call_gemini_async(
             prompt,
             model=MODEL_HEAVY,
             temperature=0.0,
-            max_tokens=250,
+            max_tokens=1024,
         )
 
-        if content:
-            parsed = _parse_json_from_llm(content)
-            if parsed and "route" in parsed:
-                route      = parsed.get("route", "therapeutic")
-                confidence = parsed.get("confidence", 0.5)
-                reasoning  = parsed.get("reasoning", "")
-                metadata   = parsed.get("metadata") or {}
-                valid_routes = {
-                    "accept_technique", "chitchat", "memory_query",
-                    "list_techniques", "rejection", "crisis", "therapeutic",
-                }
-                if route not in valid_routes:
-                    print(f"[GATE] Invalid route '{route}' from LLM; defaulting to therapeutic")
-                    route = "therapeutic"
+        if not content:
+            logger.error(f"[GATE] LLM returned empty content")
+            print("[GATE] ⚠️  Empty response from LLM")
+            raise ValueError("LLM returned no content")
 
-                try:
-                    confidence = float(confidence)
-                except Exception:
-                    confidence = 0.5
-                confidence = max(0.0, min(1.0, confidence))
+        parsed = _parse_json_from_llm(content)
+        if not parsed:
+            logger.error(f"[GATE] Failed to parse JSON from LLM response: {content[:200]}")
+            print(f"[GATE] ⚠️  Invalid JSON from LLM")
+            raise ValueError("Could not parse JSON from LLM response")
 
-                if route == "accept_technique" and not metadata.get("accepted_technique"):
-                    print("[GATE] accept_technique missing exact technique name; downgrading to therapeutic")
-                    route = "therapeutic"
+        if "route" not in parsed:
+            logger.error(f"[GATE] Parsed JSON missing 'route' key: {parsed}")
+            print(f"[GATE] ⚠️  Missing 'route' in LLM response")
+            raise KeyError("LLM response missing 'route' key")
 
-                # NEW v8.7: Fetch DB data based on route (BEFORE therapeutic analysis)
-                if route == "accept_technique" and metadata.get("accepted_technique"):
-                    # User explicitly chose exercise -> fetch from DB
-                    exercise_data = await _get_technique_from_db(metadata["accepted_technique"])
-                    if exercise_data:
-                        metadata["exercise_data"] = exercise_data
-                        print(f"[GATE] ✅ Exercise accepted | name={exercise_data['name']} | category={exercise_data['category']}")
-                    else:
-                        print(f"[GATE] ⚠️  Exercise not found in DB: {metadata['accepted_technique']}")
+        normalized = _normalize_smart_gate_result(parsed, message, recent_context)
+        
+        
+        route = normalized["route"]
+        confidence = normalized["confidence"]
+        reasoning = normalized["reasoning"]
+        metadata = normalized["metadata"]
+        flags = normalized["context_flags"]
 
-                elif route == "list_techniques" and metadata.get("technique_category"):
-                    # User wants exercise list -> fetch all from category
-                    category_exercises = await _get_techniques_by_category(metadata["technique_category"])
-                    if category_exercises:
-                        metadata["category_exercises"] = category_exercises
-                        print(f"[GATE] 📋 Category list | category={metadata['technique_category']} | count={len(category_exercises)}")
+        if (
+            route in {"technique_follow_up", "technique_request"}
+            and metadata.get("accepted_technique")
+        ):
+            exercise_data = await _get_technique_from_db(metadata["accepted_technique"])
+            if exercise_data:
+                metadata["exercise_data"] = exercise_data
+                print(f"[GATE] Exercise context loaded | name={exercise_data['name']} | category={exercise_data['category']}")
+            else:
+                print(f"[GATE] Exercise not found in DB: {metadata['accepted_technique']}")
+        elif "list_techniques" in flags and metadata.get("technique_category"):
+            category_exercises = await _get_techniques_by_category(metadata["technique_category"])
+            if category_exercises:
+                metadata["category_exercises"] = category_exercises
+                print(f"[GATE] Category list context | category={metadata['technique_category']} | count={len(category_exercises)}")
 
-                # Determine if full pipeline should run
-                run_full_pipeline = route in ("therapeutic", "crisis")
-
-                print(f"[GATE] Route: {route.upper()} ({confidence:.0%}) | Pipeline: {'YES' if run_full_pipeline else 'SKIP'} | Reason: {reasoning}")
-
-                return {
-                    "route":             route,
-                    "confidence":        confidence,
-                    "reasoning":         reasoning,
-                    "run_full_pipeline": run_full_pipeline,
-                    "metadata":          metadata,
-                }
+        normalized["metadata"] = metadata
+        print(
+            f"[GATE] Route: {route.upper()} ({confidence:.0%}) | "
+            f"Full pipeline: {'YES' if normalized['needs_full_pipeline'] else 'SKIP'} | "
+            f"Mood skip: {'YES' if normalized['should_skip_mood_analysis'] else 'NO'} | "
+            f"Flags: {flags} | Reason: {reasoning}"
+        )
+        return normalized
 
     except Exception as e:
-        logger.warning(f"[GATE] LLM routing failed: {e}")
+        logger.error(f"[GATE] LLM routing FAILED with exception: {type(e).__name__}: {e}", exc_info=True)
+        print(f"[GATE] ❌ Error - exception during routing: {e}")
 
-    print("[GATE] Error - defaulting to therapeutic pipeline")
+    print("[GATE] ⚠️  Error - defaulting to therapeutic pipeline")
     return {
-        "route":             "therapeutic",
-        "confidence":        0.0,
-        "reasoning":         "gate_error",
+        "route": "therapeutic",
+        "confidence": 0.0,
+        "reasoning": "gate_error",
+        "emotional_register": "concern",
+        "context_flags": ["gate_error"],
+        "intensity_hint": 0.45,
+        "needs_full_pipeline": True,
+        "should_skip_mood_analysis": False,
         "run_full_pipeline": True,
-        "metadata":          {},
+        "metadata": {},
     }
 
 

@@ -1,92 +1,81 @@
 'use client'
 
-import { useState, useRef, KeyboardEvent } from 'react'
-import { Send, Mic, MicOff, Loader } from 'lucide-react'
+import { KeyboardEvent, useRef, useState } from 'react'
+import { Loader, Mic, MicOff, Send, ShieldCheck } from 'lucide-react'
+import { devError, devLog } from '@/lib/logger'
 
-// ─── WAV Encoder (Web Audio API → 16kHz mono WAV) ──────────────────────────
-// Runs entirely in the browser — no ffmpeg/system dependencies.
-// Output is a standard RIFF/WAV file that scipy, librosa, and Whisper can all read.
+type SpeechRecognitionConstructor = new () => SpeechRecognitionLike
 
-function writeString(view: DataView, offset: number, str: string) {
-  for (let i = 0; i < str.length; i++) {
-    view.setUint8(offset + i, str.charCodeAt(i))
+interface SpeechRecognitionLike {
+  continuous: boolean
+  interimResults: boolean
+  lang: string
+  onstart: (() => void) | null
+  onresult: ((event: SpeechRecognitionEventLike) => void) | null
+  onerror: ((event: { error: string }) => void) | null
+  onend: (() => void) | null
+  start: () => void
+  stop: () => void
+}
+
+interface SpeechRecognitionEventLike {
+  resultIndex: number
+  results: ArrayLike<{
+    isFinal: boolean
+    0: { transcript: string }
+  }>
+}
+
+declare global {
+  interface Window {
+    SpeechRecognition?: SpeechRecognitionConstructor
+    webkitSpeechRecognition?: SpeechRecognitionConstructor
   }
 }
 
-function floatTo16BitPCM(output: DataView, offset: number, input: Float32Array) {
-  for (let i = 0; i < input.length; i++, offset += 2) {
-    const s = Math.max(-1, Math.min(1, input[i]))
-    output.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true)
-  }
-}
-
-function encodeWav(samples: Float32Array, sampleRate: number): ArrayBuffer {
-  const numSamples = samples.length
-  const buf = new ArrayBuffer(44 + numSamples * 2)
-  const view = new DataView(buf)
-  writeString(view, 0, 'RIFF')
-  view.setUint32(4, 36 + numSamples * 2, true)
-  writeString(view, 8, 'WAVE')
-  writeString(view, 12, 'fmt ')
-  view.setUint32(16, 16, true)             // chunk size
-  view.setUint16(20, 1, true)              // PCM format
-  view.setUint16(22, 1, true)              // mono
-  view.setUint32(24, sampleRate, true)     // sample rate
-  view.setUint32(28, sampleRate * 2, true) // byte rate
-  view.setUint16(32, 2, true)              // block align
-  view.setUint16(34, 16, true)             // bits per sample
-  writeString(view, 36, 'data')
-  view.setUint32(40, numSamples * 2, true)
-  floatTo16BitPCM(view, 44, samples)
-  return buf
-}
-
-async function blobToWavBase64(blob: Blob, targetSampleRate = 16000): Promise<string> {
-  const arrayBuffer = await blob.arrayBuffer()
-  // Decode WebM/Opus/OGG → PCM float using the browser's built-in codec
-  const audioCtx = new AudioContext({ sampleRate: targetSampleRate })
-  const decoded = await audioCtx.decodeAudioData(arrayBuffer)
-  audioCtx.close()
-  // Mix down to mono (take channel 0)
-  const mono = decoded.getChannelData(0)
-  // Encode as 16-bit PCM WAV
-  const wavBuffer = encodeWav(mono, targetSampleRate)
-  const wavBlob = new Blob([wavBuffer], { type: 'audio/wav' })
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.readAsDataURL(wavBlob)
-    reader.onloadend = () => resolve(reader.result as string)
-    reader.onerror = reject
-  })
-}
-// ───────────────────────────────────────────────────────────────────────────
+const PROMPTS = [
+  'I want to talk through what happened today.',
+  'Can you help me understand this feeling?',
+  'I need support, but not an exercise yet.',
+]
 
 export function ChatInput({
   isLoading,
+  postCrisisSafetyCheck = false,
   onSend,
 }: {
   isLoading: boolean
+  postCrisisSafetyCheck?: boolean
   onSend: (text: string, audioData?: string) => void
 }) {
   const [input, setInput] = useState('')
   const [isRecording, setIsRecording] = useState(false)
   const [isProcessingAudio, setIsProcessingAudio] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
-  const recognitionRef = useRef<any>(null)
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null)
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioChunksRef = useRef<Blob[]>([])
+  const audioMimeTypeRef = useRef('audio/webm')
+  const transcriptRef = useRef('')
+  const recordingFinalizedRef = useRef(false)
 
-  const handleSend = () => {
-    const text = input.trim()
-    if (!text || isLoading) return
-    onSend(text)
-    setInput('')
+  const resetTextarea = () => {
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
   }
 
-  const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
+  const submitText = (text: string) => {
+    const trimmed = text.trim()
+    if (!trimmed || isLoading || isProcessingAudio) return
+    onSend(trimmed)
+    setInput('')
+    resetTextarea()
+  }
+
+  const handleSend = () => submitText(input)
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault()
       handleSend()
     }
   }
@@ -95,193 +84,240 @@ export function ChatInput({
     const el = textareaRef.current
     if (!el) return
     el.style.height = 'auto'
-    el.style.height = `${Math.min(el.scrollHeight, 160)}px`
+    el.style.height = `${Math.min(el.scrollHeight, 170)}px`
   }
 
-  // Convert captured chunks to WAV and call onSend
+  const blobToDataUrl = (blob: Blob) =>
+    new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onloadend = () => resolve(reader.result as string)
+      reader.onerror = reject
+      reader.readAsDataURL(blob)
+    })
+
   const sendWithAudio = async (chunks: Blob[], text: string) => {
+    const trimmed = text.trim()
     setIsProcessingAudio(true)
     try {
       if (chunks.length > 0) {
-        const rawBlob = new Blob(chunks, { type: 'audio/webm' })
-        console.log('[VOICE] Raw blob size:', rawBlob.size, 'bytes — converting to WAV...')
-        const wavBase64 = await blobToWavBase64(rawBlob)
-        console.log('[VOICE] Converted to 16kHz mono WAV — sending with text:', text)
-        onSend(text, wavBase64)
-      } else {
-        console.warn('[VOICE] No audio chunks — sending text only')
-        onSend(text)
+        const rawBlob = new Blob(chunks, { type: audioMimeTypeRef.current })
+        const rawAudioData = await blobToDataUrl(rawBlob)
+        try {
+          const { blobToWavBase64 } = await import('@/lib/audioWav')
+          const wavBase64 = await blobToWavBase64(rawBlob)
+          devLog('[VOICE] Sending WAV audio payload', { transcriptChars: trimmed.length, audioChars: wavBase64.length })
+          onSend(trimmed, wavBase64)
+        } catch (err) {
+          devError('[VOICE] WAV conversion failed, sending raw audio:', err)
+          devLog('[VOICE] Sending raw audio payload', { transcriptChars: trimmed.length, audioChars: rawAudioData.length })
+          onSend(trimmed, rawAudioData)
+        }
+      } else if (trimmed) {
+        onSend(trimmed)
       }
     } catch (err) {
-      console.error('[VOICE] WAV conversion failed — sending text only:', err)
-      onSend(text)
+      devError('[VOICE] Audio send failed, sending transcript only:', err)
+      if (trimmed) onSend(trimmed)
     } finally {
       setIsProcessingAudio(false)
       setInput('')
+      resetTextarea()
     }
   }
 
-  const toggleRecording = () => {
-    if (isRecording) {
+  const finalizeRecording = (textOverride?: string) => {
+    if (recordingFinalizedRef.current) return
+    recordingFinalizedRef.current = true
+
+    const transcript = (textOverride ?? transcriptRef.current ?? input).trim()
+    const recorder = mediaRecorderRef.current
+    const send = () => {
+      void sendWithAudio([...audioChunksRef.current], transcript).finally(() => {
+        recognitionRef.current = null
+        mediaRecorderRef.current = null
+      })
+    }
+
+    try {
       recognitionRef.current?.stop()
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-        mediaRecorderRef.current.stop()
-        mediaRecorderRef.current.stream.getTracks().forEach((t: any) => t.stop())
+    } catch (err) {
+      devError('[VOICE] Recognition stop failed:', err)
+    }
+
+    if (recorder && recorder.state !== 'inactive') {
+      recorder.onstop = send
+      try {
+        recorder.requestData()
+      } catch {
+        // requestData is best-effort; stop still flushes data in supported browsers.
       }
+      recorder.stop()
+      recorder.stream.getTracks().forEach((track) => track.stop())
+    } else {
+      send()
+    }
+
+    setIsRecording(false)
+  }
+
+  const stopRecording = () => {
+    finalizeRecording()
+  }
+
+  const toggleRecording = async () => {
+    if (isRecording) {
+      stopRecording()
       return
     }
 
     try {
-      const SpeechRecognition =
-        (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
       if (!SpeechRecognition) {
         alert('Voice input is not supported in this browser. Try Chrome or Edge.')
         return
       }
 
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : MediaRecorder.isTypeSupported('audio/webm')
+          ? 'audio/webm'
+          : ''
+
+      const mediaRecorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream)
+
+      mediaRecorderRef.current = mediaRecorder
+      audioMimeTypeRef.current = mediaRecorder.mimeType || mimeType || 'audio/webm'
+      audioChunksRef.current = []
+      transcriptRef.current = ''
+      recordingFinalizedRef.current = false
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) audioChunksRef.current.push(event.data)
+      }
+      mediaRecorder.start(250)
+
       const recognition = new SpeechRecognition()
       recognition.continuous = true
       recognition.interimResults = true
       recognition.lang = 'en-US'
-
       recognition.onstart = () => setIsRecording(true)
-
-      recognition.onresult = (event: any) => {
+      recognition.onerror = (event) => {
+        devError('[VOICE] Recognition error:', event.error)
+        finalizeRecording()
+      }
+      recognition.onend = () => {
+        setIsRecording(false)
+        if (!recordingFinalizedRef.current && mediaRecorderRef.current?.state !== 'inactive') {
+          finalizeRecording()
+        }
+      }
+      recognition.onresult = (event) => {
         let finalTranscript = ''
-        for (let i = event.resultIndex; i < event.results.length; ++i) {
+        for (let i = event.resultIndex; i < event.results.length; i += 1) {
           if (event.results[i].isFinal) finalTranscript += event.results[i][0].transcript
         }
 
-        if (finalTranscript) {
-          const trimmed = finalTranscript.trim()
-          setInput(trimmed)
-          recognition.stop()
-
-          if (
-            mediaRecorderRef.current &&
-            mediaRecorderRef.current.state !== 'inactive'
-          ) {
-            // Recorder still running → stop and send in onstop callback
-            mediaRecorderRef.current.onstop = () => {
-              sendWithAudio([...audioChunksRef.current], trimmed)
-            }
-            mediaRecorderRef.current.stop()
-            mediaRecorderRef.current.stream.getTracks().forEach((t: any) => t.stop())
-          } else {
-            // Recorder already stopped (user clicked stop button) → send immediately
-            sendWithAudio([...audioChunksRef.current], trimmed)
-          }
-        }
+        if (!finalTranscript) return
+        const trimmed = finalTranscript.trim()
+        transcriptRef.current = [transcriptRef.current, trimmed].filter(Boolean).join(' ').trim()
+        setInput(trimmed)
+        finalizeRecording(transcriptRef.current)
       }
-
-      // Start MediaRecorder in parallel with SpeechRecognition
-      navigator.mediaDevices
-        .getUserMedia({ audio: true })
-        .then((stream) => {
-          const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-            ? 'audio/webm;codecs=opus'
-            : MediaRecorder.isTypeSupported('audio/webm')
-            ? 'audio/webm'
-            : ''
-
-          const mediaRecorder = mimeType
-            ? new MediaRecorder(stream, { mimeType })
-            : new MediaRecorder(stream)
-
-          mediaRecorderRef.current = mediaRecorder
-          audioChunksRef.current = []
-
-          mediaRecorder.ondataavailable = (e) => {
-            if (e.data.size > 0) audioChunksRef.current.push(e.data)
-          }
-
-          // Collect a chunk every 250ms for reliability
-          mediaRecorder.start(250)
-          console.log('[VOICE] MediaRecorder started | mimeType:', mediaRecorder.mimeType)
-        })
-        .catch((err) => console.error('[VOICE] Mic access error:', err))
-
-      recognition.onerror = (event: any) => {
-        console.error('[VOICE] Recognition error:', event.error)
-        setIsRecording(false)
-      }
-
-      recognition.onend = () => setIsRecording(false)
 
       recognition.start()
       recognitionRef.current = recognition
     } catch (err) {
-      console.error(err)
+      devError('[VOICE] Recording start failed:', err)
+      mediaRecorderRef.current?.stream.getTracks().forEach((track) => track.stop())
       setIsRecording(false)
     }
   }
 
   return (
-    <div className="bg-white border-t border-gray-100 px-5 py-4 shrink-0">
-      <div className="max-w-3xl mx-auto">
-        <div className="flex items-end gap-3">
-          {/* Textarea */}
-          <div className="flex-1 relative">
+    <footer className="shrink-0 border-t border-slate-200 bg-white px-4 py-4">
+      <div className="mx-auto max-w-4xl space-y-3">
+        {postCrisisSafetyCheck ? (
+          <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-800">
+            Safety check active: reply whether you are safe now or still in immediate danger.
+          </div>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {PROMPTS.map((prompt) => (
+              <button
+                key={prompt}
+                type="button"
+                onClick={() => setInput(prompt)}
+                className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-600 transition-colors hover:border-slate-300 hover:bg-white"
+              >
+                {prompt}
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div className="rounded-2xl border border-slate-200 bg-slate-50 p-2 shadow-sm focus-within:border-slate-300 focus-within:bg-white">
+          <div className="flex items-end gap-2">
             <textarea
               ref={textareaRef}
               value={input}
-              onChange={(e) => setInput(e.target.value)}
+              onChange={(event) => setInput(event.target.value)}
               onKeyDown={handleKeyDown}
               onInput={handleInput}
               placeholder={
                 isProcessingAudio
-                  ? 'Analysing voice...'
+                  ? 'Analyzing voice...'
                   : isRecording
-                  ? 'Listening... click mic to stop'
-                  : 'Type your thoughts here...'
+                    ? 'Listening... click mic to stop'
+                    : postCrisisSafetyCheck
+                      ? 'Are you safe now, or still in danger?'
+                      : 'Share what is happening, or ask for support...'
               }
               rows={1}
-              className="w-full resize-none px-4 py-3 pr-4 text-sm text-gray-800 placeholder-gray-400 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-300 focus:border-purple-300 transition-all"
-              style={{ minHeight: '48px', maxHeight: '160px' }}
+              className="min-h-12 max-h-[170px] flex-1 resize-none bg-transparent px-3 py-3 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none"
               disabled={isRecording || isProcessingAudio}
             />
+
+            <button
+              type="button"
+              onClick={toggleRecording}
+              disabled={isLoading || isProcessingAudio}
+              title={isRecording ? 'Stop recording' : 'Voice message'}
+              className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl transition-all ${
+                isRecording
+                  ? 'bg-rose-600 text-white shadow-sm'
+                  : isProcessingAudio
+                    ? 'bg-amber-500 text-white'
+                    : 'bg-white text-slate-700 shadow-sm hover:bg-slate-100 disabled:opacity-50'
+              }`}
+            >
+              {isProcessingAudio ? (
+                <Loader className="h-5 w-5 animate-spin" />
+              ) : isRecording ? (
+                <MicOff className="h-5 w-5" />
+              ) : (
+                <Mic className="h-5 w-5" />
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={handleSend}
+              disabled={!input.trim() || isLoading || isProcessingAudio}
+              title="Send"
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white shadow-sm transition-all hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {isLoading ? <Loader className="h-5 w-5 animate-spin" /> : <Send className="h-5 w-5" />}
+            </button>
           </div>
-
-          {/* Mic button */}
-          <button
-            onClick={toggleRecording}
-            disabled={isLoading || isProcessingAudio}
-            title={isRecording ? 'Stop recording' : 'Voice message'}
-            className={`p-3 rounded-xl transition-all shrink-0 ${
-              isRecording
-                ? 'bg-red-500 text-white shadow-lg shadow-red-500/40 animate-pulse'
-                : isProcessingAudio
-                ? 'bg-yellow-400 text-white cursor-wait'
-                : 'bg-teal-500 text-white hover:bg-teal-600 hover:shadow-[0_4px_12px_rgba(20,184,166,0.3)] disabled:opacity-50'
-            }`}
-          >
-            {isProcessingAudio ? (
-              <Loader className="w-5 h-5 animate-spin" />
-            ) : isRecording ? (
-              <MicOff className="w-5 h-5" />
-            ) : (
-              <Mic className="w-5 h-5" />
-            )}
-          </button>
-
-          {/* Send button */}
-          <button
-            onClick={handleSend}
-            disabled={!input.trim() || isLoading || isProcessingAudio}
-            title="Send (Enter)"
-            className="p-3 rounded-xl bg-gradient-to-br from-purple-600 to-purple-500 text-white hover:shadow-lg hover:shadow-purple-500/30 disabled:opacity-40 disabled:cursor-not-allowed transition-all hover:scale-105 active:scale-95 shrink-0"
-          >
-            {isLoading ? <Loader className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
-          </button>
         </div>
 
-        {/* Status / Disclaimer */}
-        <p className="text-center text-[11px] text-gray-400 mt-2.5">
-          {isProcessingAudio
-            ? 'Analysing your voice tone...'
-            : 'SentiMind AI is a supportive companion — not a replacement for professional clinical help.'}
+        <p className="flex items-center justify-center gap-1.5 text-center text-[11px] text-slate-400">
+          <ShieldCheck className="h-3.5 w-3.5" />
+          Supportive companion only. For emergencies, contact local crisis services immediately.
         </p>
       </div>
-    </div>
+    </footer>
   )
 }

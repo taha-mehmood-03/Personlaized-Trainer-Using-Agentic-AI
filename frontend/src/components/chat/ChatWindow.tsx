@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef } from 'react'
+import { memo, useEffect, useMemo, useRef } from 'react'
 import { Message } from '@/types'
 import { MessageBubble } from './MessageBubble'
 import { TypingIndicator } from './TypingIndicator'
@@ -10,39 +10,67 @@ interface ChatWindowProps {
   messages: Message[]
   isLoading: boolean
   showTypingIndicator?: boolean
-  userId: string
 }
 
-export function ChatWindow({ 
-  messages, 
-  isLoading, 
+function ChatWindowComponent({
+  messages,
+  isLoading,
   showTypingIndicator = false,
-  userId 
 }: ChatWindowProps) {
   const bottomRef = useRef<HTMLDivElement>(null)
+  const hasMountedRef = useRef(false)
+  const messageStats = useMemo(
+    () => ({
+      userTurns: messages.reduce((count, message) => count + (message.role === 'user' ? 1 : 0), 0),
+      techniques: messages.reduce((count, message) => count + (message.technique ? 1 : 0), 0),
+    }),
+    [messages]
+  )
 
-  // Auto-scroll to bottom on new messages
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+    bottomRef.current?.scrollIntoView({
+      behavior: hasMountedRef.current && !isLoading ? 'smooth' : 'auto',
+      block: 'end',
+    })
+    hasMountedRef.current = true
+  }, [messages.length, isLoading])
 
   return (
-    <div className="flex-1 overflow-y-auto px-5 py-5 custom-scrollbar">
-      <div className="max-w-3xl mx-auto space-y-4">
-        {messages.map((message, i) => (
-          <MessageBubble key={i} message={message} />
+    <div className="custom-scrollbar flex-1 overflow-y-auto bg-slate-50 px-4 py-6">
+      <div className="mx-auto flex max-w-4xl flex-col gap-4">
+        <div className="mb-2 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">Session focus</p>
+              <h2 className="mt-1 text-base font-black text-slate-900">Understand first, then support</h2>
+            </div>
+            <div className="grid grid-cols-3 gap-2 text-center text-xs">
+              <div className="rounded-lg bg-slate-50 px-3 py-2">
+                <p className="font-black text-slate-900">{messageStats.userTurns}</p>
+                <p className="text-slate-500">user turns</p>
+              </div>
+              <div className="rounded-lg bg-slate-50 px-3 py-2">
+                <p className="font-black text-slate-900">{messageStats.techniques}</p>
+                <p className="text-slate-500">techniques</p>
+              </div>
+              <div className="rounded-lg bg-slate-50 px-3 py-2">
+                <p className="font-black text-slate-900">{isLoading ? 'Live' : 'Ready'}</p>
+                <p className="text-slate-500">status</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {messages.map((message, index) => (
+          <MessageBubble key={`${message.role}-${index}`} message={message} />
         ))}
 
-        {/* Elegant Typing Indicator */}
         {(showTypingIndicator || isLoading) && (
-          <div className="flex w-full justify-start items-end gap-3 animate-slide-up mb-2">
-            {/* Assistant Avatar for Typing */}
-            <div className="w-9 h-9 rounded-full bg-gradient-to-br from-purple-brand via-purple-500 to-teal-brand flex items-center justify-center shrink-0 border border-white/20 shadow-[0_4px_12px_rgba(124,58,237,0.25)]">
-              <Sparkles className="w-4 h-4 text-white" />
+          <div className="mb-2 flex w-full animate-slide-up items-end gap-3">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white shadow-sm">
+              <Sparkles className="h-4 w-4" />
             </div>
-            
-            {/* Glassmorphism Typing Pill */}
-            <TypingIndicator message={showTypingIndicator ? "Thinking" : "Processing"} />
+            <TypingIndicator message={showTypingIndicator ? 'Thinking' : 'Processing'} />
           </div>
         )}
 
@@ -51,3 +79,5 @@ export function ChatWindow({
     </div>
   )
 }
+
+export const ChatWindow = memo(ChatWindowComponent)

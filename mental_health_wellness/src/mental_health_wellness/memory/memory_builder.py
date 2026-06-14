@@ -4,13 +4,13 @@ Memory Builder  Combiner for distinct memory layers.
 Storage roles:
   - Prisma/Supabase Postgres remains the source of truth for messages,
     explicit facts, summaries, analytics, and audits.
-  - ChromaDB is the semantic index for relevant raw user-turn recall.
+  - The lightweight local recall store is optional background context only.
 
 Prompt roles:
-  - Chroma semantic memories answer specific recall needs.
+  - Local recall can answer specific recall needs when available.
   - Prisma facts provide stable user preferences/identity/goals.
   - Prisma summaries are only injected for broad history questions or when
-    Chroma has no specific match, avoiding duplicated context.
+    local recall has no specific match, avoiding duplicated context.
   - Sliding window is current-session context only.
 """
 
@@ -64,7 +64,7 @@ async def build_full_memory_context(
         from . import get_memory_context_for_prompt
         from .sliding_window import build_sliding_window, format_window_for_prompt
 
-        # Fetch facts + summaries + semantic Chroma memories concurrently for speed.
+        # Fetch facts + summaries + local recall concurrently for speed.
         # We decide which sections to inject after retrieval, so storage remains
         # complete while prompt context stays non-duplicative.
         facts_task = asyncio.create_task(get_user_facts(user_id))

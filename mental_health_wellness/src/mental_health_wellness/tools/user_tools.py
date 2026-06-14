@@ -2,8 +2,14 @@
 User Tools - User history and session management
 """
 
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from langchain_core.tools import tool
+from ..db.prisma_json import prisma_json
+
+
+def _retention_until(days: int = 365) -> datetime:
+    """GAP-04: Compute data retention expiry (GDPR Art. 5(1)(e))."""
+    return datetime.now(timezone.utc) + timedelta(days=days)
 
 
 @tool
@@ -61,9 +67,18 @@ async def save_session(
     user_message: str,
     assistant_response: str,
     emotion: str = "neutral",
+    sentiment: str | None = None,
+    intensity: float | None = None,
     crisis_level: str = "low",
     session_id: str = "",
-    technique: dict | None = None
+    technique: dict | None = None,
+    primary_sub_emotion: str | None = None,
+    secondary_sub_emotions: list[str] | None = None,
+    detected_symptoms: list[str] | None = None,
+    detected_behaviors: list[str] | None = None,
+    detected_contexts: list[str] | None = None,
+    emotion_scores: dict | None = None,
+    technique_offered_this_turn: bool = False,
 ) -> dict:
     """
     Save the conversation to the database.
@@ -98,9 +113,11 @@ async def save_session(
         
         # Ensure emotion is valid before mapping
         emotion_lower = emotion.lower().strip() if emotion else "neutral"
-        sentiment = emotion_to_sentiment.get(emotion_lower, "NEUTRAL")
+        sentiment_upper = (sentiment or "").upper().strip()
+        if sentiment_upper not in {"POSITIVE", "NEGATIVE", "NEUTRAL"}:
+            sentiment_upper = emotion_to_sentiment.get(emotion_lower, "NEUTRAL")
         
-        print(f"[TOOL] save_session: Emotion='{emotion}'  Lowercase='{emotion_lower}'  Sentiment='{sentiment}'")
+        print(f"[TOOL] save_session: Emotion='{emotion}'  Lowercase='{emotion_lower}'  Sentiment='{sentiment_upper}'")
         
         # Try to find existing session or create new one
         session = None
@@ -129,7 +146,7 @@ async def save_session(
                     "userId": user_id,
                     "title": f"Session - {datetime.now().strftime('%Y-%m-%d %H:%M')}",
                     "status": "ACTIVE",
-                    "moodSummary": sentiment
+                    "moodSummary": sentiment_upper
                 }
             )
             print(f"[TOOL] save_session: Created fallback session {session.id}")
@@ -143,23 +160,34 @@ async def save_session(
         # Update session's moodSummary with current sentiment (POSITIVE/NEGATIVE/NEUTRAL)
         await prisma.session.update(
             where={"id": session.id},
-            data={"moodSummary": sentiment}  # sentiment is already POSITIVE/NEGATIVE/NEUTRAL
+            data={"moodSummary": sentiment_upper}  # already POSITIVE/NEGATIVE/NEUTRAL
         )
-        print(f"[TOOL] save_session: Updated session moodSummary to {sentiment}")
+        print(f"[TOOL] save_session: Updated session moodSummary to {sentiment_upper}")
         
+        # GAP-04: Save user message with retentionUntil (GDPR Art. 5(1)(e))
         await prisma.message.create(
             data={
                 "sessionId": session.id,
                 "role": "USER",
                 "content": user_message,
-                "emotion": db_emotion
+                "emotion": db_emotion,
+                "intensity": intensity,
+                "sentiment": sentiment_upper,
+                "primarySubEmotion": primary_sub_emotion,
+                "secondarySubEmotions": secondary_sub_emotions or [],
+                "detectedSymptoms": detected_symptoms or [],
+                "detectedBehaviors": detected_behaviors or [],
+                "detectedContexts": detected_contexts or [],
+                "emotionScores": prisma_json(emotion_scores or {}),
+                "retentionUntil": _retention_until(365),  # GAP-04
             }
         )
         
         assistant_message_data = {
             "sessionId": session.id,
             "role": "ASSISTANT",
-            "content": assistant_response
+            "content": assistant_response,
+            "retentionUntil": _retention_until(365),  # GAP-04
         }
 
         # If a structured technique was provided, persist its id as a relation
@@ -167,21 +195,24 @@ async def save_session(
             tech_id = technique.get("id") or technique.get("technique_id") or technique.get("techniqueId")
             if tech_id:
                 assistant_message_data["techniqueId"] = tech_id
+                assistant_message_data["techniqueOfferedThisTurn"] = bool(technique_offered_this_turn)
 
         await prisma.message.create(data=assistant_message_data)
         
         if crisis_level in ["medium", "high"]:
+            # GAP-04: Crisis logs are PHI — retain for 7 years (HIPAA)
             await prisma.crisislog.create(
                 data={
                     "userId": user_id,
                     "riskLevel": crisis_level.upper(),
                     "messageContent": user_message,
                     "actionTaken": "agent_response",
-                    "resourcesProvided": True
+                    "resourcesProvided": True,
+                    "retentionUntil": _retention_until(2555),  # GAP-04: ~7 years
                 }
             )
         
-        # MoodLog creation handled by session_saver_node  do NOT duplicate here
+        # MoodLog creation handled by session_saver_node — do NOT duplicate here
         
         # Update UserStatistics (totalMessages, etc.)
         try:
@@ -194,6 +225,13 @@ async def save_session(
             print(f"[TOOL] save_session: Updated UserStatistics")
         except Exception as stats_err:
             print(f"[TOOL] save_session: UserStatistics update failed (non-critical): {stats_err}")
+
+        try:
+            from ..services.cache_state import invalidate_user_cache
+
+            invalidate_user_cache(user_id, session_id=session.id)
+        except Exception as cache_err:
+            print(f"[TOOL] save_session: Cache invalidation skipped: {cache_err}")
         
         return {"saved": True, "session_id": session.id}
         

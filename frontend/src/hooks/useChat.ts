@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useCallback } from 'react'
-import { Session, Message, Technique } from '@/types'
+import { Session } from '@/types'
 import { getSessions, deleteSession, renameSession } from '@/actions/chat'
 
 // Manage sidebar sessions and selection state
@@ -40,7 +40,7 @@ export function useChat(userId: string, initialSessions: Session[]) {
             }
 
             // Persist to backend
-            const success = await deleteSession(id)
+            const success = await deleteSession(id, userId)
             if (!success) {
                 // Rollback on failure
                 console.error('[useChat] Session delete failed — rolling back UI')
@@ -50,7 +50,7 @@ export function useChat(userId: string, initialSessions: Session[]) {
                 }
             }
         },
-        [currentSessionId, sessions, startNewSession]
+        [currentSessionId, sessions, startNewSession, userId]
     )
 
     const updateSessionName = useCallback(async (id: string, title: string) => {
@@ -58,13 +58,13 @@ export function useChat(userId: string, initialSessions: Session[]) {
         setSessions((prev) =>
             prev.map((s) => (s.id === id ? { ...s, title } : s))
         )
-        const success = await renameSession(id, title)
+        const success = await renameSession(id, title, userId)
         if (!success) {
             // Rollback — re-fetch sessions
             console.error('[useChat] Session rename failed — refreshing sessions')
             await refreshSessions()
         }
-    }, [refreshSessions])
+    }, [refreshSessions, userId])
 
     return {
         sessions,
