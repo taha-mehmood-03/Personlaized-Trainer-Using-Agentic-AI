@@ -50,547 +50,400 @@ SentiMind is a full-stack Final Year Project combining a Next.js frontend, FastA
 - [Operational Notes](#operational-notes)
 - [Credits](#credits)
 
----
+## Architecture Overview
 
-## Project Snapshot
+SentiMind has two orchestration layers before a user receives a reply:
 
-SentiMind is built around **structured emotional state**, not a single flat chatbot prompt. A user message enters through the API, passes through smart routing, runs through a compact agent graph, writes durable analytics to Supabase, and returns a response that is supportive, technique-oriented, memory-aware, or crisis-safe depending on the situation.
+- Pre-graph routing in `agent/graph.py` and `llm/llm_classifier.py`.
+- The 5-node agent graph built in `build_graph()`.
 
-| Area | Location |
-|---|---|
-| Backend entrypoint | `mental_health_wellness/src/mental_health_wellness/api/app.py` |
-| Agent graph | `mental_health_wellness/src/mental_health_wellness/agent/graph.py` |
-| Frontend | `frontend/src` |
-| Prisma schema | `mental_health_wellness/prisma/schema.prisma` |
-| Database | Supabase PostgreSQL via Prisma Python |
-| Lifecycle/outcome tracking | `mental_health_wellness/LIFECYCLE_OUTCOME_TRACKING_CHANGES.md` |
-
-> **Note:** Prisma and Supabase are functionally aligned for the current app. Supabase may still contain the legacy enum value `TurnType.POST_RECOMMENDATION`; the app normalizes it to `POST_RECOMMENDATION_REACTION`.
-
----
-
-## FYP Objectives & Implementation
-
-This project addresses three core Final Year Project objectives. The following sections trace each objective directly to its implementation in the codebase.
-
----
-
-### Objective 1 — Detect and Interpret Users' Emotional States through Multimodal Fusion
-
-> *"To detect and interpret users' emotional states by analyzing users' text and speech through multimodal fusion techniques."*
-
-**Status: Implemented**
-
-SentiMind analyzes emotion through two independent signal paths — text and voice — and fuses them in a dedicated node before any therapeutic decision is made.
-
-#### Text Emotion Analysis
-
-Every text message is processed by the mood analyzer (`nodes/mood_analyzer_node.py`) using **Gemini 2.0**, which classifies:
-
-- Core emotion (anger, disgust, fear, joy, neutral, sadness, surprise, anxiety)
-- Intensity (0.0–1.0) and confidence
-- Primary and secondary sub-emotions (e.g., `future_threat`, `self_criticism`, `hopelessness`)
-- Detected symptoms, behaviors, and situational contexts
-
-The gate (`llm/llm_classifier.py`) performs an initial emotional register check (neutral / concern / distress / crisis / positive) before the full graph runs, allowing low-signal turns to bypass the heavier mood analysis entirely.
-
-#### Voice / Speech Analysis
-
-Voice input follows a **two-layer pipeline** (`voice/__init__.py` · `voice/acoustic_features.py`):
-
-**Layer 1 — Gemini Audio** (`voice/__init__.py`):
-Gemini's multimodal API transcribes the audio and holistically classifies emotion from vocal delivery — tone, pace, hesitation, energy, strain, and pauses. This produces arousal, valence, a distress index, pause density, and confidence in addition to the emotion label.
-
-**Layer 2 — Real DSP Acoustic Features** (`voice/acoustic_features.py`):
-Independently computed using two open-source libraries with no API call or cost:
-
-| Feature | Library | What it measures |
-|---|---|---|
-| MFCCs (13-dim) | librosa | Spectral envelope — voice texture |
-| RMS, spectral flux | librosa | Energy and timbre change |
-| Pause density | librosa | Real silence ratio via energy-based VAD |
-| Pitch F0 mean/std | parselmouth/Praat | Fundamental frequency variation |
-| Jitter | parselmouth/Praat | Cycle-to-cycle pitch perturbation |
-| Shimmer | parselmouth/Praat | Amplitude perturbation |
-| HNR | parselmouth/Praat | Harmonics-to-noise ratio (voice quality) |
-| `acoustic_distress_proxy` | Combined | Weighted composite of jitter, shimmer, pitch variance, HNR |
-
-DSP libraries are warm-started at server boot via `preload_all_voice_models()` to eliminate the first-request cold-import penalty (~2–5 s on Windows from numba JIT and Praat native library loading).
-
-#### Multimodal Fusion (`nodes/emotion_fusion_node.py`)
-
-Three execution paths depending on what signals are present:
-
-| Path | Condition | Behaviour |
-|---|---|---|
-| **Voice-authoritative** | `extraction_method = gemini_audio` + therapeutic/crisis route | Gemini audio emotion is ground truth; text is secondary. Acoustic override rules apply as safety net. |
-| **Text-only** | No voice data | Full text pipeline: normalization, hedge-word reduction, passive ideation check, gate caps, distress anchor guard |
-| **3-way blend** | Legacy fallback | 50% text · 30% voice label · 20% acoustic proxy — used only when neither path above applies |
-
-**Acoustic override rules** prevent the system from accepting a calm/neutral text label when the audio clearly signals distress:
-
-- `distress_index > 0.65` + text = neutral/joy → emotion overridden to sadness
-- `arousal > 0.75` + text = neutral/joy → emotion overridden to anxiety
-- `pause_density > 0.40` + low intensity → intensity boosted
-
-**Distress anchoring** (`utils/distress_anchor.py`) ensures that short contextual follow-up messages ("about 3 weeks", "yes") do not collapse the recorded distress level. The peak disclosure intensity is tracked session-wide (`peak_distress_intensity`) and serves as a monotonic floor:
-
-- Progressive decay: `decay_factor ∈ {0.85, 0.75, 0.65}` applied across consecutive contextual turns
-- Active therapeutic thread floor: intensity never drops below 0.35 while a concern is open
-- Possible masking detection: high `distress_index` alongside "I'm fine" language sets `possible_masking = True` and the acoustic override applies
-
-**Output fields** forwarded to every downstream node: `fused_emotion` · `fused_intensity` · `fusion_confidence` · `possible_masking` · `voice_text_conflict` · `primary_sub_emotion` · `secondary_sub_emotions` · `detected_symptoms` · `detected_behaviors` · `detected_contexts`
-
----
-
-### Objective 2 — Suggest and Compose Personalized Mental Health Exercises
-
-> *"To suggest and compose personalized mental health exercises based on users' current state, history, and feedback."*
-
-**Status: Implemented**
-
-Technique suggestion is not a static lookup. The pipeline selects, personalizes, tracks outcomes, and adapts future suggestions based on what worked for the specific user.
-
-#### Technique Selection (`nodes/technique_selector_node.py`)
-
-Techniques are selected by **semantic vector search** against the `Technique` table in Supabase (via pgvector embeddings). The search query is built from:
-
-- Fused emotion + intensity
-- Sub-emotions, detected symptoms, behaviors, and situational contexts
-- Cognitive distortion type (if detected, e.g., `catastrophizing`, `all_or_nothing`)
-- Active thread context (exam stress, loneliness, sleep issues, etc.)
-- User goal (`calm_body_now`, `sleep_better`, `reach_out_to_friend`, etc.)
-
-The top-8 candidates are then **filtered and reranked**:
-
-1. Previously rejected technique removed (session-scoped by name)
-2. Suppressed topic labels removed from name + description + **category** (GAP 3 fix)
-3. `immediate_regulation_request` forces breathing/grounding shortlist only
-4. Goal-based category boosting (e.g., `sleep_better` boosts mindfulness/breathing; `calm_body_now` boosts grounding)
-
-Consent gate runs before any DB call: `denied_soft` or `denied_hard` consent blocks the entire technique path.
-
-#### History and Feedback Integration
-
-| Mechanism | Where | Effect |
-|---|---|---|
-| `TechniqueOutcome` | `nodes/outcome_tracker_node.py` | Records `intensityBefore`, `emotionBefore`, `intensityAfter`, `effectiveness`, `followThrough`, `confidence` for every technique delivered and reacted to. Uses `peak_distress_intensity` as the before-baseline (not the attenuated follow-up intensity) so effectiveness is not distorted by turn decay. Cross-session resolution falls back to `TechniqueOutcome.intensityBefore` when the message record has no stored intensity (GAP 7 fix). |
-| `UserTechniqueRating` | `schema.prisma` | Stores explicit user ratings (1–5) with completion flag, session link, and feedback text |
-| `PsychProfile` | `outcome_tracker_node.py` | `techniqueAccRate` updated via EMA (α=0.3) on every resolved outcome; `copingStyle` derived as `proactive / avoidant / mixed`; `topDistortions` accumulates lifetime distortion signals |
-| `UserTechniquePreference` | `consent_parser.py` · `schema.prisma` | `denied_hard` preferences persisted to `UserPreference.communicationStyle` and loaded at every session start; category suppression applied to selector filter |
-
-#### Personalization at Response Generation (`nodes/optimized_response_generator.py`)
-
-Selecting the technique is the first half. The response generator **rewrites every step** of the generic DB technique to directly address the user's specific context:
-
-- Steps are rewritten using what the user disclosed (exam pressure, relationship conflict, sleep anxiety, etc.)
-- The "why it helps you right now" field is composed from the fused emotion, sub-emotion, and situation
-- Duration and difficulty are preserved from the DB record
-- Format follows a structured inline card (`### Exercise:` · `* **Category:**` · `**Steps:**`) so `technique_offered_this_turn` detection is reliable
-
-A question budget system (`question_budget` field, enforced in the planner) ensures the user receives the technique **before** any follow-up question — not after being interrogated for more context (action-first principle).
-
-#### Outcome-Aware Response Flow
-
-```
-Technique delivered
-  → pending TechniqueOutcome created (intensityBefore = peak_distress_intensity)
-  → user reacts in a later turn
-  → outcome_tracker resolves: effectiveness, follow-through, confidence
-  → PsychProfile.techniqueAccRate updated via EMA
-  → rejected technique excluded from next session's selector
-  → suppressed categories excluded from all future sessions (denied_hard)
-```
-
----
-
-### Objective 3 — Validate through Clinical Tools and Ensure Compliance
-
-> *"To validate the system through controlled trials with mental health professionals, ensuring consistency with clinical tools and compliance with HIPAA and GDPR standards."*
-
-**Status: Framework Implemented — Clinical Scoring Deferred**
-
-#### Clinical Tool Integration (PHQ-9 / GAD-7)
-
-The Prisma schema includes a `ClinicalAssessmentLog` table with `phq9Score`, `gad7Score`, `severity`, `assessmentType`, and a `retentionUntil` field for compliance deletion. The `Technique` table includes clinical gating fields: `minPhq9`, `maxPhq9`, `safeAtSeverity[]`, and `contraindicatedFlags[]` so that a technique can be restricted to specific severity bands.
-
-**Current runtime status:** The LLM-based PHQ-9/GAD-7 scoring call was removed in v11.1 for latency reasons. The pipeline always returns `clinical_severity = "minimal"` with zero scores. This means the clinical gating fields in the Technique schema are structurally correct but not currently exercised at runtime. Re-enabling the assessment requires restoring the async clinical severity LLM call in `run_analysis_and_planning()` (the scaffolding and schema remain intact).
-
-#### Consent Management (GDPR Article 7 / HIPAA Authorization)
-
-Eight consent scopes are tracked per user in the `ConsentRecord` table:
-
-`WELLNESS_CHAT` · `MOOD_ANALYTICS` · `PERSONALIZATION` · `CRISIS_SAFETY` · `CRISIS_LOCATION` · `EMERGENCY_CONTACT_ALERTS` · `VOICE_ANALYSIS` · `RESEARCH_EXPORT`
-
-Each record stores: `granted` boolean · `legalBasis` (CONSENT / CONTRACT / HEALTH_CARE / VITAL_INTERESTS / PUBLIC_TASK / LEGITIMATE_INTERESTS) · `policyVersion` · `noticeVersion` · `termsVersion` · timestamp.
-
-Enforcement examples:
-- Crisis location alerts (`/api/crisis/send-location`) check `CRISIS_LOCATION` consent before dispatching GPS data
-- Emergency contact alerts check `EMERGENCY_CONTACT_ALERTS` consent before calling Twilio
-- Exercise consent is tracked within session (`denied_soft` / `denied_hard`) and persisted to `UserPreference` for future sessions
-
-**Consent withdrawal:** `POST /api/user/{user_id}/consent/withdraw` · `DataSubjectRequest` table records the request with status lifecycle (`RECEIVED → IN_PROGRESS → COMPLETED`).
-
-#### Data Rights (GDPR Articles 17, 20 — Erasure and Portability)
-
-| Right | Implementation |
-|---|---|
-| Right to access | `GET /api/user/{user_id}/data-export` |
-| Right to erasure | `DELETE /api/user/{user_id}/data` · `User.deletedAt` soft-delete · cascade session/message delete |
-| Right to portability | Data export route returns structured JSON of user records |
-| Right to rectification | `DataSubjectRequest` type `RECTIFICATION` tracked |
-| Data retention | `DataRetentionPolicy` table maps `dataClass` (SENSITIVE / PERSONAL / PHI) + `resourceType` → `retentionDays` + `legalBasis`; `CrisisLog.retentionUntil` field controls PHI deletion schedule |
-
-#### Audit Logging (HIPAA § 164.312 / GDPR Article 30)
-
-Every significant data operation is recorded asynchronously to the `AuditEvent` table via `schedule_audit_event()` (`security/compliance.py`). Events include `AUTH_LOGIN`, `AUTH_SIGNUP`, `DATA_ACCESS`, `DATA_EXPORT`, `DATA_ERASURE`, `CONSENT_GRANTED`, `CONSENT_WITHDRAWN`, `SESSION_DELETE`, `SECURITY_EVENT`.
-
-**Privacy in audit logs:** All user identifiers are pseudonymized using `stable_hash()` before logging — raw `user_id` values are never stored in the audit trail. IP and user-agent are also hashed.
-
-#### Crisis Safety Records (Clinical Compliance)
-
-`CrisisLog` captures every crisis event with `riskLevel` (LOW / MEDIUM / HIGH), `triggeredKeywords`, `actionTaken`, `resourcesProvided`, `humanHandoffRequested`, and `sensitivity = PHI` with a `retentionUntil` timestamp. Twilio integration dispatches real SMS/WhatsApp crisis alerts to Pakistan emergency contacts (Umang helpline, Rozan, Tele-Tabeeb 1123) and trusted contacts.
-
-#### What Is and Is Not Yet Fully Validated
-
-| Area | State | Notes |
-|---|---|---|
-| Multimodal emotion detection | ✅ Implemented | Gemini + DSP acoustic; distress anchor; masking detection |
-| Personalized technique suggestion | ✅ Implemented | Semantic search; outcome tracking; EMA profile |
-| PHQ-9/GAD-7 runtime scoring | ⚠️ Deferred | Schema + gating fields exist; LLM call removed in v11.1 for latency |
-| Technique contraindication filtering | ⚠️ Inactive | Depends on PHQ-9/GAD-7 output; will activate when scoring is re-enabled |
-| Controlled trials with clinicians | ⚠️ Planned | Infrastructure ready (outcomes, ratings, audit logs); formal trial protocol not yet run |
-| Consent recording | ✅ Implemented | 8 scopes; legal basis; withdrawal route |
-| Data export / erasure | ✅ Implemented | Routes registered; DSR table tracks request lifecycle |
-| Audit logging | ✅ Implemented | Pseudonymized, async, 9 event types |
-| Crisis records | ✅ Implemented | CrisisLog + Twilio SMS/WhatsApp |
-| Field-level encryption at rest | ⚠️ Not implemented | Schema marks PHI sensitivity; no column-level encryption applied |
-
----
-
-SentiMind has **two orchestration layers** before a user receives a reply:
-
-1. **Pre-graph routing** in `agent/graph.py` and `llm/llm_classifier.py` — decides whether the message can take a fast bypass route or must enter the full therapeutic graph.
-2. **The 5-node agent graph** built in `build_graph()` — performs deeper emotion, memory, technique, crisis, and response work.
+The pre-graph gate decides whether the message can be handled by a fast bypass route or must enter the full therapeutic graph. The graph then performs deeper emotion, memory, technique, crisis, and response work.
 
 ```mermaid
 flowchart TB
-    classDef client fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B
-    classDef backend fill:#FDF4FF,stroke:#D946EF,stroke-width:2px,color:#701A75
-    classDef agent fill:#F0FDFA,stroke:#0D9488,stroke-width:2px,color:#115E59
-    classDef data fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#065F46
-    classDef providers fill:#FFF7ED,stroke:#F97316,stroke-width:2px,color:#9A3412
-    classDef user fill:#FFF1F2,stroke:#F43F5E,stroke-width:2px,color:#881337
+    %% Class Definitions
+    classDef client fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B,rx:6px,ry:6px;
+    classDef backend fill:#FDF4FF,stroke:#D946EF,stroke-width:2px,color:#701A75,rx:6px,ry:6px;
+    classDef agent fill:#F0FDFA,stroke:#0D9488,stroke-width:2px,color:#115E59,rx:6px,ry:6px;
+    classDef data fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#065F46,rx:6px,ry:6px;
+    classDef providers fill:#FFF7ED,stroke:#F97316,stroke-width:2px,color:#9A3412,rx:6px,ry:6px;
+    classDef user fill:#FFF1F2,stroke:#F43F5E,stroke-width:2px,color:#881337,rx:20px,ry:20px;
 
-    User["👤 User"]:::user
+    User["👤 User Interface"]:::user
 
-    subgraph Client["Frontend — Next.js 14"]
-        UI["Chat · Voice · Dashboard · Profile · Auth"]:::client
-        ApiClient["API client layer"]:::client
+    subgraph Client["📱 Frontend: Next.js 14 App Router"]
+        UI["💬 Chat, Voice, Dashboard, Profile, Auth UI"]:::client
+        ClientState["🔄 React State, Hooks, Local UX State"]:::client
+        ApiClient["🌐 API Client Layer"]:::client
     end
 
-    subgraph Backend["Backend — FastAPI"]
-        Routes["REST and streaming routes"]:::backend
-        SmartGate["Smart gate & pre-graph bypass router"]:::backend
-        Agent["SentiMind agent orchestrator"]:::backend
-        Persist["Parallel persistence layer"]:::backend
-        Analytics["Dashboard and profile analytics"]:::backend
+    subgraph Backend["⚙️ Backend: FastAPI Server"]
+        Routes["🛣️ REST & Streaming Routes"]:::backend
+        SmartGate["🚦 Smart Gate & Pre-Graph Bypass Router"]:::backend
+        Agent["🤖 SentiMind Agent Orchestrator"]:::backend
+        Persist["💾 Parallel Persistence Layer"]:::backend
+        Analytics["📊 Dashboard & Profile Analytics"]:::backend
     end
 
-    subgraph AgentCore["Agent Intelligence — 5-node graph"]
-        Intake["Parallel intake node"]:::agent
-        Planning["Analysis and planning node"]:::agent
-        Pipeline["Response pipeline node"]:::agent
-        Crisis["Crisis handler node"]:::agent
-        Response["Response generator node"]:::agent
+    subgraph AgentCore["🧠 Agent Intelligence (LangGraph 5-Node Graph)"]
+        Intake["🔀 Parallel Intake Node"]:::agent
+        Planning["📝 Analysis & Planning Fused Node"]:::agent
+        Pipeline["🛠️ Response Pipeline Fused Node"]:::agent
+        Crisis["🚨 Crisis Handler Node"]:::agent
+        Response["✍️ Optimized Response Generator Node"]:::agent
     end
 
-    subgraph Data["Database — Supabase PostgreSQL via Prisma"]
-        Sessions["Sessions & messages"]:::data
-        Snapshots["Emotion snapshots"]:::data
-        Outcomes["Technique outcomes"]:::data
-        Summaries["Session summaries"]:::data
-        Memory["User memory & profile"]:::data
-        Safety["Crisis & audit records"]:::data
+    subgraph Data["🗄️ Database: Supabase PostgreSQL (Prisma)"]
+        Sessions["📝 Sessions & Messages"]:::data
+        Snapshots["📸 Emotion Snapshots"]:::data
+        Outcomes["🎯 Technique Outcomes"]:::data
+        Summaries["📂 Session Summaries"]:::data
+        Memory["🧠 User Memory & Profile"]:::data
+        Safety["🛡️ Crisis & Audit Records"]:::data
     end
 
-    subgraph Providers["External Providers"]
-        Gemini["Google Gemini — LLM & audio"]:::providers
-        Twilio["Twilio — SMS & WhatsApp crisis"]:::providers
-        Speech["Audio transcription"]:::providers
+    subgraph Providers["☁️ External Cloud Providers"]
+        Gemini["🤖 Google Gemini & GenAI (LLM & Audio)"]:::providers
+        Twilio["📞 Twilio SMS/WhatsApp Crisis Services"]:::providers
+        Speech["🎙️ Browser/Audio Transcription"]:::providers
     end
 
-    User --> UI --> ApiClient --> Routes
-    Routes --> SmartGate --> Agent
-    Agent --> Intake --> Planning
+    User --> UI
+    UI --> ClientState
+    ClientState --> ApiClient
+    ApiClient --> Routes
+    Routes --> SmartGate
+    SmartGate --> Agent
+    Agent --> Intake
+    Intake --> Planning
     Planning --> Pipeline
     Planning --> Crisis
     Pipeline --> Response
     Crisis --> Response
-    Response --> Persist --> Data
-    Data --> Agent
-    Routes --> Analytics --> Data
+    Response --> Persist
+    Persist --> Data
+    Analytics --> Data
+    Routes --> Analytics
     Agent --> Gemini
     Routes --> Speech
     Crisis --> Twilio
+    Data --> Agent
 ```
 
-### Design Intent
-
-| Layer | Responsibility |
-|---|---|
-| **Frontend** | Interaction quality, screens, voice controls, user-facing dashboards |
-| **API** | HTTP contracts, streaming, authentication boundaries, request orchestration |
-| **Pre-graph gate** | Latency protection and safety; separates bypassable turns from full therapeutic analysis |
-| **Agent graph** | Emotional reasoning, planning, crisis decisions, response strategy, technique selection |
-| **Persistence** | Runs in parallel to keep user latency low |
-| **Supabase** | Stores conversational history and analytic signals |
-| **Dashboard services** | Transforms raw records into user-facing trend views |
-
----
-
-## Runtime Flow
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor U as User
-    participant F as Frontend (Next.js)
-    participant A as API (FastAPI)
-    participant G as Smart Gate
-    participant N as Agent Graph
-    participant L as Gemini (LLM + Audio)
-    participant D as Supabase DB
-
-    U->>F: Send text or voice message
-    F->>A: POST chat request
-    A->>G: Lightweight route, distress check, context load
-    alt Bypass route allowed
-        G->>L: Generate quick response
-        G->>D: Save bypass turn (background task)
-        G-->>A: Fast payload and metadata
-    else Full graph route
-        A->>N: Invoke 5-node graph
-        N->>L: Parallel intake (crisis, mood, intent, voice)
-        N->>L: Analysis and planning (fuse emotion, strategy)
-        N->>L: Response pipeline (technique, role)
-        N->>L: Response generator (final reply)
-        N->>D: Parallel persist (messages, snapshots, outcomes, memory)
-        N-->>A: Compiled payload and metadata
-    end
-    A-->>F: Response text, emotions, technique details
-    F-->>U: Render reply, emotion graphics, technique cards
-```
-
-### Request Categories
-
-| Request Type | Handling |
-|---|---|
-| **Text chat** | Standard FastAPI routes through the agent graph |
-| **Streaming chat** | Incremental output while keeping persistence intact |
-| **Voice chat** | Transcribes audio first, then routes based on transcript meaning |
-| **Dashboard requests** | Bypass the agent; read analytic aggregates from Supabase |
-| **Crisis actions** | Dedicated safety routes with Twilio-backed integrations |
-
----
-
-## Pre-Graph Gate
-
-The pre-graph gate is the most important routing layer. It runs before LangGraph and is shared by normal and streaming chat. It is a **staged dispatcher** that leverages parallel database loading and semantic LLM understanding to bypass or run the full graph.
-
-**Core modules:** `agent/graph.py` · `llm/llm_classifier.py` · `utils/turn_lifecycle.py` · `utils/turn_signals.py` · `utils/distress_anchor.py`
+### Full Message Architecture
 
 ```mermaid
 flowchart TD
-    classDef step fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B
-    classDef parallel fill:#FDF4FF,stroke:#D946EF,stroke-width:2px,color:#701A75
-    classDef decision fill:#FEF3C7,stroke:#D97706,stroke-width:2px,color:#78350F
-    classDef bypass fill:#F0F9FF,stroke:#0284C7,stroke-width:2px,color:#075985
-    classDef fullgraph fill:#F0FDFA,stroke:#0D9488,stroke-width:2px,color:#115E59
+    classDef step fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B,rx:8px,ry:8px;
+    classDef decision fill:#FEF3C7,stroke:#D97706,stroke-width:2px,color:#78350F;
+    classDef bypass fill:#F0F9FF,stroke:#0284C7,stroke-width:2px,color:#075985,rx:8px,ry:8px;
+    classDef run fill:#F0FDFA,stroke:#0D9488,stroke-width:2px,color:#115E59,rx:8px,ry:8px;
+    classDef final fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#065F46,rx:8px,ry:8px;
 
-    Start["Latest user message"]:::step
-    LoadHistory["Load recent message history"]:::step
-    UserFacts["User facts"]:::parallel
-    SessionSumm["Session summaries"]:::parallel
-    SessionFacts["Session facts and techniques"]:::parallel
-    GateLLM["Smart pipeline gate — LLM classifier"]:::step
-    Normalize["Normalize route labels and flags"]:::step
-    FollowupProtect["Contextual follow-up protection"]:::step
-    TurnGuess["Initial turn-type guess"]:::step
-    VoiceGuard{"Voice or audio data present?"}:::decision
-    BypassAllowed{"Bypass confidence high enough?"}:::decision
-    Bypass["Fast bypass response"]:::bypass
-    FullGraph["Run 5-node agent graph"]:::fullgraph
+    A["📥 Incoming Request (Text/Audio)"]:::step
+    B["🔄 Load Previous Messages (In-Memory Store & DB Fallback)"]:::step
+    C["🆔 Create or Reuse Session ID"]:::step
+    D["🚦 Run Smart Pre-Graph Gate (Context-Aware LLM Router)"]:::step
+    E{"❓ Can route be safely bypassed?"}:::decision
+    F["⚡ Execute Bypass Handler (Casual Response / Memory / Tips)"]:::bypass
+    G["📦 Compile Graph Input State"]:::step
+    H["🤖 Invoke 5-Node Agent Graph (LangGraph Execution)"]:::run
+    I["💬 Deliver Final Response (Streamed/Standard)"]:::final
+    J["💾 Fire-and-Forget Background Persistence (asyncio.create_task)"]:::step
+    K["🗄️ Update Supabase Records & Write Dashboard Analytics"]:::final
+
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+    E -- Yes (Conf >= threshold & No Voice) --> F
+    E -- No (Low Conf or Voice Present) --> G
+    F --> I
+    G --> H
+    H --> I
+    I --> J
+    J --> K
+```
+
+### Pre-Graph Gate
+
+The pre-graph gate is the most important routing layer. It happens before LangGraph runs and is shared by normal chat and streaming chat. The gate is not a single check; it is a staged dispatcher that leverages parallel database loading and semantic LLM understanding to bypass or run the graph.
+
+Main modules:
+
+- `mental_health_wellness/src/mental_health_wellness/agent/graph.py`
+- `mental_health_wellness/src/mental_health_wellness/llm/llm_classifier.py`
+- `mental_health_wellness/src/mental_health_wellness/utils/turn_lifecycle.py`
+- `mental_health_wellness/src/mental_health_wellness/utils/turn_signals.py`
+- `mental_health_wellness/src/mental_health_wellness/utils/distress_anchor.py`
+
+```mermaid
+flowchart TD
+    classDef step fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B,rx:6px,ry:6px;
+    classDef parallel fill:#FDF4FF,stroke:#D946EF,stroke-width:2px,color:#701A75,rx:6px,ry:6px;
+    classDef decision fill:#FEF3C7,stroke:#D97706,stroke-width:2px,color:#78350F;
+    classDef bypass fill:#F0F9FF,stroke:#0284C7,stroke-width:2px,color:#075985,rx:6px,ry:6px;
+    classDef graph fill:#F0FDFA,stroke:#0D9488,stroke-width:2px,color:#115E59,rx:6px,ry:6px;
+
+    Start["📥 Latest User Message"]:::step
+    LoadHistory["📜 Load Recent Message History (In-Memory / DB Fallback)"]:::step
+    
+    subgraph FetchParallel["🔄 Parallel Context Load (asyncio.gather)"]
+        UserFacts["🧠 User Facts (Memory Extraction)"]:::parallel
+        SessionSumm["📂 Session Summaries & Titles"]:::parallel
+        SessionFacts["📋 Stored Session Facts & Techniques"]:::parallel
+    end
+
+    GateLLM["🚦 Smart Pipeline Gate (LLM Classifier)"]:::step
+    Normalize["🔄 Normalization: Map Old Route Labels & Flags"]:::step
+    FollowupProtect["🛡️ Contextual Follow-up Protection (Anchor Safeguard)"]:::step
+    TurnGuess["💡 Initial Turn Type Guess (Lifecycle Stage)"]:::step
+    VoiceGuard{"🎤 Voice/Audio Data Present?"}:::decision
+    BypassAllowed{"❓ Bypass Conf >= Threshold?"}:::decision
+    Bypass["⚡ Execute Fast Bypass Response (Chitchat, Memory, list_tips)"]:::bypass
+    FullGraph["🤖 Build Graph Input State & Run 5-Node Agent Graph"]:::graph
 
     Start --> LoadHistory
-    LoadHistory --> UserFacts & SessionSumm & SessionFacts
-    UserFacts --> GateLLM
-    SessionSumm --> GateLLM
-    SessionFacts --> GateLLM
-    GateLLM --> Normalize --> FollowupProtect --> TurnGuess --> VoiceGuard
-    VoiceGuard -- Yes --> FullGraph
+    LoadHistory --> FetchParallel
+    FetchParallel --> GateLLM
+    GateLLM --> Normalize
+    Normalize --> FollowupProtect
+    FollowupProtect --> TurnGuess
+    TurnGuess --> VoiceGuard
+    VoiceGuard -- Yes (Force Graph) --> FullGraph
     VoiceGuard -- No --> BypassAllowed
     BypassAllowed -- Yes --> Bypass
     BypassAllowed -- No --> FullGraph
 ```
 
-### Context Loaded by the Pre-Gate
+#### What The Pre-Gate Loads
 
-- Latest user message and last few in-memory conversation turns
-- Database fallback message history when available
-- Stored user context, memory snippets, session summary, facts, and formatted session context
-- Latest recommended, pending, rejected, and active technique from session context
-- Previous assistant question and expected answer type
-- Prior exercise consent and solution preference
-- Voice metadata when a voice request already supplied it
+The gate builds enough context to route safely without running the whole graph:
 
-### Crisis Pre-Screening
+- Latest user message.
+- Last few in-memory conversation turns.
+- Database fallback message history when available.
+- Stored user context and memory snippets.
+- Current session summary, facts, and formatted session context.
+- Latest recommended technique, pending technique, rejected technique, and active technique from session context.
+- Previous assistant question and expected answer type.
+- Prior exercise consent and solution preference.
+- Voice metadata when a voice request already supplied it.
 
-A deterministic safety net checks narrow, high-precision crisis language **before** the LLM router, including:
+#### What The Pre-Gate Checks
 
-- Explicit intent to kill oneself, end one's life, or die
-- Statements of plan or immediate action
-- Means (pills, knife, gun, rope, blade) with intent context
-- Recent or current self-harm
-- Passive suicidal ideation (e.g. not wanting to exist, wanting to disappear, "everyone better off without me")
+The deterministic safety net checks narrow, high-precision crisis language before the LLM router:
 
-### Active Route Labels
+- Explicit intent to kill oneself, end one's life, take one's life, or die.
+- Statements of plan or immediate action.
+- Means such as pills, knife, gun, rope, or blade with intent context.
+- Recent self-harm or current self-harm.
+- Passive suicidal ideation such as not wanting to exist, wanting to disappear forever, or everyone being better off without the user.
 
-`chitchat` · `therapeutic` · `contextual_followup` · `technique_request` · `technique_follow_up` · `memory_query` · `crisis` · `positive_feedback`
+The Gemini gate then classifies the latest message using recent conversation and stored context. Active route labels are:
 
-### Structured Preference Fields
+- `chitchat`
+- `therapeutic`
+- `contextual_followup`
+- `technique_request`
+- `technique_follow_up`
+- `memory_query`
+- `crisis`
+- `positive_feedback`
 
-| Field | Values |
-|---|---|
-| `exercise_consent` | `unknown` · `denied_soft` · `denied_hard` · `allowed` |
-| `solution_preference` | `unknown` · `listen_only` · `advice_allowed` · `exercise_requested` |
-| `suppression_signal` | Whether the user corrected prior history |
-| `suppressed_topic` | Topic/person/source the user says not to use |
-| `active_issue_source` | Corrected active concern, when provided |
-| `has_persistent_medical_signal` | True when a prior session contained medical/somatic language |
+The gate specifically checks:
 
-> `denied_soft` = temporary session refusal ("not now"); `denied_hard` = permanent refusal ("exercises never work for me"), persisted to `UserPreference.communicationStyle` so it survives server restarts and future sessions.
+- Crisis override before ordinary support.
+- Whether a short answer depends on the previous assistant question.
+- Whether the user is answering a duration, subject, trigger, or context question.
+- Whether pronouns such as "it", "that", or "that exercise" refer to prior session context.
+- Whether the user says there are no more details, which marks context complete.
+- Whether a technique was rejected or did not help.
+- Whether a short affirmation means technique acceptance or merely answers a context question.
+- Whether "thanks" is just polite acknowledgement rather than outcome evidence.
+- Whether "no thanks" after a technique offer means declined exercise consent.
+- Whether the user reports a positive result after a technique.
+- Whether the user asks about prior memory, previous session content, or a technique name.
+- Whether the user is making a new emotional disclosure.
+- Whether the user explicitly asks for a coping exercise or technique.
+- Whether the message is casual small talk with no distress.
+- Whether the user corrects old context or suppresses a topic.
 
-### Gate Normalization and Guardrails
+The gate also extracts structured preference fields:
+
+- `exercise_consent`: `unknown`, `denied`, or `allowed`.
+- `solution_preference`: `unknown`, `listen_only`, `advice_allowed`, or `exercise_requested`.
+- `suppression_signal`: whether the user corrected prior history.
+- `suppressed_topic`: the topic/person/source the user says not to use.
+- `active_issue_source`: the corrected active concern when provided.
+
+#### Gate Normalization And Guardrails
 
 After the LLM responds, the result is normalized and hardened:
 
-- Old route labels are converted to current labels
-- `accept_technique` → `technique_follow_up` with an `accept_technique` flag
-- `rejection` → `technique_follow_up` with rejection flags
-- `list_techniques` → `technique_request` with a `list_techniques` flag
-- Unknown routes fall back to `therapeutic`
-- Positive outcome language forces `positive_feedback`
-- Polite acknowledgement forces `chitchat` unless immediate technique-consent context exists
-- Crisis gets high intensity and the full pipeline
+- Old route labels are converted to current labels.
+- `accept_technique` becomes `technique_follow_up` with `accept_technique` flag.
+- `rejection` becomes `technique_follow_up` with rejection flags.
+- `list_techniques` becomes `technique_request` with `list_techniques` flag.
+- Unknown routes fall back to `therapeutic`.
+- Positive outcome language forces `positive_feedback`.
+- Negative exercise feedback forces `technique_follow_up`.
+- Polite acknowledgement forces `chitchat` unless there is immediate technique-consent context.
+- "No more details" forces `contextual_followup` and adds `context_complete`.
+- Memory questions about old techniques get `technique_name_query`.
+- Contextual follow-ups get lower intensity hints and mood-analysis skip flags.
+- Chitchat and memory routes get near-zero intensity hints.
+- Crisis gets high intensity and full pipeline.
 
-### Gate Bypass Routes
+When the gate says `therapeutic` but the message is a short answer to the last assistant question inside an active distress thread, `_protect_contextual_followup_gate()` can correct it to `contextual_followup`. This protects the original distress anchor from being overwritten by low-signal follow-up text.
+
+#### Gate Bypass Routes
+
+The bypass dispatcher in `_execute_gate_route()` can answer without running the full graph when the route is safe and voice emotion is not involved.
 
 ```mermaid
 flowchart TD
-    classDef step fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B
-    classDef decision fill:#FEF3C7,stroke:#D97706,stroke-width:2px,color:#78350F
-    classDef bypass fill:#F0F9FF,stroke:#0284C7,stroke-width:2px,color:#075985
-    classDef fullgraph fill:#F0FDFA,stroke:#0D9488,stroke-width:2px,color:#115E59
-    classDef persist fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#065F46
+    %% Class Definitions
+    classDef step fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B,rx:6px,ry:6px;
+    classDef decision fill:#FEF3C7,stroke:#D97706,stroke-width:2px,color:#78350F;
+    classDef bypass fill:#F0F9FF,stroke:#0284C7,stroke-width:2px,color:#075985,rx:6px,ry:6px;
+    classDef graph fill:#F0FDFA,stroke:#0D9488,stroke-width:2px,color:#115E59,rx:6px,ry:6px;
+    classDef persist fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#065F46,rx:6px,ry:6px;
 
-    GateResult["Gate result"]:::step
-    ConsentBlock{"Prior refusal blocks technique?"}:::decision
-    VoicePresent{"Audio or voice features present?"}:::decision
-    Route{"Route label"}:::decision
-    Bypassed["Bypass handler — chitchat, memory, list, accept, reject, feedback, crisis"]:::bypass
-    Full["Full graph — therapeutic route"]:::fullgraph
-    Persist["Background persist bypass turn"]:::persist
+    GateResult["🚦 Gate Result"]:::step
+    ConsentBlock{"❓ Prior listen-only or exercise refusal blocks technique?"}:::decision
+    VoicePresent{"🎤 Audio or voice features present?"}:::decision
+    Route{"🛣️ Route"}:::decision
+    
+    Chitchat["💬 chitchat: fast casual LLM response"]:::bypass
+    Memory["🧠 memory_query: answer from facts or session context"]:::bypass
+    TechniqueList["📋 technique_request: list techniques"]:::bypass
+    TechniqueAccept["🎯 technique_follow_up accept: deliver DB technique"]:::bypass
+    TechniqueReject["🙅 technique_follow_up reject: acknowledge rejection"]:::bypass
+    Positive["👍 positive_feedback: acknowledge outcome & record success"]:::bypass
+    Crisis["🚨 crisis: direct safety pre-screener response"]:::bypass
+    
+    Full["🤖 Full Graph (therapeutic route)"]:::graph
+    Persist["💾 Background persist bypass turn"]:::persist
 
     GateResult --> ConsentBlock
-    ConsentBlock -- Yes --> Full
-    ConsentBlock -- No --> VoicePresent
-    VoicePresent -- Yes --> Full
+    ConsentBlock -- Yes (blocked) --> Full
+    ConsentBlock -- No (allowed) --> VoicePresent
+    VoicePresent -- Yes (force graph) --> Full
     VoicePresent -- No --> Route
-    Route -- Recognized bypass --> Bypassed
-    Route -- Therapeutic or unresolved --> Full
-    Bypassed --> Persist
+    
+    Route -- chitchat --> Chitchat
+    Route -- memory_query --> Memory
+    Route -- list_techniques --> TechniqueList
+    Route -- accept_technique --> TechniqueAccept
+    Route -- reject_technique --> TechniqueReject
+    Route -- positive_feedback --> Positive
+    Route -- crisis --> Crisis
+    Route -- therapeutic/unresolved --> Full
+    
+    Chitchat --> Persist
+    Memory --> Persist
+    TechniqueList --> Persist
+    TechniqueAccept --> Persist
+    TechniqueReject --> Persist
+    Positive --> Persist
+    Crisis --> Persist
 ```
 
-> Bypass is **deliberately disabled for voice turns** — if audio or voice features are present, the system forces the full graph so voice preprocessing and emotion fusion are preserved.
+Bypass is deliberately disabled for voice turns. If audio or voice features exist, the system forces the full graph so voice preprocessing and emotion fusion are not dropped.
 
-### Full Graph Input State
+#### Full Graph Input State
 
-When bypass is not used, the gate builds the graph state including:
+When bypass is not used, the gate builds the graph state with:
 
-`messages` · `message` · `user_id` · `session_id` · `gate_route` · `gate_confidence` · `gate_context_flags` · `gate_emotional_register` · `gate_intensity_hint` · `gate_should_skip_mood_analysis` · `gate_needs_full_pipeline` · `prefetched_intent` · `prefetched_user_context` · `prefetched_session_context` · `turn_type_guess` · `previous_turn_context` · session message count · voice file path · voice features · transcription confidence · voice feature snapshot
+- `messages`
+- `message`
+- `user_id`
+- `session_id`
+- `gate_route`
+- `gate_confidence`
+- `gate_context_flags`
+- `gate_emotional_register`
+- `gate_intensity_hint`
+- `gate_should_skip_mood_analysis`
+- `gate_needs_full_pipeline`
+- `prefetched_intent`
+- `prefetched_user_context`
+- `prefetched_session_context`
+- `turn_type_guess`
+- `previous_turn_context`
+- session message count
+- voice file path, voice features, transcription confidence, and voice feature snapshot when present
 
----
-
-## Agent Graph
-
-The agent is intentionally compact: **five graph nodes** with conditional routing between them. The heavy work happens inside specialized node modules while the graph keeps orchestration readable.
+### Agent Graph Internals
 
 ```mermaid
 flowchart TD
-    classDef startend fill:#F5F5F7,stroke:#6C7A89,stroke-width:2px,color:#333
-    classDef node fill:#F0FDFA,stroke:#0D9488,stroke-width:2px,color:#115E59
-    classDef decision fill:#FEF3C7,stroke:#D97706,stroke-width:2px,color:#78350F
-    classDef crisis fill:#FEF2F2,stroke:#DC2626,stroke-width:2px,color:#991B1B
+    %% Class Definitions
+    classDef startend fill:#F5F5F7,stroke:#6C7A89,stroke-width:2px,color:#333,rx:20px,ry:20px;
+    classDef node fill:#F0FDFA,stroke:#0D9488,stroke-width:2px,color:#115E59,rx:8px,ry:8px;
+    classDef decision fill:#FEF3C7,stroke:#D97706,stroke-width:2px,color:#78350F;
+    classDef crisis fill:#FEF2F2,stroke:#DC2626,stroke-width:2px,color:#991B1B,rx:8px,ry:8px;
 
-    Start([Start]):::startend
-    Intake["1 · run_parallel_intake"]:::node
-    CrisisGate{"Early crisis detected?"}:::decision
-    Planning["2 · run_analysis_and_planning"]:::node
-    NeedsPipeline{"Needs technique selection?"}:::decision
-    Pipeline["3 · run_response_pipeline"]:::node
-    PipelineCrisis{"Crisis or distress escalated?"}:::decision
-    Crisis["4 · handle_crisis"]:::crisis
-    Response["5 · generate_response"]:::node
-    End([End]):::startend
+    Start([🏁 Graph Start]):::startend
+    Intake["🔀 Node 1: run_parallel_intake"]:::node
+    IntakeRoute{"❓ Medium or high crisis?"}:::decision
+    Planning["📝 Node 2: run_analysis_and_planning (fused)"]:::node
+    PlanningRoute{"❓ Strategy chitchat/no_action?"}:::decision
+    Pipeline["🛠️ Node 3: run_response_pipeline (fused)"]:::node
+    PipelineRoute{"❓ Crisis or high intensity distress?"}:::decision
+    Crisis["🚨 Node 4: handle_crisis"]:::crisis
+    Response["✍️ Node 5: generate_response"]:::node
+    End([🏁 Graph End]):::startend
 
-    Start --> Intake --> CrisisGate
-    CrisisGate -- Yes: direct --> Crisis
-    CrisisGate -- No --> Planning --> NeedsPipeline
-    NeedsPipeline -- No: fast/casual --> Response
-    NeedsPipeline -- Yes: therapeutic --> Pipeline --> PipelineCrisis
-    PipelineCrisis -- Yes: escalate --> Crisis
-    PipelineCrisis -- No --> Response
-    Crisis --> Response --> End
+    Start --> Intake
+    Intake --> IntakeRoute
+    IntakeRoute -- Yes (Crisis Direct) --> Crisis
+    IntakeRoute -- No (Normal) --> Planning
+    Planning --> PlanningRoute
+    PlanningRoute -- Yes (Fast Path) --> Response
+    PlanningRoute -- No (Therapeutic) --> Pipeline
+    Pipeline --> PipelineRoute
+    PipelineRoute -- Yes (Escalate) --> Crisis
+    PipelineRoute -- No (Normal) --> Response
+    Crisis --> Response
+    Response --> End
 ```
 
-> The graph has **no LangGraph checkpointer**. It uses `_message_store` for bounded in-memory message history and `_session_context_store` for compact session continuity, reducing serialization overhead and keeping hot-path latency lower.
+The graph has no LangGraph checkpointer. It uses `_message_store` for bounded in-memory message history and `_session_context_store` for compact session continuity. This reduces serialization overhead and keeps hot path latency lower.
 
-### Why This Shape Works
+### Node 1: Parallel Intake
 
-- Intake work runs early and in parallel
-- Crisis handling is reachable both before and after deeper analysis
-- Simple turns skip the expensive response pipeline
-- Complex emotional turns receive full planning, memory, technique, and analytics support
-- Response generation is the single common exit, keeping assistant style consistent
+Primary module:
 
----
+- `nodes/parallel_intake.py`
 
-## Node Analysis
-
-### 1. Parallel Intake
-
-`nodes/parallel_intake.py`
+Inline work:
 
 ```mermaid
 flowchart LR
-    classDef state fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B
-    classDef node fill:#F0FDFA,stroke:#0D9488,stroke-width:2px,color:#115E59
-    classDef merge fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#065F46
+    %% Class Definitions
+    classDef state fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B,rx:6px,ry:6px;
+    classDef node fill:#F0FDFA,stroke:#0D9488,stroke-width:2px,color:#115E59,rx:6px,ry:6px;
+    classDef merge fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#065F46,rx:6px,ry:6px;
 
-    State["Initial graph state"]:::state
-
-    subgraph Concurrent["Concurrent tasks"]
-        Crisis["screen_for_crisis"]:::node
-        Context["load_user_context"]:::node
-        Mood["analyze_mood"]:::node
-        Intent["intent_pre_check"]:::node
-        Voice["preprocess_voice_input"]:::node
+    State["📥 Initial Graph State"]:::state
+    
+    subgraph ParallelIntake["⚡ Concurrent Tasks (asyncio.gather)"]
+        Crisis["🚨 screen_for_crisis"]:::node
+        Context["📂 load_user_context"]:::node
+        Mood["🎭 analyze_mood (or gate-calibrated mood)"]:::node
+        Intent["🎯 intent_pre_check (or smart-gate intent)"]:::node
+        Voice["🎙️ preprocess_voice_input (if audio exists)"]:::node
     end
+    
+    Merge["📦 Merged Intake State"]:::merge
 
-    Merge["Merged intake state"]:::merge
-
-    State --> Crisis & Context & Mood & Intent & Voice
+    State --> Crisis
+    State --> Context
+    State --> Mood
+    State --> Intent
+    State --> Voice
     Crisis --> Merge
     Context --> Merge
     Mood --> Merge
@@ -598,117 +451,393 @@ flowchart LR
     Voice --> Merge
 ```
 
-**Responsibilities**
+What it checks and produces:
 
-- Skips duplicate crisis LLM when the smart gate already made a confident non-crisis route
-- Runs a backup crisis screen when the gate route is uncertain or configured to duplicate crisis checks
-- Loads DB-backed user context, summaries, facts, memory, preferences, and chat history
-- Runs mood analysis unless the gate marks the turn as low-signal, contextual, memory, chitchat, or voice-authoritative
-- Uses voice features as the authoritative mood source when Gemini audio features are present
-- Runs intent pre-check only when the smart gate did not already provide authoritative intent
-- Preserves distress anchors so contextual replies don't lower the true initial intensity
-- Emits emotion, sentiment, intensity, confidence, sub-emotions, symptoms, behaviors, contexts, crisis state, intent, memory context, and voice metadata
+- Skips duplicate crisis LLM when smart gate already made a confident non-crisis route.
+- Runs backup crisis screen when the gate route is crisis, uncertain, or configured to duplicate crisis checks.
+- Loads DB-backed user context, summaries, facts, memory, preferences, and chat history.
+- Runs mood analysis unless the gate marks the turn as low-signal, contextual, memory, chitchat, positive feedback, technique follow-up, or voice-authoritative.
+- Uses gate-calibrated mood for low-signal routes.
+- Uses voice features as authoritative mood source when Gemini audio features are present.
+- Runs intent pre-check only when the smart gate did not already provide authoritative intent.
+- Runs voice preprocessing only when audio exists and voice features are not already processed.
+- Preserves distress anchors so contextual replies do not lower or overwrite the true initial intensity.
+- Emits emotion, sentiment, intensity, confidence, sub-emotions, symptoms, behaviors, contexts, crisis state, intent, memory context, and voice metadata.
 
-**Collaborators:** `context_loader.py` · `intent_classifier.py` · `crisis_detection_node.py` · `memory_extraction_node.py` · `smart_gate_node.py`
+### Node 2: Analysis And Planning
 
----
+Primary module:
 
-### 2. Analysis and Planning
+- `nodes/analysis_and_planning.py`
 
-`nodes/analysis_and_planning.py`
+Inline subnodes:
 
 ```mermaid
 flowchart TD
-    classDef state fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B
-    classDef subnode fill:#FDF4FF,stroke:#D946EF,stroke-width:2px,color:#701A75
-    classDef output fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#065F46
+    %% Class Definitions
+    classDef state fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B,rx:6px,ry:6px;
+    classDef subnode fill:#FDF4FF,stroke:#D946EF,stroke-width:2px,color:#701A75,rx:6px,ry:6px;
+    classDef output fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#065F46,rx:6px,ry:6px;
 
-    IntakeState["Intake state"]:::state
-
-    subgraph FusedPlanning["Fused analysis and planning"]
-        Fusion["emotion_fusion_node"]:::subnode
-        ContextEnrich["context_enrichment"]:::subnode
-        Trend["trend_analyzer"]:::subnode
-        Clinical["clinical_severity"]:::subnode
-        Consent["consent_parser"]:::subnode
-        Resolver["context_resolver"]:::subnode
-        Planner["conversation_planner"]:::subnode
-        Lifecycle["turn_lifecycle.refine"]:::subnode
-        Activation["behavioral_activation"]:::subnode
+    IntakeState["📥 Intake State"]:::state
+    
+    subgraph FusedPlanning["📝 Fused Analysis & Planning Node"]
+        Fusion["🎭 emotion_fusion_node"]:::subnode
+        ContextEnrich["✍️ context_enrichment (exam/sleep/cognitive)"]:::subnode
+        Trend["📈 trend_analyzer (cached/background snapshots)"]:::subnode
+        Clinical["🩺 clinical_severity (minimal defaults)"]:::subnode
+        Consent["🔐 consent_parser"]:::subnode
+        Resolver["🔗 conversation_context_resolver"]:::subnode
+        Planner["📋 conversation_planner_node"]:::subnode
+        Lifecycle["🔄 turn_lifecycle.refine_turn_type"]:::subnode
+        Activation["🏃 behavioral_activation_node"]:::subnode
     end
+    
+    PlannedState["📦 Planned Response State"]:::output
 
-    PlannedState["Planned response state"]:::output
-
-    IntakeState --> Fusion --> ContextEnrich --> Trend --> Clinical --> Consent --> Resolver --> Planner --> Lifecycle --> Activation --> PlannedState
+    IntakeState --> Fusion
+    Fusion --> ContextEnrich
+    ContextEnrich --> Trend
+    Trend --> Clinical
+    Clinical --> Consent
+    Consent --> Resolver
+    Resolver --> Planner
+    Planner --> Lifecycle
+    Lifecycle --> Activation
+    Activation --> PlannedState
 ```
 
-**Responsibilities**
+What it checks and produces:
 
-- Fuses text and voice emotion into `fused_emotion` and `fused_intensity`
-- Applies intensity normalization, neutral caps, hedge-word reduction, and passive-ideation checks
-- Detects mismatch and possible masking between text and voice signals
-- Enriches context for exam stress, sleep issues, fear-of-failure, catastrophic thought, and environment triggers
-- Sets cognitive distortion hints (e.g. catastrophizing) when deterministic context supports it
-- Parses consent, suppressed topics, corrected history, active issue source, and solution preference; persists `denied_hard` and `medical_risk_elevated` to `UserPreference` via background task
-- Resolves short replies and pronouns against the last assistant question, active thread, and session context
-- Refines the lifecycle turn type from the gate's guess into a final `TurnType`
+- Fuses text and voice emotion into `fused_emotion` and `fused_intensity`.
+- For therapeutic or crisis voice turns, passes authoritative Gemini audio emotion through with safety post-processing.
+- For text-only turns, applies intensity normalization, neutral caps, hedge-word reduction, passive ideation checks, gate caps, and distress anchor guard.
+- Detects mismatch and possible masking between text and voice signals.
+- Enriches exam, study, sleep, bedtime rumination, fear-of-failure, catastrophic thought, and environment trigger context.
+- Sets cognitive distortion hints such as catastrophizing when deterministic context supports it.
+- Uses cached emotional trend or schedules trend refresh in the background.
+- Sets clinical defaults to minimal unless optional heavier analysis is enabled.
+- Parses consent, suppressed topics, corrected history, active issue source, and solution preference.
+- Resolves short replies and pronouns against the last assistant question, active thread, active technique, and session context.
+- Chooses conversation strategy through the planner.
+- Refines lifecycle turn type from gate guess into final `INITIAL_DISCLOSURE`, `FOLLOW_UP_DISCLOSURE`, `CONTEXT_GATHERING`, `POST_RECOMMENDATION_REACTION`, or `CRISIS_DISCLOSURE`.
+- Optionally adds a behavioral activation micro-action when the feature flag allows it.
 
-> **Clinical severity** (`clinical_severity`, `clinical_phq9_score`, `clinical_gad7_score`) uses deterministic static defaults (`minimal` / 0) since v11.1 — the LLM-based PHQ-9/GAD-7 call was removed for latency. The fields are retained in state for downstream consumers but contain no scored output.
+Planner strategy outputs include:
 
-> **Behavioral activation** runs only when `SENTIMIND_INLINE_ACTIVATION=1` is set; it is disabled by default. Distortion detection runs inline only when `SENTIMIND_INLINE_DISTORTION=1`; otherwise it runs in a background task.
+- `no_action`
+- `validate_only`
+- `ask_question`
+- `encourage_reflection`
+- `reframe`
+- `suggest_technique`
+- `distract`
 
-**Strategy outputs:** `no_action` · `validate_only` · `ask_question` · `encourage_reflection` · `reframe` · `suggest_technique` · `distract`
+Planner phase outputs include:
 
-**Phase outputs:** `neutral` · `venting` · `reflection` · `solution` · `recovery`
+- `neutral`
+- `venting`
+- `reflection`
+- `solution`
+- `recovery`
 
----
+### Node 3: Response Pipeline
 
-### 3. Response Pipeline
+Primary module:
 
-`nodes/response_pipeline.py`
+- `nodes/response_pipeline.py`
+
+Inline subnodes:
 
 ```mermaid
 flowchart LR
-    classDef state fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B
-    classDef subnode fill:#FDF4FF,stroke:#D946EF,stroke-width:2px,color:#701A75
-    classDef output fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#065F46
+    %% Class Definitions
+    classDef state fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B,rx:6px,ry:6px;
+    classDef subnode fill:#FDF4FF,stroke:#D946EF,stroke-width:2px,color:#701A75,rx:6px,ry:6px;
+    classDef output fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#065F46,rx:6px,ry:6px;
 
-    Planned["Planned state"]:::state
-
-    subgraph Fused["Fused response pipeline"]
-        Technique["technique_selector_node"]:::subnode
-        Role["role_selector"]:::subnode
+    Planned["📥 Planned State"]:::state
+    
+    subgraph FusedPipeline["🛠️ Fused Response Pipeline"]
+        Technique["🎯 technique_selector_node"]:::subnode
+        Role["🎭 role_selector"]:::subnode
     end
+    
+    PipelineState["📦 Pipeline Output State"]:::output
 
-    PipelineState["Pipeline output state"]:::output
-
-    Planned --> Technique --> Role --> PipelineState
+    Planned --> Technique
+    Technique --> Role
+    Role --> PipelineState
 ```
 
-**Responsibilities**
+What it checks and produces:
 
-- Checks `conversation_strategy` and `technique_readiness`
-- Honors exercise consent and listen-only preferences before selecting exercises
-- Preserves a pending recommended technique until the user consents
-- Searches active DB techniques semantically against emotion, sub-emotion, symptoms, behaviors, and contexts
-- Filters out unsuitable or suppressed techniques
-- Returns `recommended_technique`, `recommended_techniques_by_category`, `alternative_techniques`, `technique_candidates`, and `latest_recommended_technique`
-- Selects communication role from crisis state, fused intensity, trend, and phase
+- Checks `conversation_strategy` and `technique_readiness`.
+- Honors exercise consent and listen-only preferences before selecting exercises.
+- Preserves pending recommended technique until the user consents.
+- Anchors short consent turns to the real underlying distress emotion.
+- Searches active DB techniques semantically against emotion, sub-emotion, symptoms, behaviors, contexts, concern, and intensity.
+- Filters out unsuitable or suppressed techniques.
+- Returns `recommended_technique`, `recommended_techniques_by_category`, `alternative_techniques`, `technique_candidates`, and `latest_recommended_technique`.
+- Selects communication role from crisis state, fused intensity, trend, and phase.
 
-**Role selection rules:**
+Role rules:
 
-| Condition | Role |
-|---|---|
-| Crisis detected | `crisis_support` |
-| Worsening trend, intensity ≥ 0.6 | `trainer` |
-| Reflection phase | `coach` or `friend` |
-| Intensity < 0.4 | `friend` |
-| Intensity 0.4–0.7 | `coach` |
-| Intensity ≥ 0.7 | `trainer` |
+- Crisis detected means `crisis_support`.
+- Worsening trend with intensity at or above `0.6` can escalate to `trainer`.
+- Reflection phase keeps the role gentler: `coach` or `friend`.
+- Intensity below `0.4` means `friend`.
+- Intensity from `0.4` to below `0.7` means `coach`.
+- Intensity at or above `0.7` means `trainer`.
 
-**Collaborators:** `utils/technique_selector.py` · `utils/role_selector.py`
+### Node 4: Crisis Handler
 
----
+Primary module:
+
+- `nodes/crisis_handler.py`
+
+What it checks and produces:
+
+- Trusts crisis pre-screener level when present.
+- Escalates if crisis tools were explicitly called.
+- Treats medium and high risk as crisis.
+- Loads saved emergency contacts only when scoped emergency-contact consent allows it.
+- Builds enriched crisis details from text emotion, fused emotion, sentiment, intensity, message preview, and voice features.
+- Sends WhatsApp or SMS crisis alerts through configured Twilio services when appropriate.
+- Adds voice/text conflict details when voice emotion and text emotion disagree.
+- Sets crisis flags and metadata for the response generator.
+- Does not create the final user-facing text itself; it routes to response generation so the crisis reply is contextual and consistent.
+
+### Node 5: Optimized Response Generator
+
+Primary module:
+
+- `nodes/optimized_response_generator.py`
+
+What it checks and produces:
+
+- Uses a fast casual prompt for `no_action`.
+- Builds a full system prompt for therapeutic, crisis, memory, technique, and follow-up turns.
+- Injects recent bounded history from graph state.
+- Injects cross-session memory context.
+- Injects response strategy, phase, trend, distortion hints, micro-action, consent preference, and suppressed topic instructions.
+- Adds possible emotion mismatch guidance when voice/text mismatch or masking is detected.
+- Adds rejection override when the user rejected a technique.
+- Adds acceptance override when the user accepted a pending or prior technique.
+- Lets the final response LLM choose from valid technique candidates when needed.
+- Cleans accidental model metadata prefixes from the final reply.
+- Avoids repeated empathy openings across adjacent turns.
+- Marks `technique_offered_this_turn` only if the final text actually includes the selected technique.
+- Emits `turn_technique_id` only when a technique was truly offered.
+- Returns `final_response`, `response_task`, candidate metadata, and technique-offer flags.
+
+### Post-Response Background Persistence
+
+Primary module:
+
+- `nodes/parallel_persist.py`
+
+```mermaid
+flowchart TD
+    %% Class Definitions
+    classDef input fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B,rx:6px,ry:6px;
+    classDef task fill:#FDF4FF,stroke:#D946EF,stroke-width:2px,color:#701A75,rx:6px,ry:6px;
+    classDef db fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#065F46,rx:6px,ry:6px;
+
+    FinalState["📥 Frozen Final State (Response Sent!)"]:::input
+    
+    subgraph ParallelTasks["⚡ Concurrent Write Tasks (asyncio.gather)"]
+        Profile["👤 psych_profile_updater"]:::task
+        Saver["📜 session_saver (messages/snapshots)"]:::task
+        Outcome["🎯 outcome_tracker_node"]:::task
+        Analytics["📊 long_term_analytics_node"]:::task
+    end
+    
+    DB["🗄️ Supabase PostgreSQL (Prisma)"]:::db
+
+    FinalState --> Profile
+    FinalState --> Saver
+    FinalState --> Outcome
+    FinalState --> Analytics
+    
+    Profile --> DB
+    Saver --> DB
+    Outcome --> DB
+    Analytics --> DB
+```
+
+What it writes:
+
+- User psychological profile refresh.
+- User and assistant messages.
+- Emotion snapshots.
+- Mood logs and session fields.
+- Pending or resolved technique outcomes.
+- Long-term analytics snapshots and dashboard aggregates.
+- Structured session handoff for the next session.
+
+Failures in background persistence are logged and do not crash the user-facing response.
+
+### Design Intent
+
+SentiMind separates responsibilities into small layers:
+
+- The frontend owns interaction quality, screens, voice controls, and user-facing dashboards.
+- The API owns HTTP contracts, streaming, authentication boundaries, and request orchestration.
+- The pre-graph gate protects latency and safety by separating bypassable turns from turns that need full therapeutic analysis.
+- The agent graph owns deeper emotional reasoning, planning, crisis decisions, response strategy, and technique decisions.
+- Persistence runs in parallel where possible so user latency stays low.
+- Supabase stores both conversational history and analytic signals.
+- Dashboard services transform raw records into user-facing trend views.
+
+## Runtime Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as 👤 User
+    participant F as 📱 Frontend (Next.js)
+    participant A as ⚙️ API (FastAPI)
+    participant G as 🚦 Smart Gate
+    participant N as 🤖 Agent Graph (LangGraph)
+    participant L as 🧠 LLM & Audio (Gemini)
+    participant D as 🗄️ Supabase DB
+
+    U->>F: Send text/voice message
+    F->>A: POST chat request (with voice bytes/context)
+    A->>G: Lightweight route, distress check & context load
+    alt Bypass Route Allowed (Confidence >= Threshold & No Voice)
+        G->>L: Generate quick response (Chitchat, Memory, list_tips)
+        G->>D: Save bypass session turn (async task)
+        G-->>A: Fast payload & metadata
+    else Force Graph Route (Low Conf or Voice Present)
+        A->>N: Invoke 5-Node Graph
+        N->>L: Parallel Intake: screen_for_crisis, mood, intent & voice preprocess
+        N->>L: Fused Analysis & Planning: fuse emotion/intensity & conversation strategy
+        N->>L: Response Pipeline: select technique & communication role
+        N->>L: Optimized Response Generator: compile final structured reply
+        N->>D: Parallel Persist: save messages, snapshots, outcomes, memory, summaries
+        N-->>A: Compiled payload & metadata
+    end
+    A-->>F: Deliver response text, emotions & technique details
+    F-->>U: Render UI reply, emotion graphics & interactive technique cards
+```
+
+### Request Categories
+
+- Text chat uses standard FastAPI routes and the agent graph.
+- Streaming chat returns incremental model output while keeping persistence intact.
+- Voice chat transcribes audio first, then routes based on transcript meaning.
+- Dashboard requests bypass the agent and read analytic aggregates from Supabase.
+- Crisis actions use dedicated safety routes and Twilio-backed integrations.
+
+## Agent Graph
+
+The agent is intentionally compact: five graph nodes with conditional routing between them. The heavy work happens inside specialized node modules, while the graph keeps orchestration readable.
+
+```mermaid
+flowchart TD
+    %% Class Definitions
+    classDef startend fill:#F5F5F7,stroke:#6C7A89,stroke-width:2px,color:#333,rx:20px,ry:20px;
+    classDef node fill:#F0FDFA,stroke:#0D9488,stroke-width:2px,color:#115E59,rx:8px,ry:8px;
+    classDef decision fill:#FEF3C7,stroke:#D97706,stroke-width:2px,color:#78350F;
+    classDef crisis fill:#FEF2F2,stroke:#DC2626,stroke-width:2px,color:#991B1B,rx:8px,ry:8px;
+
+    Start([🏁 Start]):::startend
+    Intake["🔀 run_parallel_intake"]:::node
+    CrisisGate{"❓ Early Crisis Detected?"}:::decision
+    Planning["📝 run_analysis_and_planning"]:::node
+    NeedsPipeline{"❓ Needs Deeper Technique Selection?"}:::decision
+    Pipeline["🛠️ run_response_pipeline"]:::node
+    PipelineCrisis{"❓ Crisis/Distress Escalated?"}:::decision
+    Crisis["🚨 handle_crisis"]:::crisis
+    Response["✍️ generate_response"]:::node
+    End([🏁 End]):::startend
+
+    Start --> Intake
+    Intake --> CrisisGate
+    CrisisGate -- Yes (Direct) --> Crisis
+    CrisisGate -- No --> Planning
+    Planning --> NeedsPipeline
+    NeedsPipeline -- No (Fast/Casual) --> Response
+    NeedsPipeline -- Yes (Therapeutic) --> Pipeline
+    Pipeline --> PipelineCrisis
+    PipelineCrisis -- Yes (Escalate) --> Crisis
+    PipelineCrisis -- No --> Response
+    Crisis --> Response
+    Response --> End
+```
+
+### Why This Shape Works
+
+- Intake work runs early and in parallel.
+- Crisis handling remains reachable before and after deeper analysis.
+- Simple turns can skip the expensive response pipeline.
+- Complex emotional turns still receive full planning, memory, technique, and analytics support.
+- Response generation is the final common exit, so the assistant style remains consistent.
+
+## Node Analysis
+
+### 1. Parallel Intake
+
+Primary module:
+
+- `mental_health_wellness/src/mental_health_wellness/nodes/parallel_intake.py`
+
+Responsibilities:
+
+- Load context required for the current turn.
+- Run early classification and extraction tasks.
+- Prepare the shared agent state for analysis.
+- Keep latency low by avoiding unnecessary sequential work.
+
+Important collaborators:
+
+- `context_loader.py`
+- `intent_classifier.py`
+- `crisis_detection_node.py`
+- `memory_extraction_node.py`
+- `smart_gate_node.py`
+
+### 2. Analysis And Planning
+
+Primary module:
+
+- `mental_health_wellness/src/mental_health_wellness/nodes/analysis_and_planning.py`
+
+Responsibilities:
+
+- Convert raw intake signals into a response plan.
+- Refine lifecycle turn type after emotion and route context are known.
+- Decide whether the response needs deeper therapeutic processing.
+- Prepare strategy fields consumed by the response generator.
+
+Key outputs:
+
+- `conversation_phase`
+- `response_strategy`
+- `turn_type`
+- `intervention_type`
+- crisis escalation state
+- technique readiness state
+
+### 3. Response Pipeline
+
+Primary module:
+
+- `mental_health_wellness/src/mental_health_wellness/nodes/response_pipeline.py`
+
+Responsibilities:
+
+- Select or suppress therapeutic techniques.
+- Format active and alternative techniques.
+- Track outcomes from previous technique offers.
+- Select communication role (e.g. coach, friend, trainer, crisis support).
+
+Important collaborators:
+
+- `mental_health_wellness/src/mental_health_wellness/utils/technique_selector.py`
+- `mental_health_wellness/src/mental_health_wellness/utils/role_selector.py`
 
 ### 4. Crisis Handler
 
@@ -728,35 +857,18 @@ flowchart LR
 
 ### 5. Optimized Response Generator
 
-`nodes/optimized_response_generator.py`
+Primary module:
 
-**Responsibilities**
+- `mental_health_wellness/src/mental_health_wellness/nodes/optimized_response_generator.py`
 
-- Creates the final assistant response
-- Respects route, phase, lifecycle, crisis, and voice-fusion guidance
-- Marks `technique_offered_this_turn` **only** when the final message contains both the technique name AND a structural markdown exercise card marker (`**Steps:**`, `### Exercise:`, `* **Category:**`, etc.) — prevents phantom `TechniqueOutcome` records
-- Avoids asserting that the user feels differently when text and voice signals conflict
-- Enforces `question_budget` hard limits (0 = no question; 1 = exactly one question after any action)
+Responsibilities:
 
-**Response task reference:**
+- Create the final assistant response.
+- Respect route, phase, lifecycle, crisis, and voice-fusion guidance.
+- Mark `technique_offered_this_turn` only when the final assistant message actually offers the selected technique.
+- Avoid claiming the user feels differently when text and voice signals conflict.
 
-| Task | Trigger | Behaviour |
-|---|---|---|
-| `start_grounding_now` | `immediate_regulation_request=True` | Lead with 1-2 validating sentences, deliver technique inline, 0 questions |
-| `offer_one_technique` | Context sufficient, consent allowed | Deliver a single technique from DB, 0 questions |
-| `ask_permission_before_technique` | Consent unknown | Ask if user wants to try a technique; do not name it yet |
-| `give_tiny_first_step` | Solution requested, context insufficient | Validate → action/first step → 1 optional question after |
-| `acknowledge_medical_and_check` | `has_medical_signal=True` on a context-question turn | Lead with medical safety note → validate → 0 questions → brief grounding anchor |
-| `ask_one_missing_context_question` | Resolver flagged missing context slot | Validate → 1 focused context question |
-| `ask_next_context_question` | Discovery/Understanding stage | Validate → 1 focused question |
-| `continue_active_technique` | User accepted technique | Present full personalised technique steps inline |
-| `handle_technique_rejection` | User declined | Warm acknowledge → ask what felt unhelpful, no re-offer |
-| `positive_feedback` | User reported improvement | Warm celebration, no new technique |
-| `chitchat` | Low-signal/casual turn | Conversational reply only |
-
----
-
-## Lifecycle and Outcome Tracking
+## Lifecycle And Outcome Tracking
 
 The lifecycle layer exists because mood analytics become noisy if every turn is treated as the same kind of emotional disclosure. A short "thanks" after a technique should not be scored like a new distress report, and a context-only answer should not distort mood-improvement graphs.
 
@@ -828,15 +940,9 @@ This enables meaningful questions such as:
 - Is the dashboard comparing real disclosures instead of polite acknowledgements?
 - Did the session peak improve by the final qualifying emotional snapshot?
 
-> **`technique_offered_this_turn` detection** requires both the technique name AND a structural exercise-card marker in the response. Generic words like "breathe" or "step 1" in an empathetic sentence no longer trigger a pending `TechniqueOutcome`.
+## Voice And Emotion Fusion
 
-> **`intensityBefore` baseline** uses `peak_distress_intensity` (not the attenuated current reading) when the two differ by more than 0.15, so effectiveness scores are not skewed by follow-up turn intensity decay.
-
----
-
-## Voice and Emotion Fusion
-
-Voice handling is **route-aware**. The system transcribes audio and captures voice feature signals, but voice emotion is not forced into every route. The transcript drives routing first; voice features are linked into therapeutic or crisis processing when that route supports emotion fusion.
+Voice handling is route-aware. The system can transcribe audio and capture voice feature signals, but voice emotion is not forced into every route. The transcript drives routing first; voice features are linked into therapeutic or crisis processing when that route supports emotion fusion.
 
 ```mermaid
 flowchart TD
@@ -864,50 +970,7 @@ flowchart TD
 
 **Persisted fusion metadata:** text/voice mismatch · possible masking · fusion confidence · transcription confidence · voice feature snapshot · conversation phase · response strategy
 
-> The response prompt instructs the model to acknowledge uncertainty and **never assert that the user feels something different from what they said**.
-
-### Voice Signal Pipeline
-
-```
-Audio upload
-  └─▶ Gemini transcription + holistic audio emotion (tone, pace, pauses, energy, strain, hesitation)
-  └─▶ DSP acoustic feature extraction  — voice/acoustic_features.py
-        ├── librosa  : MFCCs (13-dim vector), RMS loudness, spectral flux, pause density
-        └── parselmouth/Praat : pitch F0 mean/std, jitter, shimmer, HNR (voice quality)
-  └─▶ Composite distress index  =  weighted blend of Gemini + acoustic features
-  └─▶ Emotion fusion node  —  merges Gemini audio emotion with text emotion
-```
-
-**Two separate analysis paths run in parallel:**
-
-| Path | Library | What it measures | LLM? |
-|---|---|---|---|
-| Gemini audio analysis | Gemini API (`gemini-2.0-flash`) | Transcript, core emotion, sub-emotions, arousal, valence, distress, sentiment | Yes |
-| DSP acoustic features | librosa + parselmouth/Praat | MFCC vector, jitter, shimmer, HNR, RMS, spectral flux, pause density, speech rate | No |
-
-**Server startup warm-up (`preload_all_voice_models`):**
-
-`voice/__init__.py::preload_all_voice_models()` is called by `organized_lifespan` at FastAPI startup. It eagerly imports and exercises both DSP libraries before any request arrives:
-
-- **librosa**: runs a dummy `mfcc()` call to trigger numba JIT compilation — eliminates a ~2–5 s cold-import penalty on Windows for the first real voice request
-- **parselmouth/Praat**: constructs a dummy `Sound` object to initialise the native Praat shared library
-
-The function returns a status dict (`librosa: "ready" | "unavailable: ..."`, `parselmouth: "ready" | "unavailable: ..."`) and prints startup diagnostics. If either library is unavailable the voice pipeline degrades gracefully — Gemini-only analysis continues without the DSP features.
-
-**`acoustic_features` output fields surfaced in every voice tool response:**
-
-| Field | Source |
-|---|---|
-| `mfcc_vector` | librosa — 13 MFCC coefficients |
-| `pause_density` | librosa — silent frame proportion |
-| `distress_index` | weighted composite (Gemini + acoustic) |
-| `pitch_mean`, `pitch_std` | parselmouth — fundamental frequency F0 |
-| `jitter` | parselmouth — cycle-to-cycle pitch perturbation |
-| `shimmer` | parselmouth — amplitude perturbation |
-| `hnr` | parselmouth — harmonics-to-noise ratio (voice quality) |
-| `speech_rate`, `spectral_flux` | librosa — derived rhythm and spectral change |
-
----
+The response prompt is instructed to acknowledge uncertainty carefully and never assert that the user feels something different from what they said.
 
 ## Crisis Safety
 
@@ -1289,35 +1352,26 @@ FYP/
 
 ## Environment Variables
 
-### Backend
+Backend variables commonly required:
 
-| Variable | Purpose |
-|---|---|
-| `DATABASE_URL` | Prisma primary connection string |
-| `DIRECT_URL` | Prisma direct connection for migrations |
-| `GEMINI_API_KEY` | Google Gemini API key |
-| `GOOGLE_API_KEY` | Google API key (audio/transcription) |
-| `TWILIO_ACCOUNT_SID` | Twilio account SID |
-| `TWILIO_AUTH_TOKEN` | Twilio auth token |
-| `TWILIO_PHONE_NUMBER` | Twilio originating phone number |
-| `ENVIRONMENT` | Runtime environment (`development` / `production`) |
-| `LOG_LEVEL` | Logging verbosity |
-| `FRONTEND_URL` | CORS allowed origin |
-| `SENTIMIND_BACKGROUND_TREND` | `1` = run trend DB query in background (default `1`); `0` = inline blocking call |
-| `SENTIMIND_INLINE_DISTORTION` | `1` = run cognitive distortion LLM inline; `0` = background/profile path (default `0`) |
-| `SENTIMIND_INLINE_ACTIVATION` | `1` = run behavioral activation sub-node inline; `0` = skip (default `0`) |
+- `DATABASE_URL`
+- `DIRECT_URL`
+- `GEMINI_API_KEY`
+- `GOOGLE_API_KEY`
+- `TWILIO_ACCOUNT_SID`
+- `TWILIO_AUTH_TOKEN`
+- `TWILIO_PHONE_NUMBER`
+- `ENVIRONMENT`
+- `LOG_LEVEL`
+- `FRONTEND_URL`
 
-### Frontend
+Frontend variables commonly required:
 
-| Variable | Purpose |
-|---|---|
-| `NEXT_PUBLIC_API_BASE_URL` | Backend API base URL |
-| `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase anonymous key |
+- `NEXT_PUBLIC_API_BASE_URL`
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
 
-> **Security:** Never commit secrets to source control. Use local `.env` files or your deployment provider's secret management.
-
----
+Keep secrets out of source control. Use local `.env` files or deployment provider secret stores.
 
 ## Setup
 
