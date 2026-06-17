@@ -1,9 +1,12 @@
 """
 LangChain tool wrapper for Gemini voice emotion analysis.
 
-The returned shape keeps the historical acoustic keys for graph compatibility,
-but the actual analysis is a single Gemini audio call that returns transcript,
-core emotion, sub-emotions, sentiment, confidence, and distress cues.
+Gemini provides transcript, core emotion, sub-emotions, sentiment, confidence,
+and a holistic distress/arousal/valence judgment from listening to the audio.
+`acoustic_features` and `mfcc_vector` are real measurements computed by
+voice/acoustic_features.py (librosa + parselmouth/Praat) -- an LLM cannot
+measure jitter, shimmer, HNR, or MFCCs, only estimate higher-level impressions,
+so those numbers are never asked of Gemini.
 """
 from langchain_core.tools import tool
 
@@ -13,10 +16,10 @@ def analyze_voice(audio_path: str) -> dict:
     """
     Analyze voice/speech audio with Gemini for emotional signals and distress.
 
-    Gemini uses both the transcript and vocal delivery cues such as tone, pace,
-    pauses, energy, strain, and hesitation. Compatibility fields like
-    acoustic_features and mfcc_vector are placeholders unless Gemini returns
-    higher-level estimates.
+    Gemini uses both the transcript and a holistic listen for tone, pace,
+    pauses, energy, strain, and hesitation. `acoustic_features` and
+    `mfcc_vector` are real DSP measurements (librosa + parselmouth), not
+    Gemini estimates -- see voice/acoustic_features.py.
 
     Args:
         audio_path: Absolute path to the audio file (WAV, WebM, MP3).
@@ -141,6 +144,10 @@ def analyze_voice(audio_path: str) -> dict:
                 "speech_rate":   float(acoustic.get("speech_rate", 0)),
                 "spectral_flux": float(acoustic.get("spectral_flux", 0)),
             },
+            # Real (librosa + parselmouth) DSP cross-check -- see
+            # voice/acoustic_features.py for what this measures.
+            "acoustic_distress_proxy": result.get("acoustic_distress_proxy"),
+            "dsp_extraction_method": result.get("dsp_extraction_method", "dsp_failed"),
             "all_scores":        result.get("all_scores", {}),
             "emotion_scores":     result.get("emotion_scores", result.get("all_scores", {})),
             "primary_sub_emotion": result.get("primary_sub_emotion", "neutral"),

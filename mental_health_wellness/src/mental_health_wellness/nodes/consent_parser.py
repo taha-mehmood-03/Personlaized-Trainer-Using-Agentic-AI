@@ -15,15 +15,18 @@ PURPOSE:
 DESIGN:
   - Runs inside run_analysis_and_planning() between emotion fusion and the planner.
   - Returns only the fields that actually changed (sparse update).
-  - Session-scoped: consent & suppression live in state only; NOT persisted to DB.
-  - Strong language like "I never want exercises" triggers a persistent UserPreference
-    write via an optional background task.
+  - Mostly session-scoped, with two durable DB exceptions:
+      1. denied_hard: "I never want exercises" → written to UserPreference.communicationStyle
+         as "never_exercises"; loaded back at session start to restore exercise_consent.
+      2. medical_risk_elevated: any has_medical_signal turn → written to communicationStyle
+         as "medical_risk_elevated"; loaded back as has_persistent_medical_signal.
 
 OUTPUTS (partial state dict — only changed fields):
-  exercise_consent    : str   ("unknown" | "denied" | "allowed")
-  solution_preference : str   ("unknown" | "listen_only" | "advice_allowed" | "exercise_requested")
-  suppressed_topics   : list  (appended, not overwritten)
-  active_issue_source : str | None
+  exercise_consent             : str   ("unknown" | "denied_soft" | "denied_hard" | "allowed")
+  solution_preference          : str   ("unknown" | "listen_only" | "advice_allowed" | "exercise_requested")
+  suppressed_topics            : list  (appended, not overwritten)
+  active_issue_source          : str | None
+  has_persistent_medical_signal: bool  (loaded from DB when medical_risk_elevated flag is set)
 """
 
 import re
@@ -31,6 +34,7 @@ from ..agent.state import MentalHealthState
 from ..utils.turn_signals import (
     has_negative_feedback_signal,
     has_positive_outcome_signal,
+    is_explicit_exercise_request,
     is_no_thanks,
     is_technique_acceptance_reply,
 )
@@ -218,7 +222,8 @@ def parse_consent_and_suppression(state: MentalHealthState) -> dict:
     Merge this into the pipeline state before the planner runs.
 
     Does NOT overwrite already-decided values unless a new signal is found:
-      - Once exercise_consent = "denied", it stays denied for the whole session.
+      - Once exercise_consent = "denied_soft" or "denied_hard", it stays denied for the whole session
+        (denied_hard is also persisted to DB via _schedule_preference_write).
       - Once exercise_consent = "allowed", it stays allowed unless the user later denies.
     """
     messages = state.get("messages", [])
@@ -277,6 +282,11 @@ def parse_consent_and_suppression(state: MentalHealthState) -> dict:
         updates["exercise_consent"] = "denied_hard"
         updates["solution_preference"] = "listen_only"
 
+    # GAP 2: Load persistent medical risk flag written in a prior session
+    if "medical_risk_elevated" in comm_style and not state.get("has_persistent_medical_signal"):
+        print(f"[CONSENT_PARSER]  Persistent 'medical_risk_elevated' preference loaded from DB → has_persistent_medical_signal=True")
+        updates["has_persistent_medical_signal"] = True
+
     # -------------------------------------------------------
     # 1. PERMANENT / HARD DENIAL → also write to UserPreference (background)
     # -------------------------------------------------------
@@ -318,6 +328,15 @@ def parse_consent_and_suppression(state: MentalHealthState) -> dict:
             print(f"[CONSENT_PARSER]  Exercise acceptance detected → exercise_consent=allowed")
             updates["exercise_consent"] = "allowed"
             updates["solution_preference"] = "exercise_requested"
+
+    # -------------------------------------------------------
+    # 3b. DIRECT EXERCISE REQUEST (no pending offer required)
+    # -------------------------------------------------------
+    elif is_explicit_exercise_request(current_message):
+        if exercise_consent != "allowed":
+            print(f"[CONSENT_PARSER]  Direct exercise request detected → exercise_consent=allowed")
+            updates["exercise_consent"] = "allowed"
+        updates["solution_preference"] = "exercise_requested"
 
     # -------------------------------------------------------
     # 4. LISTEN-ONLY (no explicit exercise denial, but "just listen")
@@ -398,15 +417,15 @@ def _extract_suppressed_topic(text_lower: str) -> str | None:
 
 def _schedule_preference_write(state: MentalHealthState, preference_key: str) -> None:
     """
-    Optionally persist a strong permanent preference to UserPreference in the DB.
+    Persist a strong permanent preference to UserPreference in the DB.
     Runs as a fire-and-forget background task — non-blocking.
-    Only executes if the background LLM / DB pipeline is enabled.
-    """
-    import os
-    import asyncio
 
-    if os.getenv("SENTIMIND_BACKGROUND_LLM_ENABLED", "0").lower() not in {"1", "true", "yes", "on"}:
-        return
+    GAP 5 fix: the previous env-var gate (SENTIMIND_BACKGROUND_LLM_ENABLED)
+    prevented denied_hard from ever being written in most deployments, causing
+    the preference to be forgotten on server restart. The gate is removed so
+    denied_hard always reaches the DB.
+    """
+    import asyncio
 
     user_id = state.get("user_id", "")
     if not user_id:
@@ -436,6 +455,52 @@ def _schedule_preference_write(state: MentalHealthState, preference_key: str) ->
                 print(f"[CONSENT_PARSER]  Created UserPreference with 'never_exercises' for {user_id[:12]}...")
         except Exception as e:
             print(f"[CONSENT_PARSER]  Preference DB write failed (non-fatal): {str(e)[:80]}")
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.create_task(_write())
+    except Exception:
+        pass
+
+
+def schedule_medical_risk_write(state: MentalHealthState) -> None:
+    """
+    GAP 2: Persist a 'medical_risk_elevated' flag to UserPreference so future
+    sessions know to show the medical disclaimer even when the current message
+    contains no medical language (e.g. the user says 'I'm anxious again' in
+    session 2 but had chest pain disclosures in session 1).
+
+    Uses the same communicationStyle carrier field as never_exercises.
+    Fire-and-forget — non-blocking.
+    """
+    import asyncio
+
+    user_id = state.get("user_id", "")
+    if not user_id:
+        return
+
+    async def _write():
+        try:
+            from ..db.client import get_prisma_client
+            prisma = await get_prisma_client()
+            pref = await prisma.userpreference.find_unique(where={"userId": user_id})
+            if pref:
+                current_style = pref.communicationStyle or ""
+                if "medical_risk_elevated" not in current_style:
+                    await prisma.userpreference.update(
+                        where={"userId": user_id},
+                        data={"communicationStyle": f"{current_style};medical_risk_elevated".strip(";")},
+                    )
+                    print(f"[CONSENT_PARSER]  Persistent 'medical_risk_elevated' written for {user_id[:12]}...")
+            else:
+                await prisma.userpreference.create(data={
+                    "userId": user_id,
+                    "communicationStyle": "medical_risk_elevated",
+                })
+                print(f"[CONSENT_PARSER]  Created UserPreference with 'medical_risk_elevated' for {user_id[:12]}...")
+        except Exception as e:
+            print(f"[CONSENT_PARSER]  Medical risk DB write failed (non-fatal): {str(e)[:80]}")
 
     try:
         loop = asyncio.get_event_loop()

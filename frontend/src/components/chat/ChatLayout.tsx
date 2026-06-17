@@ -97,6 +97,7 @@ export function ChatLayout({
   const [displayedTechnique, setDisplayedTechnique] = useState<Technique | null>(null)
   const [displayedAlternatives, setDisplayedAlternatives] = useState<Technique[]>([])
   const selectedSessionRef = useRef<string | null>(initialSessionId)
+  const hasInitializedSessionsRef = useRef(initialSessions.length > 0)
   const latestTrackedMessage = useMemo(
     () =>
       [...messages].reverse().find(
@@ -122,6 +123,10 @@ export function ChatLayout({
   const headerSentiment = cleanEmotionLabel(latestTrackedMessage?.sentiment) ?? cleanEmotionLabel(latestSentiment)
 
   useEffect(() => {
+    hasInitializedSessionsRef.current = initialSessions.length > 0
+  }, [initialSessions.length, userId])
+
+  useEffect(() => {
     if (activeTechnique) {
       setDisplayedTechnique(activeTechnique)
       setDisplayedAlternatives(alternativeTechniques)
@@ -129,8 +134,11 @@ export function ChatLayout({
   }, [activeTechnique, alternativeTechniques])
 
   useEffect(() => {
-    if (!isDesktop || sessions.length > 0 || loadingSessions) return
-    refreshSessions()
+    if (!isDesktop || sessions.length > 0 || loadingSessions || hasInitializedSessionsRef.current) return
+    hasInitializedSessionsRef.current = true
+    void refreshSessions().catch((error) => {
+      console.error('[ChatLayout] Failed to load sessions:', error)
+    })
   }, [isDesktop, loadingSessions, refreshSessions, sessions.length])
 
   useEffect(() => {
@@ -220,16 +228,8 @@ export function ChatLayout({
   )
 
   const techniquePanel = useMemo(() => {
-    if (!isDesktop || (!currentDisplayedTechnique && !currentDisplayedAlternatives.length)) return null
-    return (
-      <TechniquePanel
-        technique={currentDisplayedTechnique}
-        alternativeTechniques={currentDisplayedAlternatives}
-        userId={userId}
-        sessionId={currentSessionId}
-      />
-    )
-  }, [currentDisplayedAlternatives, currentDisplayedTechnique, isDesktop, userId, currentSessionId])
+    return null
+  }, [])
 
   const chatWindow = useMemo(
     () => (

@@ -190,7 +190,7 @@ def _anchored_distress_emotion(state: MentalHealthState, current_emotion: str, c
             state.get("core_belief"),
         )
     ).lower()
-    if any(marker in text for marker in ("panic", "anxious", "anxiety", "worried", "worry", "stress", "overwhelmed")):
+    if any(marker in text for marker in ("panic", "anxious", "anxiety", "worried", "worry", "stress", "overwhelmed", "overthink", "racing thoughts", "can't sleep", "cannot sleep", "night")):
         return "anxiety"
     if any(marker in text for marker in ("sad", "lonely", "alone", "depressed", "grief", "empty", "not feeling well")):
         return "sadness"
@@ -270,6 +270,8 @@ def _apply_gate_intensity_caps(state: MentalHealthState, emotion: str, intensity
         if not strong_distress:
             thread_floor = 0.35 if has_active_therapeutic_thread(state) else 0.0
             floored = max(thread_floor, min(intensity, hint_value, 0.35))
+            if thread_floor > 0 and str(emotion or "").lower() in _FOLLOWUP_LOW_SIGNAL_EMOTIONS:
+                emotion = _anchored_distress_emotion(state, str(emotion or "neutral").lower(), current)
             if thread_floor > 0 and floored != min(intensity, hint_value, 0.35):
                 print(
                     f"[EMOTION_FUSION] Contextual follow-up thread-aware floor: "

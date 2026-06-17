@@ -181,6 +181,12 @@ def _voice_features_from_full_result(full_result: dict[str, Any]) -> Dict[str, A
         "pause_density": float(full_result.get("pause_density", 0.25)),
         "mfcc_vector": full_result.get("mfcc_vector", [0.0] * 13),
         "acoustic_features": acoustic,
+        # Real (librosa + parselmouth) DSP cross-check, separate from Gemini's
+        # own holistic distress_index judgment above. See
+        # voice/acoustic_features.py for what this measures and why it is
+        # kept distinct rather than overwriting distress_index.
+        "acoustic_distress_proxy": full_result.get("acoustic_distress_proxy"),
+        "dsp_extraction_method": full_result.get("dsp_extraction_method", "dsp_failed"),
         "all_scores": full_result.get("all_scores", {}),
         "emotion_scores": full_result.get("emotion_scores", full_result.get("all_scores", {})),
         "emotion_reasoning": full_result.get("emotion_reasoning"),

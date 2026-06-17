@@ -34,7 +34,8 @@ import re
 from ..agent.state import MentalHealthState
 from ..llm.llm_classifier import llm_intent_check
 from ..techniques.emotion_metadata import EMPATHY_FIRST_SUB_EMOTIONS, NO_TECHNIQUE_BY_DEFAULT_SUB_EMOTIONS
-from .consent_parser import get_suppressed_topic_labels
+from ..utils.turn_signals import is_explicit_exercise_request, is_immediate_regulation_request, is_solution_requested, detect_user_goal, has_medical_warning_signal
+from .consent_parser import get_suppressed_topic_labels, schedule_medical_risk_write
 
 
 # Reflection signal words in user messages
@@ -80,8 +81,8 @@ _STAGE_TO_PHASE = {
     "CHITCHAT": "neutral",
 }
 
-MAX_CONTEXT_QUESTIONS_BEFORE_ACTION = 2
-MAX_SLOW_PACED_CONTEXT_QUESTIONS_BEFORE_ACTION = 3
+MAX_CONTEXT_QUESTIONS_BEFORE_ACTION = 1
+MAX_SLOW_PACED_CONTEXT_QUESTIONS_BEFORE_ACTION = 2
 
 
 def _plain(text: str) -> str:
@@ -309,6 +310,147 @@ def _has_slow_paced_concern_context(state_like: dict) -> bool:
     return any(term in context_text for term in _SLOW_PACED_CONCERN_TERMS)
 
 
+def _infer_technique_areas(state_like: dict, current_message: str = "") -> list[str]:
+    """Identify separable targets for single-vs-series technique planning."""
+    text = " ".join(
+        str(value or "")
+        for value in (
+            current_message,
+            state_like.get("current_topic"),
+            state_like.get("primary_concern"),
+            state_like.get("triggering_subject"),
+            state_like.get("triggering_context"),
+            state_like.get("functional_impact"),
+            state_like.get("core_belief"),
+            " ".join(state_like.get("detected_symptoms") or []),
+            " ".join(state_like.get("detected_behaviors") or []),
+            " ".join(state_like.get("detected_contexts") or []),
+            state_like.get("primary_sub_emotion"),
+            " ".join(state_like.get("secondary_sub_emotions") or []),
+        )
+    ).lower()
+
+    areas: list[str] = []
+
+    def add(area: str) -> None:
+        if area not in areas:
+            areas.append(area)
+
+    if any(marker in text for marker in ("overthink", "rumination", "racing thoughts", "worry loop", "can't stop thinking", "cant stop thinking")):
+        add("rumination")
+    if any(marker in text for marker in ("sleep", "night", "bedtime", "insomnia", "can't sleep", "cant sleep")):
+        add("sleep")
+    if any(marker in text for marker in ("lonely", "loneliness", "alone", "isolated", "isolation")):
+        add("loneliness")
+    if any(marker in text for marker in ("talking to people", "talk to people", "social", "closest friends", "strangers", "acquaintances", "conversation", "fear of talking")):
+        add("social_confidence")
+    if any(marker in text for marker in ("panic", "anxiety", "anxious", "fear", "nervous", "scared")):
+        add("anxiety")
+    if any(marker in text for marker in ("sad", "sadness", "hopeless", "low mood", "depressed")):
+        add("low_mood")
+    if any(marker in text for marker in ("exam", "study", "university", "academic", "assignment", "deadline")):
+        add("academic_stress")
+
+    return areas[:4]
+
+
+def _wants_series_plan(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "series",
+            "routine",
+            "plan",
+            "program",
+            "step by step plan",
+            "multiple exercises",
+            "two exercises",
+            "more than one exercise",
+            "a few exercises",
+            "for all of this",
+            "both issues",
+        )
+    )
+
+
+
+
+# ===========================================================================
+# v13.0: DYNAMIC CONTEXT GATHERING HELPERS
+# ===========================================================================
+
+def _context_is_enough(state: dict, emotion: str, intensity: float) -> bool:
+    """Quantitative context sufficiency check using problem signals, NOT message count.
+
+    Enough context = known non-neutral emotion + intensity above floor + at least
+    one concrete problem signal OR explicit user goal OR explicit solution request.
+
+    GAP 1 fix: A rich single disclosure (>30 words with emotion + any problem signal)
+    is treated as sufficient even if the goal slot is not filled, to avoid asking
+    a follow-up question when the user already provided full context in one message.
+    """
+    has_emotion = (emotion or "neutral").lower() not in ("neutral", "")
+    has_intensity = float(intensity or 0) > 0.20
+    has_problem_signal = bool(
+        state.get("primary_concern")
+        or state.get("active_issue_source")
+        or state.get("detected_contexts")
+        or state.get("detected_behaviors")
+        or state.get("detected_symptoms")
+        or state.get("primary_sub_emotion")
+        or state.get("distortion_type")
+    )
+    has_goal_signal = bool(
+        (state.get("user_goal") or "").strip()
+        or (state.get("latest_user_need") or "").strip()
+    )
+    explicit_solution = bool(state.get("solution_requested"))
+
+    if has_emotion and has_intensity and (has_problem_signal or has_goal_signal or explicit_solution):
+        return True
+
+    # GAP 1: Rich single-message disclosure — long message with emotion + any problem signal
+    # is treated as sufficient without requiring a goal signal.
+    messages = state.get("messages") or []
+    if messages:
+        latest_content = getattr(messages[-1], "content", "") or ""
+        word_count = len(latest_content.split())
+        if word_count >= 30 and has_emotion and has_intensity and has_problem_signal:
+            return True
+
+    return False
+
+
+def _infer_context_missing_reason(state: dict, emotion: str, intensity: float):
+    """Return a targeted reason why context is insufficient, for a targeted single question."""
+    if (emotion or "neutral").lower() in ("neutral", "") or float(intensity or 0) <= 0.10:
+        return "vague_disclosure"
+    if not state.get("primary_concern") and not state.get("detected_contexts"):
+        return "missing_trigger"
+    if not state.get("user_goal") and not state.get("latest_user_need"):
+        return "missing_user_goal"
+    return None
+
+
+def _goal_to_response_task(user_goal, immediate_regulation: bool, solution_requested: bool):
+    """Map a canonical user goal to a specific response_task string."""
+    if immediate_regulation:
+        return "start_grounding_now"
+    _mapping = {
+        "reach_out_to_friend":        "offer_low_pressure_message",
+        "write_simple_message":       "offer_low_pressure_message",
+        "know_where_to_start":        "give_tiny_first_step",
+        "break_project_into_steps":   "give_tiny_first_step",
+        "stop_overthinking_at_night": "offer_overthinking_tool",
+    }
+    if user_goal and user_goal in _mapping:
+        return _mapping[user_goal]
+    if solution_requested:
+        return "give_tiny_first_step"
+    return None
+
+
 def _has_actionable_therapy_signal(
     *,
     emotion: str,
@@ -423,7 +565,7 @@ def _final_response_task(intent: str, strategy: str, needs_technique: bool, reso
     return resolver_task or "ask_next_context_question"
 
 
-async def conversation_planner_node(state: MentalHealthState) -> dict:
+async def _plan_conversation_strategy(state: MentalHealthState) -> dict:
     """
     CONVERSATION PLANNER NODE - Strategic therapeutic decision-maker.
 
@@ -434,6 +576,13 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
     4. Output strategy + phase + readiness for downstream nodes
 
     No LLM call  pure deterministic Python.
+
+    NOTE: this is the internal planning body. The public entry point is
+    `conversation_planner_node()` below, which wraps every return path of
+    this function with the v13.0 question-budget hard stop (Component G)
+    and guarantees the v13.0 lifecycle fields are present on every path
+    (Component H), instead of requiring each of the many early-return
+    branches above to set them individually.
     """
 
     # ============================================
@@ -468,6 +617,49 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
     )
     current_message = messages[-1].content.lower() if messages else ""
 
+    # ============================================
+    # v13.0: SIGNAL DETECTION + CONSENT OVERRIDE
+    # Detect solution request, regulation urgency, and user goal BEFORE
+    # the main stage machine. If user previously rejected exercises but
+    # is now explicitly requesting help, override the consent block.
+    # ============================================
+    _raw_current_message = messages[-1].content if messages else ""
+    _imm_reg = is_immediate_regulation_request(current_message)
+    _sol_req = (
+        is_solution_requested(current_message)
+        or "solution_requested" in list(state.get("gate_context_flags") or [])
+    )
+    _latest_user_need = (
+        detect_user_goal(current_message, state)
+        or state.get("latest_user_need")
+    )
+    _has_medical_signal = has_medical_warning_signal(current_message)
+    # GAP 2: Persist medical flag to DB so future sessions inherit it
+    if _has_medical_signal:
+        schedule_medical_risk_write(state)
+    _exercises_reopened = False
+    _consent_was_blocked = (
+        exercise_consent in ("denied_soft", "denied_hard")
+        or solution_preference == "listen_only"
+    )
+    if not crisis_detected and _consent_was_blocked:
+        if _imm_reg or is_explicit_exercise_request(current_message):
+            # User explicitly wants an exercise NOW — lift the block
+            exercise_consent = "allowed"
+            solution_preference = "exercise_requested"
+            _exercises_reopened = True
+            _listen_only_mode = False
+            print("[NODE: PLANNER]  v13.0 CONSENT OVERRIDE — exercise explicitly requested after prior rejection")
+        elif _sol_req:
+            # User asking for advice/help (not necessarily a guided exercise)
+            exercise_consent = "unknown"
+            solution_preference = "advice_allowed"
+            _listen_only_mode = False
+            print("[NODE: PLANNER]  v13.0 CONSENT OVERRIDE — solution requested after prior rejection (advice_allowed)")
+    _q_since = int(state.get("question_count_since_disclosure") or 0)
+    _question_budget = 1  # default: one question allowed per turn
+
+
     recent_context = ""
     if len(messages) > 1:
         ctx_msgs = messages[-4:-1]
@@ -480,6 +672,126 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
 
     print(f"\n[NODE: PLANNER]  Planning strategy | Emotion: {emotion} | "
           f"Intensity: {intensity:.0%} | Trend: {trend} | Messages: {user_msg_count}")
+
+    # ============================================
+    # v13.0: IMMEDIATE_REGULATION_REQUEST FAST PATH
+    # Acute body distress + urgency — bypass context gate, permission gate.
+    # Help starts immediately in the same turn.
+    # ============================================
+    if _imm_reg and not crisis_detected:
+        _imm_intent = intent if isinstance(intent, str) else "therapeutic"
+        print("[NODE: PLANNER]  v13.0 IMMEDIATE_REGULATION_REQUEST — start_grounding_now, 0 questions")
+        return {
+            "conversation_strategy": "suggest_technique",
+            "conversation_phase": "venting",
+            "conversation_stage": "INTERVENTION",
+            "technique_readiness": 1.0,
+            "needs_technique": True,
+            "intent": "technique_request",
+            "crisis_detected": False,
+            "session_message_count": user_msg_count,
+            "gate_context_flags": list(state.get("gate_context_flags") or []),
+            "gate_emotional_register": str(state.get("gate_emotional_register") or emotion or "neutral").lower(),
+            "gate_intensity_hint": float(intensity),
+            "latest_referenced_entity": state.get("latest_referenced_entity"),
+            "response_task": "start_grounding_now",
+            "technique_area": ["breathing", "grounding"],
+            "technique_plan_mode": "single",
+            "resolved_user_act": state.get("resolved_user_act"),
+            "compact_analysis": state.get("compact_analysis"),
+            # v13.0 fields
+            "solution_requested": True,
+            "immediate_regulation_request": True,
+            "exercises_reopened": _exercises_reopened,
+            "latest_user_need": _latest_user_need or "calm_body_now",
+            "user_goal": state.get("user_goal"),
+            "exercise_consent": "allowed",
+            "solution_preference": "exercise_requested",
+            "question_budget": 0,
+            "question_count_since_disclosure": 0,
+            "context_missing_reason": None,
+        }
+
+    # ============================================
+    # v13.0: SOLUTION_REQUESTED ROUTING BLOCK
+    # User explicitly asked for help/therapy/plan.
+    # If context is sufficient: deliver technique directly.
+    # If not: give a safe general first step + ask ONE targeted question.
+    # ============================================
+    if _sol_req and not _imm_reg and not crisis_detected:
+        _ctx_enough = _context_is_enough(state, emotion, float(intensity))
+        _intent_for_sol = "technique_request"
+        if _ctx_enough:
+            _goal_task = _goal_to_response_task(_latest_user_need, False, True)
+            _sol_response_task = _goal_task or "offer_one_technique"
+            # If consent is already allowed (override or prior), deliver directly
+            _sol_consent = "allowed" if exercise_consent in ("allowed", "unknown") else exercise_consent
+            if _sol_consent == "unknown":
+                _sol_response_task = "ask_permission_before_technique"
+            print(f"[NODE: PLANNER]  v13.0 SOLUTION_REQUESTED (context_enough=True) → {_sol_response_task}")
+            return {
+                "conversation_strategy": "suggest_technique",
+                "conversation_phase": state.get("conversation_phase", "venting"),
+                "conversation_stage": "INTERVENTION",
+                "technique_readiness": 1.0,
+                "needs_technique": True,
+                "intent": _intent_for_sol,
+                "crisis_detected": False,
+                "session_message_count": user_msg_count,
+                "gate_context_flags": list(state.get("gate_context_flags") or []),
+                "gate_emotional_register": str(state.get("gate_emotional_register") or emotion or "neutral").lower(),
+                "gate_intensity_hint": float(intensity),
+                "latest_referenced_entity": state.get("latest_referenced_entity"),
+                "response_task": _sol_response_task,
+                "technique_area": _infer_technique_areas(state, current_message),
+                "technique_plan_mode": "single",
+                "resolved_user_act": state.get("resolved_user_act"),
+                "compact_analysis": state.get("compact_analysis"),
+                # v13.0 fields
+                "solution_requested": True,
+                "immediate_regulation_request": False,
+                "exercises_reopened": _exercises_reopened,
+                "latest_user_need": _latest_user_need,
+                "user_goal": state.get("user_goal"),
+                "exercise_consent": exercise_consent,
+                "solution_preference": solution_preference,
+                "question_budget": 0,
+                "question_count_since_disclosure": 0,
+                "context_missing_reason": None,
+            }
+        else:
+            _missing = _infer_context_missing_reason(state, emotion, float(intensity))
+            print(f"[NODE: PLANNER]  v13.0 SOLUTION_REQUESTED (context_enough=False) → give_tiny_first_step (action-first), reason={_missing}")
+            return {
+                "conversation_strategy": "suggest_technique",
+                "conversation_phase": state.get("conversation_phase", "venting"),
+                "conversation_stage": "INTERVENTION",
+                "technique_readiness": 0.7,
+                "needs_technique": True,
+                "intent": _intent_for_sol,
+                "crisis_detected": False,
+                "session_message_count": user_msg_count,
+                "gate_context_flags": list(state.get("gate_context_flags") or []),
+                "gate_emotional_register": str(state.get("gate_emotional_register") or emotion or "neutral").lower(),
+                "gate_intensity_hint": float(intensity),
+                "latest_referenced_entity": state.get("latest_referenced_entity"),
+                "response_task": "give_tiny_first_step",
+                "technique_area": _infer_technique_areas(state, current_message),
+                "technique_plan_mode": "single",
+                "resolved_user_act": state.get("resolved_user_act"),
+                "compact_analysis": state.get("compact_analysis"),
+                # v13.0 fields — action first, one optional question after
+                "solution_requested": True,
+                "immediate_regulation_request": False,
+                "exercises_reopened": _exercises_reopened,
+                "latest_user_need": _latest_user_need,
+                "user_goal": state.get("user_goal"),
+                "exercise_consent": exercise_consent,
+                "solution_preference": solution_preference,
+                "question_budget": 1,
+                "question_count_since_disclosure": _q_since,
+                "context_missing_reason": _missing,
+            }
 
     # ============================================
     # CHITCHAT BYPASS GATE
@@ -572,9 +884,24 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
     # queries, opinion asks, or help requests.
     gate_emotional_register = str(state.get("gate_emotional_register") or emotion or "neutral").lower()
     help_requested = "help_request" in context_flags or intent == "technique_request"
-    explicit_technique_request = intent == "technique_request" or any(
-        signal in current_message for signal in _TECHNIQUE_REQUEST_SIGNALS
+    explicit_technique_request = (
+        intent == "technique_request"
+        or "explicit_technique_request" in context_flags
+        or is_explicit_exercise_request(current_message)
+        or any(signal in current_message for signal in _TECHNIQUE_REQUEST_SIGNALS)
     )
+    if (
+        explicit_technique_request
+        and solution_preference == "exercise_requested"
+        and intent == "contextual_followup"
+    ):
+        intent = "technique_request"
+        if response_task == "ask_next_context_question":
+            response_task = "offer_one_technique"
+        if "explicit_technique_request" not in context_flags:
+            context_flags.append("explicit_technique_request")
+        if "help_request" not in context_flags:
+            context_flags.append("help_request")
     technique_offer_deferred = "technique_offer_deferred" in context_flags
     pending_technique_exists = any(
         isinstance(candidate, dict) and candidate.get("name")
@@ -585,6 +912,12 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
         )
     )
     context_state = {**state, **context_updates}
+    technique_area = _infer_technique_areas(context_state, current_message)
+    technique_plan_mode = (
+        "series"
+        if len(technique_area) >= 2 and explicit_technique_request and _wants_series_plan(current_message)
+        else "single"
+    )
     primary_sub_emotion = str(context_state.get("primary_sub_emotion") or "").lower()
     context_slots = _count_context_slots(context_state)
     sufficient_context = context_slots >= 2
@@ -605,6 +938,12 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
         user_msg_count >= 3
         and not is_answering_narrow_context_question
         and not is_short_confirmation_or_followup
+    )
+    explicit_request_has_context = bool(
+        sufficient_context
+        or has_formulation
+        or enough_dialogue_for_action
+        or pending_technique_exists
     )
     slow_paced_concern = _has_slow_paced_concern_context(context_state)
     context_question_limit = (
@@ -646,6 +985,7 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
     )
     slow_paced_needs_more_exploration = bool(
         slow_paced_concern
+        and not should_stop_context_questions
         and not explicit_acceptance
         and not explicit_technique_request
         and not technique_offer_deferred
@@ -654,7 +994,7 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
     )
     needs_technique = bool(
         explicit_acceptance
-        or (explicit_technique_request and not blocked_for_technique)
+        or (explicit_technique_request and explicit_request_has_context and not blocked_for_technique)
         or (
             therapy_action_ready
             and not slow_paced_needs_more_exploration
@@ -670,6 +1010,11 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
             and not blocked_for_technique
         )
     )
+    if explicit_technique_request and not explicit_request_has_context and not crisis_detected:
+        needs_technique = False
+        if response_task == "offer_one_technique":
+            response_task = "ask_next_context_question"
+        print("[NODE: PLANNER]  Explicit exercise request needs one focused context question first")
     if (
         technique_offer_deferred
         and therapy_action_ready
@@ -845,6 +1190,13 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
         "solution_preference": solution_preference,
         "suppressed_topics": suppressed_labels if suppressed_labels else [],
         "context_sufficiency": context_sufficiency,
+        "technique_area": technique_area,
+        "technique_plan_mode": technique_plan_mode,
+        # v13.0
+        "solution_requested": _sol_req,
+        "immediate_regulation_request": _imm_reg,
+        "latest_user_need": _latest_user_need,
+        "question_budget": _question_budget,
     }
     print(f"[NODE: PLANNER]  Compact analysis: {compact_analysis}")
 
@@ -872,6 +1224,8 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
                 "gate_intensity_hint": float(intensity),
                 "latest_referenced_entity": referenced_entity,
                 "response_task": "chitchat",
+                "technique_area": technique_area,
+                "technique_plan_mode": technique_plan_mode,
                 "resolved_user_act": resolver or None,
                 "compact_analysis": compact_analysis,
                 "technique_readiness": 0.0,
@@ -896,6 +1250,8 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
                 "gate_intensity_hint": float(intensity),
                 "latest_referenced_entity": referenced_entity,
                 "response_task": "chitchat",
+                "technique_area": technique_area,
+                "technique_plan_mode": technique_plan_mode,
                 "resolved_user_act": resolver or None,
                 "compact_analysis": compact_analysis,
                 "technique_readiness": 0.0,
@@ -925,6 +1281,8 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
             "gate_intensity_hint": float(intensity),
             "latest_referenced_entity": referenced_entity,
             "response_task": _final_response_task(intent, strategy, needs_technique, response_task, exercise_consent=exercise_consent),
+            "technique_area": technique_area,
+            "technique_plan_mode": technique_plan_mode,
             "resolved_user_act": resolver or None,
             "compact_analysis": compact_analysis,
             "context_sufficiency": context_sufficiency,
@@ -951,6 +1309,8 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
                 "gate_intensity_hint": float(intensity),
                 "latest_referenced_entity": referenced_entity,
                 "response_task": _final_response_task("technique_request", "ask_question", False, response_task),
+                "technique_area": technique_area,
+                "technique_plan_mode": technique_plan_mode,
                 "resolved_user_act": resolver or None,
                 "compact_analysis": compact_analysis,
                 **context_updates,
@@ -971,6 +1331,8 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
             "gate_intensity_hint": float(intensity),
             "latest_referenced_entity": referenced_entity,
             "response_task": "offer_one_technique",
+            "technique_area": technique_area,
+            "technique_plan_mode": technique_plan_mode,
                 "resolved_user_act": resolver or None,
                 "compact_analysis": compact_analysis,
             **context_updates,
@@ -1141,6 +1503,8 @@ async def conversation_planner_node(state: MentalHealthState) -> dict:
         "gate_intensity_hint": float(intensity),
         "latest_referenced_entity": referenced_entity,
         "response_task": _final_response_task(intent, strategy, needs_technique, response_task, exercise_consent=exercise_consent),
+        "technique_area": technique_area,
+        "technique_plan_mode": technique_plan_mode,
         "resolved_user_act": resolver or None,
         "compact_analysis": compact_analysis,
         **context_updates,
@@ -1328,3 +1692,91 @@ def _select_strategy(
         return "encourage_reflection"
 
     return "validate_only"
+
+
+# ===========================================================================
+# v13.0: QUESTION BUDGET HARD STOP (Component G of the implementation plan)
+# ===========================================================================
+# Implemented as a single uniform post-processing step over EVERY return path
+# of _plan_conversation_strategy, rather than threading the increment/check
+# through each of its ~10 early returns individually. This guarantees the
+# hard stop and the v13.0 lifecycle fields (Component H) are present and
+# consistent no matter which branch produced the result.
+
+_QUESTION_RESPONSE_TASKS = {"ask_next_context_question", "ask_one_missing_context_question"}
+
+
+def _apply_question_budget_policy(state: MentalHealthState, result: dict) -> dict:
+    """Enforce the v13.0 question budget hard stop and backfill lifecycle fields.
+
+    - Increments `question_count_since_disclosure` whenever this turn's
+      response_task is a context-gathering question.
+    - If two consecutive context questions land without enough context, and
+      the turn is not crisis or an immediate regulation request, force a
+      `give_tiny_first_step` action instead of asking a third question.
+    - Backfills solution_requested/immediate_regulation_request/etc. with
+      safe defaults so every planner return path exposes the full v13.0
+      contract to technique_selector_node and the response generator.
+    """
+    if not isinstance(result, dict):
+        return result
+
+    crisis_detected = bool(result.get("crisis_detected", state.get("crisis_detected", False)))
+    immediate_regulation_request = bool(result.get("immediate_regulation_request", False))
+    response_task = result.get("response_task", "")
+    q_since = int(
+        result.get("question_count_since_disclosure", state.get("question_count_since_disclosure", 0)) or 0
+    )
+
+    if response_task in _QUESTION_RESPONSE_TASKS:
+        q_since += 1
+
+    context_state = {**state, **result}
+    emotion = context_state.get("fused_emotion", context_state.get("emotion", "neutral"))
+    intensity = context_state.get("fused_intensity", context_state.get("intensity", 0.5))
+    context_enough = _context_is_enough(context_state, emotion, float(intensity or 0.0))
+
+    if q_since >= 1 and not context_enough and not crisis_detected and not immediate_regulation_request:
+        print(
+            f"[NODE: PLANNER]  v13.0 QUESTION BUDGET HARD STOP — "
+            f"q_since={q_since}, context_enough={context_enough} — forcing give_tiny_first_step"
+        )
+        result["needs_technique"] = True
+        result["response_task"] = "give_tiny_first_step"
+        result["question_budget"] = 0
+        q_since = 0
+
+    # GAP 8: When has_medical_signal is True, silence any pending question and
+    # switch the response task so the generator leads with the medical disclaimer
+    # before doing anything else — prevents jarring "can you tell me more?" +
+    # afterthought disclaimer ordering.
+    _current_msg = (state.get("messages") or [""])[-1]
+    _current_msg_text = (getattr(_current_msg, "content", "") or "")
+    _medical_this_turn = has_medical_warning_signal(_current_msg_text) or bool(state.get("has_persistent_medical_signal"))
+    if _medical_this_turn and not crisis_detected and not immediate_regulation_request:
+        existing_task = result.get("response_task", "")
+        if existing_task in ("ask_next_context_question", "ask_one_missing_context_question"):
+            print(
+                f"[NODE: PLANNER]  GAP 8 MEDICAL OVERRIDE — has_medical_signal=True, "
+                f"overriding {existing_task} → acknowledge_medical_and_check, question_budget=0"
+            )
+            result["response_task"] = "acknowledge_medical_and_check"
+            result["question_budget"] = 0
+
+    result["question_count_since_disclosure"] = q_since
+    result.setdefault("question_budget", 1)
+    result.setdefault("solution_requested", False)
+    result.setdefault("immediate_regulation_request", False)
+    result.setdefault("exercises_reopened", False)
+    result.setdefault("latest_user_need", None)
+    result.setdefault("user_goal", state.get("user_goal"))
+    result.setdefault("context_missing_reason", None)
+    return result
+
+
+async def conversation_planner_node(state: MentalHealthState) -> dict:
+    """Public entry point: plan the strategy, then apply the v13.0 question
+    budget hard stop and lifecycle-field backfill uniformly across every
+    possible return path of `_plan_conversation_strategy`."""
+    result = await _plan_conversation_strategy(state)
+    return _apply_question_budget_policy(state, result)

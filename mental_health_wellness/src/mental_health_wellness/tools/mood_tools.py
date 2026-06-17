@@ -15,6 +15,7 @@ from ..techniques.emotion_metadata import (
     BEHAVIOR_TAGS,
     CANONICAL_SUB_EMOTIONS,
     PROJECT_STUDY_CONTEXTS,
+    SUB_EMOTION_TO_CORE,
     SYMPTOM_TAGS,
 )
 from ..utils.turn_signals import is_polite_acknowledgement
@@ -95,6 +96,28 @@ _NEUTRAL_RESULT = {
     "emotion_scores": {"neutral": 1.0},
     "emotion_reasoning": "fallback neutral",
 }
+
+
+def _format_allowed_sub_emotions(per_line: int = 8) -> str:
+    """Render CANONICAL_SUB_EMOTIONS as a closed-vocabulary block for the prompt.
+
+    The voice prompt (voice/__init__.py) already constrains Gemini to this
+    same taxonomy with a hard "MUST be exactly one value" rule. The text
+    prompt below previously only gave loose examples, which let Gemini
+    return plausible-but-unlisted labels (e.g. "exhaustion") that then failed
+    validation and silently collapsed back to the bare core emotion, losing
+    nuance. Constraining both prompts to the same closed taxonomy also keeps
+    primary_sub_emotion meaningful downstream (technique matching, the
+    empathy-first gate, NO_TECHNIQUE_BY_DEFAULT_SUB_EMOTIONS, etc. all speak
+    this same vocabulary) instead of accepting valid-but-inert GoEmotions-only
+    labels like "admiration" or "approval" that nothing else understands.
+    """
+    labels = sorted(CANONICAL_SUB_EMOTIONS)
+    rows = [
+        "  - " + ", ".join(labels[index:index + per_line])
+        for index in range(0, len(labels), per_line)
+    ]
+    return "\n".join(rows)
 
 
 def _fmt_list(values, limit: int = 5) -> str:
@@ -223,7 +246,7 @@ def _keyword_fallback(message: str) -> dict:
 # GEMINI LLM MOOD ANALYSIS
 # ============================================
 
-_MOOD_SYSTEM_PROMPT = """\
+_MOOD_SYSTEM_PROMPT_TEMPLATE = """\
 You are an expert clinical psychologist specializing in emotion recognition.
 
 You will receive:
@@ -233,29 +256,41 @@ You will receive:
 IMPORTANT: The current message may be a short follow-up reply (e.g. "mostly around my family").
 Use the conversation history to understand the full emotional picture before classifying.
 
+ALLOWED PRIMARY/SUB-EMOTIONS (primary_sub_emotion and every entry in
+secondary_sub_emotions MUST be exactly one of these values — this is the same
+closed taxonomy used everywhere else in the system, including technique
+matching):
+{allowed_sub_emotions}
+
 Return a JSON object with EXACTLY these fields:
 
-{
+{{
   "emotion": <one of: anger|disgust|fear|joy|neutral|sadness|surprise|anxiety>,
-  "primary_sub_emotion": <most specific nuanced label e.g. loneliness|shame|hopelessness|frustration|stress|nervousness|isolation|rejection|exhaustion>,
-  "secondary_sub_emotions": [<up to 3 additional nuanced labels derived from BOTH current message AND conversation history>],
+  "primary_sub_emotion": <one value from ALLOWED PRIMARY/SUB-EMOTIONS above, the most specific label supported by evidence>,
+  "secondary_sub_emotions": [<up to 3 additional values from ALLOWED PRIMARY/SUB-EMOTIONS, derived from BOTH current message AND conversation history>],
   "sentiment": <one of: positive|negative|neutral>,
   "intensity": <float 0.0-1.0 reflecting overall distress level across the conversation>,
   "confidence": <float 0.0-1.0, your confidence in this classification>,
   "detected_symptoms": [<physical/cognitive signals visible across the conversation, e.g. sleep_difficulty|racing_thoughts|fatigue|numbness>],
   "detected_behaviors": [<behavioral patterns, e.g. isolation|procrastination|rumination|people_pleasing|avoidance>],
   "detected_contexts": [<situational contexts e.g. family_conflict|work_stress|relationship_conflict|academic_pressure|social_isolation>],
-  "emotion_scores": {"anger": 0.0, "disgust": 0.0, "fear": 0.0, "joy": 0.0, "neutral": 0.0, "sadness": 0.0, "surprise": 0.0, "anxiety": 0.0},
+  "emotion_scores": {{"anger": 0.0, "disgust": 0.0, "fear": 0.0, "joy": 0.0, "neutral": 0.0, "sadness": 0.0, "surprise": 0.0, "anxiety": 0.0}},
   "reasoning": <one sentence explaining your classification using context>
-}
+}}
 
 Rules:
 - emotion MUST be one of the 8 core emotions exactly as listed.
+- primary_sub_emotion and secondary_sub_emotions MUST be exactly values from ALLOWED PRIMARY/SUB-EMOTIONS. Never invent a label outside that list, even if it seems descriptive — pick the closest allowed match instead (e.g. use "fatigue" instead of "exhaustion").
+- Prefer the most specific sub-emotion supported by evidence (for example performance_anxiety, rejection, shame, burnout, bedtime_rumination) instead of a generic label when possible.
 - intensity for neutral/joy must be ≤ 0.45. For negative emotions 0.5–0.95.
 - If the user is masking distress with positive language, detect the underlying emotion.
 - secondary_sub_emotions, detected_symptoms, detected_behaviors, detected_contexts MUST reflect patterns from both the current message AND conversation history.
 - Respond ONLY with valid JSON. No markdown, no explanation outside the JSON.
 """
+
+_MOOD_SYSTEM_PROMPT = _MOOD_SYSTEM_PROMPT_TEMPLATE.format(
+    allowed_sub_emotions=_format_allowed_sub_emotions()
+)
 
 
 async def _gemini_analyze_mood(message: str, context: str = "") -> dict:
@@ -374,20 +409,16 @@ def analyze_mood(message: str) -> dict:
         return {**_NEUTRAL_RESULT, "emotion_reasoning": "invalid input"}
 
     async def _run():
-        try:
-            print(f"[MOOD_TOOLS] 🤖 Gemini mood analysis: '{message[:60]}...'")
-            parsed = await _gemini_analyze_mood(message)
-            result = _validate_gemini_result(parsed, message)
-            print(
-                f"[MOOD_TOOLS] ✅ Gemini result | "
-                f"core={result['emotion'].upper()} | sub={result['primary_sub_emotion']} | "
-                f"sentiment={result['sentiment']} | intensity={result['intensity']:.0%} | "
-                f"confidence={result['confidence']:.0%}"
-            )
-            return result
-        except Exception as e:
-            print(f"[MOOD_TOOLS] ⚠️ Gemini failed ({str(e)[:80]}), using keyword fallback")
-            return _keyword_fallback(message)
+        print(f"[MOOD_TOOLS] 🤖 Gemini mood analysis: '{message[:60]}...'")
+        parsed = await _gemini_analyze_mood(message)
+        result = _validate_gemini_result(parsed, message)
+        print(
+            f"[MOOD_TOOLS] ✅ Gemini result | "
+            f"core={result['emotion'].upper()} | sub={result['primary_sub_emotion']} | "
+            f"sentiment={result['sentiment']} | intensity={result['intensity']:.0%} | "
+            f"confidence={result['confidence']:.0%}"
+        )
+        return result
 
     try:
         loop = asyncio.get_event_loop()
@@ -416,20 +447,17 @@ async def analyze_mood_async(message: str, context: str = "") -> dict:
     """
     if not message or not isinstance(message, str):
         return {**_NEUTRAL_RESULT, "emotion_reasoning": "invalid input"}
-    try:
-        ctx_label = f"{len(context.splitlines())} ctx lines" if context.strip() else "no ctx"
-        print(f"[MOOD_TOOLS] 🤖 Gemini mood | {ctx_label} | msg='{message[:50]}...'")
-        parsed = await _gemini_analyze_mood(message, context=context)
-        result = _validate_gemini_result(parsed, message)
-        print(
-            f"[MOOD_TOOLS] ✅ core={result['emotion'].upper()} | sub={result['primary_sub_emotion']} | "
-            f"2nd={result['secondary_sub_emotions']} | sentiment={result['sentiment']} | "
-            f"intensity={result['intensity']:.0%} | symptoms={result['detected_symptoms']}"
-        )
-        return result
-    except Exception as e:
-        print(f"[MOOD_TOOLS] ⚠️ Gemini failed ({str(e)[:80]}), keyword fallback")
-        return _keyword_fallback(message)
+    
+    ctx_label = f"{len(context.splitlines())} ctx lines" if context.strip() else "no ctx"
+    print(f"[MOOD_TOOLS] 🤖 Gemini mood | {ctx_label} | msg='{message[:50]}...'")
+    parsed = await _gemini_analyze_mood(message, context=context)
+    result = _validate_gemini_result(parsed, message)
+    print(
+        f"[MOOD_TOOLS] ✅ core={result['emotion'].upper()} | sub={result['primary_sub_emotion']} | "
+        f"2nd={result['secondary_sub_emotions']} | sentiment={result['sentiment']} | "
+        f"intensity={result['intensity']:.0%} | symptoms={result['detected_symptoms']}"
+    )
+    return result
 
 
 def preload_emotion_model():

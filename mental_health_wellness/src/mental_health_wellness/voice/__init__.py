@@ -8,7 +8,9 @@ features are extracted later, and only for therapeutic routes.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -23,8 +25,11 @@ from ..techniques.emotion_metadata import (
     SUB_EMOTION_TO_CORE,
     SYMPTOM_TAGS,
 )
+from .acoustic_features import extract_acoustic_features
 
 load_dotenv()
+
+_logger = logging.getLogger("sentimind.voice")
 
 
 CORE_EMOTIONS = {
@@ -401,6 +406,39 @@ def _validate_gemini_voice(parsed: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _merge_dsp_features(result: dict[str, Any], dsp: dict[str, Any]) -> dict[str, Any]:
+    """Merge real (librosa + parselmouth) acoustic measurements into Gemini's
+    semantic/holistic voice result.
+
+    Only `acoustic_features`, `mfcc_vector`, `pause_density`, and the new
+    `acoustic_distress_proxy` are touched -- Gemini's own `arousal`,
+    `valence`, and `distress_index` judgments are intentionally left as-is.
+    See voice/acoustic_features.py module docstring for the rationale.
+    """
+    merged = dict(result)
+    if dsp.get("extraction_method") == "dsp":
+        merged["acoustic_features"] = dsp["acoustic_features"]
+        merged["mfcc_vector"] = dsp["mfcc_vector"]
+        if dsp.get("pause_density") is not None:
+            merged["pause_density"] = dsp["pause_density"]
+        merged["acoustic_distress_proxy"] = dsp.get("acoustic_distress_proxy")
+        merged["dsp_extraction_method"] = "dsp"
+        _logger.info(
+            "Voice DSP merged | gemini_distress=%.2f acoustic_distress_proxy=%s "
+            "gemini_pause=%.2f real_pause=%s",
+            merged.get("distress_index", 0.0),
+            dsp.get("acoustic_distress_proxy"),
+            result.get("pause_density", 0.0),
+            dsp.get("pause_density"),
+        )
+    else:
+        merged["acoustic_distress_proxy"] = None
+        merged["dsp_extraction_method"] = dsp.get("extraction_method", "dsp_failed")
+        if dsp.get("error"):
+            _logger.info("Voice DSP extraction unavailable (%s) -- using Gemini-only fields", dsp["error"])
+    return merged
+
+
 def _gemini_config():
     from google.genai import types
 
@@ -499,11 +537,16 @@ def analyze_voice_full(audio_path: str, conversation_context: str = "") -> dict[
                 raw_text = getattr(response, "text", "") or str(response)
                 parsed = json.loads(_clean_json_text(raw_text))
                 result = _validate_gemini_voice(parsed)
+                try:
+                    dsp = extract_acoustic_features(audio_path)
+                except Exception as dsp_exc:
+                    dsp = {"extraction_method": "dsp_failed", "error": str(dsp_exc)[:160]}
+                result = _merge_dsp_features(result, dsp)
                 print(
                     "[VOICE] Gemini audio complete | "
                     f"model={model} mime={mime_type} emotion={result['emotion']} "
                     f"sub={result['primary_sub_emotion']} conf={result['confidence']:.0%} "
-                    f"ctx={'yes' if has_context else 'none'}"
+                    f"ctx={'yes' if has_context else 'none'} dsp={result['dsp_extraction_method']}"
                 )
                 return result
             except Exception as exc:
@@ -611,11 +654,18 @@ async def analyze_voice_full_async(audio_path: str, conversation_context: str = 
                 raw_text = getattr(response, "text", "") or str(response)
                 parsed = json.loads(_clean_json_text(raw_text))
                 result = _validate_gemini_voice(parsed)
+                try:
+                    # CPU-bound DSP work -- run off the event loop so a slow
+                    # extraction never blocks other concurrent requests.
+                    dsp = await asyncio.to_thread(extract_acoustic_features, audio_path)
+                except Exception as dsp_exc:
+                    dsp = {"extraction_method": "dsp_failed", "error": str(dsp_exc)[:160]}
+                result = _merge_dsp_features(result, dsp)
                 print(
                     "[VOICE] Gemini audio complete | "
                     f"model={model} mime={mime_type} emotion={result['emotion']} "
                     f"sub={result['primary_sub_emotion']} conf={result['confidence']:.0%} "
-                    f"ctx={'yes' if has_context else 'none'}"
+                    f"ctx={'yes' if has_context else 'none'} dsp={result['dsp_extraction_method']}"
                 )
                 return result
             except Exception as exc:
@@ -691,18 +741,42 @@ async def transcribe_voice_async(audio_path: str) -> dict[str, Any]:
 
 def preload_all_voice_models() -> dict[str, Any]:
     """
-    No-op compatibility hook.
-
-    There is nothing local to preload now. Startup only verifies that a Gemini
-    key/model is configured for audio analysis.
+    Eagerly import and warm up DSP libraries (librosa + parselmouth/Praat) so
+    the first voice request does not pay a cold-import penalty (~2-5s on Windows).
+    Called by organized_lifespan at server startup.
     """
     model, keys = _model_and_keys()
-    status = {
+    status: dict[str, Any] = {
         "provider": "gemini_audio",
         "model": model,
         "gemini_key_set": bool(keys),
-        "local_voice_models": "disabled",
+        "librosa": "not_loaded",
+        "parselmouth": "not_loaded",
     }
+
+    # Warm up librosa — triggers scipy/numba/audioread imports and numba JIT
+    try:
+        import numpy as np
+        import librosa
+        _dummy = np.zeros(1600, dtype=np.float32)
+        librosa.feature.mfcc(y=_dummy, sr=16000, n_mfcc=13)
+        status["librosa"] = "ready"
+        print("[VOICE] librosa warm-up complete")
+    except Exception as exc:
+        status["librosa"] = f"unavailable: {str(exc)[:80]}"
+        print(f"[VOICE] librosa warm-up failed (non-fatal): {exc}")
+
+    # Warm up parselmouth — triggers native Praat library initialisation
+    try:
+        import numpy as np
+        import parselmouth
+        parselmouth.Sound(np.zeros(160, dtype=np.float64), sampling_frequency=16000)
+        status["parselmouth"] = "ready"
+        print("[VOICE] parselmouth/Praat warm-up complete")
+    except Exception as exc:
+        status["parselmouth"] = f"unavailable: {str(exc)[:80]}"
+        print(f"[VOICE] parselmouth warm-up failed (non-fatal): {exc}")
+
     print(f"[VOICE] Gemini voice analysis ready | model={model} key_set={bool(keys)}")
     return status
 

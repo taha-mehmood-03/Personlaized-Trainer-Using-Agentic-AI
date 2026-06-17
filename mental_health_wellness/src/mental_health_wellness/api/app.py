@@ -123,7 +123,7 @@ def _emotion_payload_from_result(result: dict) -> dict:
     """Expose full emotion metadata consistently across chat endpoints."""
     mood_analysis = result.get("mood_analysis") if isinstance(result.get("mood_analysis"), dict) else {}
     emotion = _clean_enum(
-        result.get("emotion") or result.get("fused_emotion") or result.get("mood") or mood_analysis.get("emotion"),
+        result.get("fused_emotion") or result.get("emotion") or result.get("mood") or mood_analysis.get("emotion"),
         "neutral",
     )
     primary = _clean_enum(
@@ -133,11 +133,14 @@ def _emotion_payload_from_result(result: dict) -> dict:
         or mood_analysis.get("primarySubEmotion")
         or mood_analysis.get("sub_emotion")
     )
-    sentiment = _clean_enum(result.get("sentiment") or mood_analysis.get("sentiment"), "neutral")
+    raw_sentiment = _clean_enum(result.get("sentiment") or mood_analysis.get("sentiment"), "neutral")
+    sentiment = _sentiment_label(emotion, raw_sentiment)
+    if (_clean_enum(emotion) or "").upper() in {"ANGER", "DISGUST", "FEAR", "SADNESS", "ANXIETY"}:
+        sentiment = "NEGATIVE"
     return {
         "emotion": emotion,
         "sentiment": sentiment,
-        "intensity": result.get("intensity"),
+        "intensity": result.get("fused_intensity") if result.get("fused_intensity") is not None else result.get("intensity"),
         "confidence": result.get("confidence"),
         "raw_emotion_label": _clean_enum(result.get("raw_emotion_label") or mood_analysis.get("raw_emotion_label")),
         "primary_sub_emotion": primary,

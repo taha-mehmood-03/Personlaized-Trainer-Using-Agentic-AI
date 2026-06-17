@@ -336,6 +336,11 @@ export function useStream(userId: string) {
                                 const recommendedTechniquesByCategory = normalizeTechniqueMap(
                                     meta.recommended_techniques_by_category
                                 )
+                                const directTechnique = normalizeTechnique(
+                                    meta.recommended_technique ?? meta.recommendedTechnique ?? meta.technique
+                                )
+                                const primaryTechnique =
+                                    Object.values(recommendedTechniquesByCategory)[0] ?? directTechnique
                                 const hasAlternativeTechniques = Object.prototype.hasOwnProperty.call(
                                     meta,
                                     'alternative_techniques'
@@ -353,6 +358,7 @@ export function useStream(userId: string) {
                                                 _streaming: false,
                                                 _showCursor: false,
                                                 crisis_detected: meta.crisis_detected,
+                                                technique: primaryTechnique,
                                                 recommendedTechniquesByCategory,
                                                 alternativeTechniques: normalizedAlternativeTechniques,
                                             }
@@ -374,11 +380,8 @@ export function useStream(userId: string) {
                                 }
 
                                 // Pick all recommended techniques from category dict
-                                if (Object.keys(recommendedTechniquesByCategory).length) {
-                                    const all = Object.values(recommendedTechniquesByCategory)
-                                    if (all.length > 0) {
-                                        setActiveTechnique(all[0])
-                                    }
+                                if (primaryTechnique) {
+                                    setActiveTechnique(primaryTechnique)
                                 }
 
                                 if (hasAlternativeTechniques) {

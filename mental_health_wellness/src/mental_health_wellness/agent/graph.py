@@ -58,6 +58,7 @@ from ..llm.llm_classifier import llm_crisis_check, smart_pipeline_gate
 from ..utils.turn_signals import (
     has_negative_feedback_signal,
     has_positive_outcome_signal,
+    is_explicit_exercise_request as _turn_signal_explicit_exercise_request,
     plain_text,
 )
 from ..utils.distress_anchor import anchor_write_policy
@@ -127,6 +128,9 @@ _SESSION_CONTEXT_KEYS = (
     "pending_technique_reason",
     "pending_technique_created_at_turn",
     "technique_candidates",
+    "technique_area",
+    "technique_plan_mode",
+    "technique_series",
     "preferred_techniques",
     "gate_confidence",
     "gate_context_flags",
@@ -805,9 +809,7 @@ def _update_message_store(
 
 
 def _is_explicit_exercise_request(message: str) -> bool:
-    text = (message or "").lower()
-    exercise_words = ("exercise", "technique", "breathing", "meditation", "mindfulness", "grounding", "relaxation")
-    return any(word in text for word in exercise_words)
+    return _turn_signal_explicit_exercise_request(message)
 
 
 _FRESH_DISTRESS_MARKERS = (
@@ -1096,6 +1098,12 @@ def _gate_state_fields(gate_result: dict) -> dict:
     for key in ["exercise_consent", "solution_preference", "active_issue_source", "suppression_signal", "suppressed_topic"]:
         if gate_result.get(key) not in (None, ""):
             res[key] = gate_result[key]
+
+    # Normalize bare "denied" from the LLM gate to "denied_soft" so the planner
+    # and consent_parser can match it correctly (they check for denied_soft/denied_hard).
+    if res.get("exercise_consent") == "denied":
+        res["exercise_consent"] = "denied_soft"
+
     return res
 
 
@@ -1255,22 +1263,37 @@ async def _accept_technique_response(
 
     if technique:
         steps      = technique.get("steps") or []
+        _steps_formatted = ""
+        if steps and isinstance(steps, list):
+            _steps_formatted = "\n- Steps:\n" + "\n".join(f"  * {s}" for s in steps)
         duration = technique.get("duration_minutes", technique.get("durationMinutes", "N/A"))
+        difficulty = technique.get("difficulty", "N/A")
         tech_block = (
             f"Name: {technique.get('name')}\n"
             f"Duration: {duration} min\n"
+            f"Difficulty: {difficulty}\n"
             f"Category: {technique.get('category', 'N/A')}\n"
-            f"Why it works: {technique.get('why_it_works', technique.get('whyItWorks', ''))}\n"
-            f"Step count available in DB/sidebar: {len(steps) if isinstance(steps, list) else 0}"
+            f"Why it works: {technique.get('why_it_works', technique.get('whyItWorks', ''))}"
+            f"{_steps_formatted}"
         )
         system_content = (
             f"You are SentiMind. The router has resolved the latest user message as agreement "
             f"to try {technique.get('name')}.\n\n"
             f"TECHNIQUE TO ACKNOWLEDGE:\n{tech_block}\n\n"
-            "1. Respond warmly in 1 sentence (e.g. 'Great, let\u2019s do this together!')\n"
-            "2. Name the technique and tell them the steps are ready in the exercise panel/sidebar.\n"
+            "1. Respond warmly in 1 sentence (e.g. 'Great, let’s do this together!')\n"
+            "2. Name the technique and present it directly in your response in the exact style as the technique panel. The database steps are general/generic, so you MUST convert each step to target the user's current specific problem/stressor (e.g., rewrite general steps to address their specific situation, feelings, or triggers inline). Use this exact style:\n"
+            "   ### Exercise: <Name>\n"
+            "   * **Category:** <Category>\n"
+            "   * **Duration:** <Duration> min\n"
+            "   * **Difficulty:** <Difficulty>\n"
+            "   * **Why it helps you right now:** <Personalised explanation of why this fits their current distress/context>\n"
+            "   \n"
+            "   **Steps:**\n"
+            "   1. <Step 1, rewritten from the generic database step to address the user's current problem specifically>\n"
+            "   2. <Step 2, rewritten from the generic database step to address the user's current problem specifically>\n"
+            "   ...\n"
             "3. Do NOT suggest a different technique.\n"
-            "4. Do NOT list, paraphrase, or generate steps. The database/sidebar handles steps."
+            "4. NEVER refer to a sidebar or panel; print everything inline."
         )
     else:
         system_content = (
@@ -2059,6 +2082,9 @@ def _build_result_dict(result: dict, actual_session_id: str, node_trace: list, p
         "recommended_techniques_by_category": recommended_techniques_by_category,
         "alternative_techniques": result.get("alternative_techniques", []),
         "technique_candidates": result.get("technique_candidates", []),
+        "technique_area": result.get("technique_area", []),
+        "technique_plan_mode": result.get("technique_plan_mode", "single"),
+        "technique_series": result.get("technique_series", []),
         "llm_selected_technique_id": result.get("llm_selected_technique_id"),
         "technique_reasoning": result.get("technique_reasoning", ""),
         "processing_time_ms": processing_time,

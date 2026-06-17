@@ -76,6 +76,13 @@ async def _create_pending_outcome(state: MentalHealthState, technique: dict) -> 
 
         current_emotion = state.get("fused_emotion", state.get("emotion", "neutral"))
         current_intensity = float(state.get("fused_intensity", state.get("intensity", 0.5)) or 0.5)
+
+        # GAP 6: If intensity has decayed significantly from peak (>0.15 gap), use the
+        # peak so that intensityBefore reflects what the user actually disclosed, not a
+        # follow-up turn reading that has been progressively attenuated.
+        peak_intensity = float(state.get("peak_distress_intensity") or current_intensity)
+        intensity_before = peak_intensity if (peak_intensity - current_intensity) > 0.15 else current_intensity
+
         outcome = await prisma.techniqueoutcome.create(
             data={
                 "sessionId": session_id,
@@ -84,7 +91,7 @@ async def _create_pending_outcome(state: MentalHealthState, technique: dict) -> 
                 "subEmotionBefore": state.get("primary_sub_emotion"),
                 "symptomsBefore": state.get("detected_symptoms") or [],
                 "behaviorsBefore": state.get("detected_behaviors") or [],
-                "intensityBefore": current_intensity,
+                "intensityBefore": intensity_before,
                 "interventionType": "pending_technique_offer",
                 "followThrough": None,
                 "confidence": None,
@@ -230,6 +237,25 @@ async def _infer_previous_technique_baseline(session_id: str) -> dict | None:
             return None
 
         intensity_before = getattr(before_msg, "intensity", None)
+
+        # GAP 7 fallback: if message.intensity was never written to DB, look up
+        # the existing TechniqueOutcome record for this technique which stores
+        # intensityBefore at offer time — that value is reliable.
+        if intensity_before is None:
+            try:
+                existing_outcome = await prisma.techniqueoutcome.find_first(
+                    where={
+                        "techniqueId": tech_msg.techniqueId,
+                        "intensityAfter": None,
+                    },
+                    order={"createdAt": "desc"},
+                )
+                if existing_outcome and getattr(existing_outcome, "intensityBefore", None) is not None:
+                    intensity_before = float(existing_outcome.intensityBefore)
+                    print(f"[NODE: OUTCOME_TRACKER]  GAP 7 fallback: using TechniqueOutcome.intensityBefore={intensity_before:.2f}")
+            except Exception:
+                pass
+
         if intensity_before is None:
             return None
 

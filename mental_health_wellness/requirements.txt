@@ -36,7 +36,12 @@ transformers>=4.36.0
 # ============================================
 # Voice Analysis
 # ============================================
-# Gemini audio uses google-genai from the core dependencies.
+# Gemini audio (google-genai) handles transcription + holistic semantic/tonal
+# emotion judgment. librosa + praat-parselmouth compute real, deterministic
+# acoustic/paralinguistic features (MFCCs, pitch, jitter, shimmer, HNR, energy)
+# from the raw waveform -- an LLM cannot measure these, only estimate them.
+librosa>=0.10.0
+praat-parselmouth>=0.4.3
 
 
 

@@ -62,6 +62,22 @@ def test_yes_thanks_after_context_question_is_not_technique_acceptance():
     assert "answering_previous_question" in resolved["gate_context_flags"]
 
 
+def test_direct_try_something_request_sets_exercise_requested():
+    consent = parse_consent_and_suppression(
+        {
+            "messages": [
+                AIMessage(content="What kind of support do you feel you are missing?"),
+                HumanMessage(content="Yes please, I really want to try something. What do you suggest?"),
+            ],
+            "exercise_consent": "unknown",
+            "solution_preference": "unknown",
+        }
+    )
+
+    assert consent["exercise_consent"] == "allowed"
+    assert consent["solution_preference"] == "exercise_requested"
+
+
 def test_thank_you_that_helped_is_positive_feedback_not_acceptance():
     resolved = resolve_conversation_context(
         {

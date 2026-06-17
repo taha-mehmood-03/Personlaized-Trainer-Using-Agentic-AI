@@ -26,6 +26,8 @@ dependencies = [
     "psycopg2-binary>=2.9.9",
     "twilio>=8.10.0",
     "geoip2>=4.7.0",
+    "librosa>=0.10.0",
+    "praat-parselmouth>=0.4.3",
 ]
 
 [project.scripts]

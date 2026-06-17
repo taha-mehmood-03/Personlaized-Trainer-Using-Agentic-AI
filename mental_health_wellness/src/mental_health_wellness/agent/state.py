@@ -84,6 +84,12 @@ class MentalHealthState(TypedDict):
     technique_candidates: list[dict]          # Safe semantic shortlist for final LLM selection
 
     llm_selected_technique_id: Optional[str]  # Candidate id chosen by the final response LLM
+
+    technique_area: list[str]                 # Separable support targets for this turn (e.g. social_confidence, rumination)
+
+    technique_plan_mode: str                  # "single" by default, "series" when a multi-exercise plan is intentional
+
+    technique_series: list[dict]              # Ordered techniques for series mode; first item is the active technique
     
     # ============================================
     # RESPONSE (from optimized_response_generator)
@@ -316,6 +322,20 @@ class MentalHealthState(TypedDict):
 
 
 
+    # ============================================
+    # v13.0: SOLUTION REQUEST LIFECYCLE
+    # ============================================
+    solution_requested: bool
+    immediate_regulation_request: bool
+    exercises_reopened: bool
+    latest_user_need: Optional[str]
+    user_goal: Optional[str]
+    question_count_since_disclosure: int
+    last_assistant_asked_question: bool
+    context_missing_reason: Optional[str]
+    question_budget: int
+
+
 def get_initial_state() -> MentalHealthState:
     """
     Create a fresh initial state with sensible defaults.
@@ -527,6 +547,17 @@ def get_initial_state() -> MentalHealthState:
         pending_technique_reason=None,
         pending_technique_created_at_turn=None,
         current_topic=None,
-        current_context_tags=[],
+        current_context_tags=[],
+
+        # v13.0: Solution request lifecycle
+        solution_requested=False,
+        immediate_regulation_request=False,
+        exercises_reopened=False,
+        latest_user_need=None,
+        user_goal=None,
+        question_count_since_disclosure=0,
+        last_assistant_asked_question=False,
+        context_missing_reason=None,
+        question_budget=1,
     )
 

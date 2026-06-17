@@ -8,6 +8,7 @@ from mental_health_wellness.agent.graph import (
     _session_context_store,
 )
 from mental_health_wellness.nodes.emotion_fusion_node import fuse_emotions
+from mental_health_wellness.nodes.mood_analyzer_node import _anchor_low_signal_followup
 from mental_health_wellness.nodes.parallel_intake import _gate_calibrated_mood
 from mental_health_wellness.nodes.session_saver import _technique_delivery_snapshot
 from mental_health_wellness.nodes import technique_selector_node
@@ -96,6 +97,55 @@ def test_emotion_fusion_reanchors_low_signal_followup_to_distress_peak():
 
     assert fused["fused_emotion"] == "sadness"
     assert fused["fused_intensity"] >= 0.73
+
+
+def test_mood_guard_reanchors_worst_at_night_followup_before_fusion():
+    guarded = _anchor_low_signal_followup(
+        {
+            "gate_route": "contextual_followup",
+            "last_detected_emotion": "anxiety",
+            "last_detected_intensity": 0.64,
+            "peak_distress_intensity": 0.64,
+            "active_thread_summary": "loneliness, overthinking, and sleep difficulty",
+        },
+        "It's worst at night",
+        {
+            "emotion": "joy",
+            "sentiment": "positive",
+            "intensity": 0.2,
+            "primary_sub_emotion": "joy",
+            "secondary_sub_emotions": [],
+        },
+    )
+
+    assert guarded["emotion"] == "anxiety"
+    assert guarded["sentiment"] == "negative"
+    assert guarded["primary_sub_emotion"] == "rumination"
+    assert guarded["intensity"] >= 0.64
+
+
+def test_emotion_fusion_reanchors_low_signal_followup_with_thread_floor():
+    fused = fuse_emotions(
+        {
+            "gate_route": "contextual_followup",
+            "gate_intensity_hint": 0.18,
+            "emotion": "joy",
+            "intensity": 0.18,
+            "confidence": 0.49,
+            "last_detected_emotion": None,
+            "last_detected_intensity": 0.0,
+            "peak_distress_intensity": 0.0,
+            "active_thread_summary": "nighttime overthinking and loneliness",
+            "primary_concern": "overthinking at night",
+            "followup_turn_count": 1,
+            "messages": [
+                HumanMessage(content="It's worst at night")
+            ],
+        }
+    )
+
+    assert fused["fused_emotion"] == "anxiety"
+    assert fused["fused_intensity"] >= 0.35
 
 
 def test_gate_calibrated_mood_enriches_social_humiliation_followup():

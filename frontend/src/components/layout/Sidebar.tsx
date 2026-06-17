@@ -134,25 +134,7 @@ export function Sidebar({
         )}
       </div>
 
-      {activeTechnique && (
-        <div className="px-3 pb-3">
-          <div className="overflow-hidden rounded-xl border border-slate-200 shadow-sm">
-            <div className={`bg-gradient-to-r ${techGradient} px-3 py-3 text-white`}>
-              <div className="flex items-center justify-between gap-2">
-                <div className="min-w-0">
-                  <p className="text-[10px] font-bold uppercase tracking-wider text-white/70">Active technique</p>
-                  <p className="truncate text-sm font-black">{activeTechnique.name}</p>
-                </div>
-                <Zap className="h-4 w-4 shrink-0" />
-              </div>
-            </div>
-            <div className="flex items-center justify-between gap-2 bg-white px-3 py-2 text-[11px] text-slate-500">
-              <span className="capitalize">{activeTechnique.category}</span>
-              <span>{activeTechnique.duration_minutes} min</span>
-            </div>
-          </div>
-        </div>
-      )}
+
 
       <div className="border-t border-slate-100 bg-white p-3">
         <button

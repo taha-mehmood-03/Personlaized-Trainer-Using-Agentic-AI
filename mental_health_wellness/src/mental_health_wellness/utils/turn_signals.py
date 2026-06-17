@@ -111,6 +111,43 @@ _POSITIVE_OUTCOME_PHRASES = {
     "helpful",
 }
 
+_EXERCISE_DENIAL_PHRASES = {
+    "no exercises",
+    "no exercise",
+    "no techniques",
+    "no technique",
+    "dont want exercises",
+    "dont want exercise",
+    "dont want techniques",
+    "dont want technique",
+    "do not want exercises",
+    "do not want exercise",
+    "do not want techniques",
+    "do not want technique",
+    "stop suggesting exercises",
+    "stop suggesting techniques",
+    "just listen",
+    "just want to vent",
+    "just want to talk",
+}
+
+_EXERCISE_BROWSE_PHRASES = {
+    "list exercises",
+    "list techniques",
+    "show me all exercises",
+    "show me all techniques",
+    "show me exercises",
+    "show me techniques",
+    "what exercises do you have",
+    "what techniques do you have",
+    "what exercises are available",
+    "what techniques are available",
+    "browse exercises",
+    "browse techniques",
+    "all exercises",
+    "all techniques",
+}
+
 
 def has_gratitude(text: str) -> bool:
     clean = plain_text(text)
@@ -188,6 +225,95 @@ def has_negative_feedback_signal(text: str) -> bool:
     return any(phrase in clean for phrase in _NEGATIVE_FEEDBACK_PHRASES)
 
 
+def is_explicit_exercise_request(text: str) -> bool:
+    """True when the user wants a practical exercise now, not just more talk.
+
+    This deliberately excludes global exercise refusals, negative feedback
+    about a previous exercise, and broad browse/list requests.
+    """
+    clean = plain_text(text)
+    if not clean:
+        return False
+    if any(phrase in clean for phrase in _EXERCISE_DENIAL_PHRASES):
+        return False
+    if has_negative_feedback_signal(clean):
+        return False
+    if any(phrase in clean for phrase in _EXERCISE_BROWSE_PHRASES):
+        return False
+
+    action_request = re.search(
+        r"\b(give|share|suggest|recommend|teach|start|begin|do|try|practice|guide|walk)\b"
+        r".{0,50}\b(exercise|exercises|technique|techniques|breathing|grounding|meditation|mindfulness|relaxation)\b",
+        clean,
+    )
+    if action_request:
+        return True
+
+    reverse_action_request = re.search(
+        r"\b(exercise|exercises|technique|techniques|breathing|grounding|meditation|mindfulness|relaxation)\b"
+        r".{0,50}\b(now|please|plz|pls|together)\b",
+        clean,
+    )
+    if reverse_action_request:
+        return True
+
+    try_something_request = re.search(
+        r"\b(want|wanna|would like|like|need|ready)\b.{0,35}\btry something\b",
+        clean,
+    )
+    suggestion_request = any(
+        phrase in clean
+        for phrase in (
+            "what do you suggest",
+            "what do you recommend",
+            "suggest something",
+            "recommend something",
+            "something that might help",
+            "something practical",
+            "something i can try",
+            "something to try",
+        )
+    )
+    if try_something_request and suggestion_request:
+        return True
+
+    if any(
+        phrase in clean
+        for phrase in (
+            "give me something to try",
+            "please give me something to try",
+            "can we try something",
+            "lets try something",
+            "let us try something",
+        )
+    ):
+        return True
+
+    return any(
+        phrase in clean
+        for phrase in (
+            "walk me through it",
+            "guide me through it",
+            "lets do it",
+            "let us do it",
+            "get on with it",
+        )
+    ) and any(
+        word in clean
+        for word in (
+            "exercise",
+            "exercises",
+            "technique",
+            "techniques",
+            "breathing",
+            "grounding",
+            "meditation",
+            "mindfulness",
+            "relaxation",
+        )
+    )
+
+
 def is_no_thanks(text: str) -> bool:
     clean = plain_text(text)
     return clean in {"no thanks", "no thank you", "nah thanks", "no thx", "no ty"}
@@ -261,3 +387,214 @@ def last_ai_from_recent_context(recent_context: str) -> str:
         if part.upper().startswith(("AI:", "AIMESSAGE:", "ASSISTANT:", "SYSTEM:")):
             return part.split(":", 1)[1].strip() if ":" in part else part
     return ""
+
+
+# =============================================================================
+# v13.0: DYNAMIC CONTEXT GATHERING — NEW TURN SIGNAL FUNCTIONS
+# =============================================================================
+
+_BODY_DISTRESS_SIGNALS = (
+    "chest tight", "chest tightness", "chest pain",
+    "can't breathe", "cant breathe", "hard to breathe", "trouble breathing",
+    "heart beating fast", "heart racing", "heart pounding", "heart hammering",
+    "hands shaking", "body shaking", "trembling", "shaking",
+    "panic", "panicking", "having a panic",
+    "dizzy", "dizziness", "faint", "fainting", "lightheaded",
+    "something bad is going to happen", "feel like i'm dying", "feel like im dying",
+    "help me calm", "calm me down", "calm my body", "calm my breathing",
+    "help right now", "need help now", "i need to calm",
+    "cant calm down", "can't calm down",
+    "ground me", "ground myself",
+)
+
+_REGULATION_ACTION_SIGNALS = (
+    "right now", "right away", "immediately",
+    "please help", "please", "help me",
+    "now", "asap", "urgent",
+    "i can't", "i cant",
+    "calm down", "calm me", "calm my",
+    "breathe", "breathing",
+    "ground", "grounding",
+)
+
+
+def is_immediate_regulation_request(text: str) -> bool:
+    """True when the user has acute body distress AND urgency/action signal.
+
+    These users need help immediately — the agent must start a regulation
+    technique in the same turn with no permission gate and no context questions.
+    """
+    clean = normalize_text(text)
+    if not clean:
+        return False
+    has_body_distress = any(sig in clean for sig in _BODY_DISTRESS_SIGNALS)
+    if not has_body_distress:
+        return False
+    has_action = any(sig in clean for sig in _REGULATION_ACTION_SIGNALS)
+    return has_action
+
+
+_SOLUTION_REQUEST_PHRASES = (
+    "what should i do",
+    "what do i do",
+    "what can i do",
+    "how can you help",
+    "how would you help",
+    "how can therapy help",
+    "give me a solution",
+    "give me a plan",
+    "give me a technique",
+    "give me an exercise",
+    "give me something",
+    "can you give me therapy",
+    "give me therapy",
+    "fix this",
+    "help me fix",
+    "i need something right now",
+    "tell me what to do",
+    "any advice",
+    "need advice",
+    "i need help",
+    "help me please",
+    "please help me",
+    "what should i try",
+    "what exercise should i do",
+    "i want to try it",
+    "give me something to try",
+    "suggest something",
+    "can you suggest",
+    "where do i start",
+    "i dont know where to start",
+    "i don't know where to start",
+    "i need a plan",
+    "help me cope",
+    "how do i cope",
+    "what can help me",
+    "what will help",
+    "help me with this",
+    "can you help me with this",
+)
+
+
+def is_solution_requested(text: str) -> bool:
+    """True when the user explicitly asks for help, therapy, a technique, a plan,
+    or guidance — not just venting or giving context.
+
+    Excludes bare gratitude, affirmations, and short context answers.
+    """
+    clean = normalize_text(text)
+    if not clean:
+        return False
+    # Exclude pure gratitude/acknowledgement
+    if is_gratitude_only(clean):
+        return False
+    if is_polite_acknowledgement(clean):
+        return False
+    return any(phrase in clean for phrase in _SOLUTION_REQUEST_PHRASES)
+
+
+_GOAL_PATTERNS: list[tuple[tuple[str, ...], str]] = [
+    # calm_body_now — acute body distress
+    (
+        ("chest tight", "can't breathe", "cant breathe", "heart racing", "heart pounding",
+         "hands shaking", "trembling", "panic", "calm my body", "calm down right now",
+         "calm my breathing", "help me breathe", "ground me"),
+        "calm_body_now",
+    ),
+    # sleep_better
+    (
+        ("can't sleep", "cant sleep", "insomnia", "sleep better", "sleep problem",
+         "wake up at night", "lying awake", "mind won't stop at night"),
+        "sleep_better",
+    ),
+    # stop_overthinking_at_night
+    (
+        ("overthinking at night", "thoughts at night", "mind racing at night",
+         "can't stop thinking at night", "cant stop thinking at night",
+         "lying awake thinking", "ruminating at night"),
+        "stop_overthinking_at_night",
+    ),
+    # write_simple_message
+    (
+        ("help me write", "write a message", "what to say", "how to say it",
+         "write to my friend", "text my friend", "message my friend",
+         "say it simply", "help me word"),
+        "write_simple_message",
+    ),
+    # reach_out_to_friend
+    (
+        ("reach out", "talk to someone", "talk to a friend", "connect with someone",
+         "message someone", "text someone", "contact my friend",
+         "how do i talk to people", "how to talk to people"),
+        "reach_out_to_friend",
+    ),
+    # break_project_into_steps
+    (
+        ("break it down", "break down the project", "step by step", "where to start with",
+         "how to start my project", "project plan", "divide the work",
+         "fyp", "capstone", "dissertation"),
+        "break_project_into_steps",
+    ),
+    # know_where_to_start
+    (
+        ("where to start", "don't know where to start", "dont know where to start",
+         "don't know how to begin", "dont know how to begin",
+         "how to begin", "how do i begin", "what to do first",
+         "don't know what to do", "dont know what to do",
+         "i'm overwhelmed", "im overwhelmed", "too much"),
+        "know_where_to_start",
+    ),
+    # understand_my_emotion
+    (
+        ("understand my feelings", "understand what i feel", "why do i feel",
+         "why am i feeling", "what is this feeling", "make sense of",
+         "understand my emotions", "what does this mean"),
+        "understand_my_emotion",
+    ),
+]
+
+
+def detect_user_goal(text: str, state: dict | None = None) -> "str | None":
+    """Map the user's message to a canonical goal string.
+
+    Returns one of:
+        "calm_body_now", "sleep_better", "stop_overthinking_at_night",
+        "write_simple_message", "reach_out_to_friend", "break_project_into_steps",
+        "know_where_to_start", "understand_my_emotion"
+    or None if goal is unclear.
+    """
+    clean = normalize_text(text)
+    if not clean:
+        return None
+    for patterns, goal in _GOAL_PATTERNS:
+        if any(p in clean for p in patterns):
+            return goal
+    return None
+
+
+_MEDICAL_WARNING_SIGNALS = (
+    "chest pain",
+    "severe chest",
+    "chest hurts",
+    "chest is hurting",
+    "fainting",
+    "about to faint",
+    "going to faint",
+    "losing consciousness",
+    "cant breathe at all",
+    "can't breathe at all",
+    "cant breathe properly",
+    "can't breathe properly",
+    "severe dizziness",
+    "very dizzy",
+    "extremely dizzy",
+    "heart attack",
+)
+
+
+def has_medical_warning_signal(text: str) -> bool:
+    """True when the message contains severe body signals that warrant a medical safety line."""
+    clean = normalize_text(text)
+    if not clean:
+        return False
+    return any(sig in clean for sig in _MEDICAL_WARNING_SIGNALS)

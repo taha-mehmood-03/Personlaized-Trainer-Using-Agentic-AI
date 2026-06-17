@@ -9,7 +9,32 @@ Passes recent conversation history so follow-up messages are correctly classifie
 
 from ..agent.state import MentalHealthState
 from ..tools.mood_tools import analyze_mood_async
+from ..utils.distress_anchor import LOW_SIGNAL_EMOTIONS, NEGATIVE_EMOTIONS, has_active_therapeutic_thread
 import time
+
+
+_DISTRESS_CONTINUATION_MARKERS = (
+    "worst",
+    "worse",
+    "at night",
+    "night",
+    "sleep",
+    "can't sleep",
+    "cannot sleep",
+    "overthink",
+    "overthinking",
+    "racing thoughts",
+    "stuck",
+    "lonely",
+    "alone",
+    "isolated",
+    "stress",
+    "stressed",
+    "anxious",
+    "anxiety",
+    "worry",
+    "worried",
+)
 
 
 def _fmt_list(values, limit: int = 4) -> str:
@@ -18,6 +43,99 @@ def _fmt_list(values, limit: int = 4) -> str:
         return "none"
     suffix = f", +{len(cleaned) - limit}" if len(cleaned) > limit else ""
     return ", ".join(cleaned[:limit]) + suffix
+
+
+def _previous_negative_emotion(state: MentalHealthState) -> str | None:
+    for key in ("last_detected_emotion", "fused_emotion", "emotion"):
+        emotion = str(state.get(key) or "").lower()
+        if emotion in NEGATIVE_EMOTIONS:
+            return emotion
+    return None
+
+
+def _anchor_low_signal_followup(
+    state: MentalHealthState,
+    current_message: str,
+    mood_result: dict,
+) -> dict:
+    """Prevent short distressed continuations from becoming joy/positive.
+
+    The LLM sees recent assistant text too, so very short replies such as
+    "It's worst at night" can drift toward the assistant's warm tone. If the
+    session has an active concern and the current text still points at distress,
+    preserve the distress family instead.
+    """
+    emotion = str(mood_result.get("emotion") or "neutral").lower()
+    sentiment = str(mood_result.get("sentiment") or "neutral").lower()
+    if emotion not in LOW_SIGNAL_EMOTIONS and sentiment != "positive":
+        return mood_result
+    if state.get("gate_route") == "positive_feedback" or "positive_feedback" in (state.get("gate_context_flags") or []):
+        return mood_result
+
+    active_thread = (
+        has_active_therapeutic_thread(state)
+        or state.get("gate_route") == "contextual_followup"
+        or "answering_previous_question" in (state.get("gate_context_flags") or [])
+    )
+    if not active_thread:
+        return mood_result
+
+    combined = " ".join(
+        str(value or "")
+        for value in (
+            current_message,
+            state.get("active_thread_summary"),
+            state.get("primary_concern"),
+            state.get("triggering_context"),
+            state.get("functional_impact"),
+            state.get("core_belief"),
+        )
+    ).lower()
+    if not any(marker in combined for marker in _DISTRESS_CONTINUATION_MARKERS):
+        return mood_result
+
+    anchored = _previous_negative_emotion(state)
+    if not anchored:
+        if any(marker in combined for marker in ("lonely", "alone", "isolated")):
+            anchored = "sadness"
+        else:
+            anchored = "anxiety"
+
+    result = dict(mood_result)
+    result["emotion"] = anchored
+    result["sentiment"] = "negative"
+    result["raw_emotion_label"] = result.get("raw_emotion_label") or anchored
+    current_primary = str(result.get("primary_sub_emotion") or "").lower()
+    if current_primary in LOW_SIGNAL_EMOTIONS or current_primary in {"joy", "positive", "neutral", ""}:
+        if any(marker in combined for marker in ("night", "sleep", "overthink", "racing thoughts")):
+            result["primary_sub_emotion"] = "rumination"
+        elif any(marker in combined for marker in ("lonely", "alone", "isolated")):
+            result["primary_sub_emotion"] = "loneliness"
+        else:
+            result["primary_sub_emotion"] = anchored
+
+    try:
+        current_intensity = float(result.get("intensity") or 0.0)
+    except Exception:
+        current_intensity = 0.0
+    try:
+        anchor_intensity = max(
+            float(state.get("last_detected_intensity") or 0.0),
+            float(state.get("peak_distress_intensity") or 0.0),
+            0.45,
+        )
+    except Exception:
+        anchor_intensity = 0.45
+    result["intensity"] = max(current_intensity, min(anchor_intensity, 0.75))
+    result["emotion_reasoning"] = (
+        str(result.get("emotion_reasoning") or "").strip()
+        + " | anchored_low_signal_distress_followup"
+    ).strip(" |")
+    print(
+        f"[NODE:MOOD] Anchored low-signal follow-up: {emotion}/{sentiment} "
+        f"-> {anchored}/negative"
+    )
+    return result
 
 
 async def analyze_mood(state: MentalHealthState) -> dict:
@@ -77,8 +195,13 @@ async def analyze_mood(state: MentalHealthState) -> dict:
         conversation_context = []
         for m in history_window:
             role = getattr(m, "type", "human")
-            label = "User" if role == "human" else "Therapist"
             content = str(getattr(m, "content", "") or "")[:200]
+            if role != "human":
+                if "?" not in content:
+                    continue
+                label = "Assistant question"
+            else:
+                label = "User"
             if content.strip():
                 conversation_context.append(f"{label}: {content}")
         context_str = "\n".join(conversation_context) if conversation_context else ""
@@ -88,6 +211,7 @@ async def analyze_mood(state: MentalHealthState) -> dict:
         start_time = time.time()
 
         mood_result = await analyze_mood_async(current_message, context=context_str)
+        mood_result = _anchor_low_signal_followup(state, current_message, mood_result)
 
         elapsed_ms = int((time.time() - start_time) * 1000)
 

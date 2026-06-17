@@ -1,0 +1,16 @@
+"""Script to insert v13.0 helper functions into conversation_planner_node.py."""
+
+helpers_code = """\n\n# ===========================================================================\n# v13.0: DYNAMIC CONTEXT GATHERING HELPERS\n# ===========================================================================\n\ndef _context_is_enough(state: dict, emotion: str, intensity: float) -> bool:\n    \"\"\"Quantitative context sufficiency check using problem signals, NOT message count.\n\n    Enough context = known non-neutral emotion + intensity above floor + at least\n    one concrete problem signal OR explicit user goal OR explicit solution request.\n    \"\"\"\n    has_emotion = (emotion or \"neutral\").lower() not in (\"neutral\", \"\")\n    has_intensity = float(intensity or 0) > 0.20\n    has_problem_signal = bool(\n        state.get(\"primary_concern\")\n        or state.get(\"active_issue_source\")\n        or state.get(\"detected_contexts\")\n        or state.get(\"detected_behaviors\")\n        or state.get(\"detected_symptoms\")\n        or state.get(\"primary_sub_emotion\")\n        or state.get(\"distortion_type\")\n    )\n    has_goal_signal = bool(\n        (state.get(\"user_goal\") or \"\").strip()\n        or (state.get(\"latest_user_need\") or \"\").strip()\n    )\n    explicit_solution = bool(state.get(\"solution_requested\"))\n    return has_emotion and has_intensity and (\n        has_problem_signal or has_goal_signal or explicit_solution\n    )\n\n\ndef _infer_context_missing_reason(state: dict, emotion: str, intensity: float):\n    \"\"\"Return a targeted reason why context is insufficient, for a targeted single question.\"\"\"\n    if (emotion or \"neutral\").lower() in (\"neutral\", \"\") or float(intensity or 0) <= 0.10:\n        return \"vague_disclosure\"\n    if not state.get(\"primary_concern\") and not state.get(\"detected_contexts\"):\n        return \"missing_trigger\"\n    if not state.get(\"user_goal\") and not state.get(\"latest_user_need\"):\n        return \"missing_user_goal\"\n    return None\n\n\ndef _goal_to_response_task(user_goal, immediate_regulation: bool, solution_requested: bool):\n    \"\"\"Map a canonical user goal to a specific response_task string.\"\"\"\n    if immediate_regulation:\n        return \"start_grounding_now\"\n    _mapping = {\n        \"reach_out_to_friend\":        \"offer_low_pressure_message\",\n        \"write_simple_message\":       \"offer_low_pressure_message\",\n        \"know_where_to_start\":        \"give_tiny_first_step\",\n        \"break_project_into_steps\":   \"give_tiny_first_step\",\n        \"stop_overthinking_at_night\": \"offer_overthinking_tool\",\n    }\n    if user_goal and user_goal in _mapping:\n        return _mapping[user_goal]\n    if solution_requested:\n        return \"give_tiny_first_step\"\n    return None\n\n\n"""
+
+target = r'E:\FYP\mental_health_wellness\src\mental_health_wellness\nodes\conversation_planner_node.py'
+with open(target, 'r', encoding='utf-8') as f:
+    content = f.read()
+
+marker = 'def _has_actionable_therapy_signal('
+if '_context_is_enough' not in content:
+    content = content.replace(marker, helpers_code + marker)
+    with open(target, 'w', encoding='utf-8') as f:
+        f.write(content)
+    print('Helpers inserted successfully')
+else:
+    print('Already present — skipping')

@@ -25,6 +25,7 @@ from ..utils.turn_signals import (
     has_positive_outcome_signal,
     is_bare_affirmation,
     is_no_thanks,
+    is_explicit_exercise_request,
     is_polite_acknowledgement,
     is_technique_acceptance_reply,
 )
@@ -40,6 +41,10 @@ _CONTEXT_KEYS = (
     "functional_impact",
     "core_belief",
 )
+
+RICH_CONTEXT_MIN_SLOTS = 4
+RICH_CONTEXT_MIN_WORDS_WITH_FORMULATION = 14
+FOCUSED_CONTEXT_MIN_SLOTS = 3
 
 
 def _message_text(message) -> str:
@@ -196,7 +201,7 @@ def infer_expected_answer_type(question: Optional[str]) -> Optional[str]:
         return "duration"
     if any(p in q for p in ("what part", "which part", "feels most painful", "hurts the most", "hardest part")):
         return "pain_point"
-    if any(p in q for p in ("what subject", "which subject", "what topic", "which topic", "what area", "which area")):
+    if any(p in q for p in ("what subject", "which subject", "what topic", "which topic", "what area", "which area", "what setting", "which setting", "social setting", "type of social", "kind of social", "specific type", "what kind of people", "which people")):
         return "subject_or_focus"
     if any(p in q for p in ("where do you feel", "in your body", "physically", "body feel", "feel it mostly")):
         return "body_sensation"
@@ -228,7 +233,8 @@ def _looks_like_distress(text: str) -> bool:
             "anxious", "anxiety", "worried", "stress", "stressed", "sad",
             "heavy", "tired", "drained", "overwhelmed", "not good",
             "not okay", "not ok", "panic", "fear", "scared", "guilty",
-            "guilt", "shut down", "worthless", "hopeless",
+            "guilt", "shut down", "worthless", "hopeless", "lonely",
+            "loneliness", "alone", "isolated", "overthinking", "overthink",
         )
     )
 
@@ -294,7 +300,7 @@ def _detect_user_act(
         return "reject_technique", "reject_technique", flags + ["reject_technique", "technique_rejection"], "latest_recommended_technique", "handle_technique_rejection"
     if has_positive_outcome_signal(text) and (has_active_technique or prior_steps_given):
         return "positive_feedback", "positive_feedback", flags + ["positive_feedback", "outcome_feedback"], "latest_recommended_technique", "positive_feedback"
-    if technique_offer_pending and is_technique_acceptance_reply(text):
+    if technique_offer_pending and (is_technique_acceptance_reply(text) or is_explicit_exercise_request(text)):
         return "accept_technique", "accept_technique", flags + ["accept_technique", "technique_acceptance_answer"], "latest_recommended_technique", "continue_active_technique"
     if technique_offer_pending and not text.strip().endswith("?") and not is_polite_acknowledgement(text):
         return (
@@ -333,6 +339,15 @@ def _detect_user_act(
             "formulate_and_offer_help",
         )
 
+    if is_explicit_exercise_request(text):
+        return (
+            "explicit_technique_request",
+            "technique_request",
+            flags + ["explicit_technique_request", "help_request"],
+            "active_concern",
+            "offer_one_technique",
+        )
+
     if any(p in lower for p in ("what do you think", "your opinion", "what do you make of", "how do you see it", "your read", "read on this", "read on that")):
         return "asking_opinion", "contextual_followup", flags + ["asking_opinion", "refers_to_previous_topic"], "active_concern", "give_reflective_opinion"
 
@@ -358,8 +373,19 @@ def _detect_user_act(
     if any(p in lower for p in ("helped me more", "worked better", "that one helped", "i prefer", "i liked that one")):
         return "technique_preference_update", "technique_preference_update", flags + ["preference_update"], "latest_recommended_technique", "record_preference"
 
-    if any(p in lower for p in ("suggest something", "something to help", "what can i do", "what should i do", "how can i handle", "how do i deal", "any advice", "can you help", "give me something", "need something practical")):
-        return "help_request", "advice_seeking", flags + ["help_request"], "active_concern", "ask_next_context_question"
+    if any(p in lower for p in (
+        "suggest something", "something to help", "what can i do", "what should i do",
+        "how can i handle", "how do i deal", "any advice", "can you help",
+        "give me something", "need something practical",
+        "help me", "need help", "need a solution", "give me a solution",
+        "need therapy", "need coping", "coping strategy", "coping technique",
+        "need a plan", "give me a plan", "need guidance", "give me guidance",
+    )):
+        # Internal planner intent. The smart gate still uses public route labels
+        # such as therapeutic/contextual_followup; this resolver refines help
+        # requests so the planner gives a stabilising action first, then an
+        # optional single follow-up question (action-first principle).
+        return "help_request", "advice_seeking", flags + ["help_request"], "active_concern", "give_tiny_first_step"
 
     if re.search(r"\b(?:about\s+|almost\s+|nearly\s+)?\d+\s*(?:day|days|week|weeks|month|months|year|years)\b", lower):
         return "answering_previous_question", "contextual_followup", flags + ["answering_previous_question", "duration_answer"], "last_assistant_question", "ask_next_context_question"
@@ -426,8 +452,12 @@ def _apply_slot_updates(
 
     if any(p in lower for p in ("can't focus", "cant focus", "blank", "forget", "avoid", "shut down", "nothing gets done", "wasting time", "drained", "tired", "can't sleep", "cant sleep")):
         updates["functional_impact"] = text
+    if any(p in lower for p in ("sleep", "sleeping", "insomnia", "at night", "bedtime", "nighttime", "night time")):
+        if not updates.get("triggering_context"):
+            updates["triggering_context"] = text
+        updates["functional_impact"] = text
 
-    if any(p in lower for p in ("fail", "not good enough", "can't do", "cant do", "disappoint", "wasn't enough", "wasnt enough", "should be fine", "should be doing", "guilty", "guilt", "all my work")):
+    if any(p in lower for p in ("fail", "not good enough", "can't do", "cant do", "disappoint", "wasn't enough", "wasnt enough", "should be fine", "should be doing", "guilty", "guilt", "all my work", "feel stuck", "feeling stuck", "stuck", "dont know how", "do not know how", "don't know how", "overthink", "overthinking")):
         updates["core_belief"] = text
 
     return updates
@@ -453,6 +483,60 @@ def _build_active_thread_summary(slot_updates: dict, fallback: Optional[str]) ->
     return "; ".join(parts)[:500]
 
 
+def _has_enough_context_for_next_step(slot_updates: dict, current: str) -> bool:
+    """Detect rich answers that should end context gathering for this turn."""
+    filled = sum(1 for key in _CONTEXT_KEYS if slot_updates.get(key))
+    has_formulation = bool(slot_updates.get("functional_impact") or slot_updates.get("core_belief"))
+    has_situation = bool(slot_updates.get("triggering_context") or slot_updates.get("concern_duration"))
+    word_count = len(re.findall(r"\w+", current or ""))
+
+    if filled >= RICH_CONTEXT_MIN_SLOTS:
+        return True
+    if word_count >= RICH_CONTEXT_MIN_WORDS_WITH_FORMULATION and has_formulation and has_situation:
+        return True
+    return False
+
+
+def _focused_answer_completes_context(slot_updates: dict, current: str, expected_answer_type: Optional[str]) -> bool:
+    """Short answers can complete context when they fill the exact missing slot."""
+    if expected_answer_type not in {
+        "subject_or_focus",
+        "context_detail",
+        "support_need",
+        "pain_point",
+        "core_belief",
+        "functional_impact",
+    }:
+        return False
+
+    filled = sum(1 for key in _CONTEXT_KEYS if slot_updates.get(key))
+    has_concern = bool(slot_updates.get("primary_concern") or slot_updates.get("active_thread_summary"))
+    has_trigger = bool(slot_updates.get("triggering_context") or slot_updates.get("triggering_subject"))
+    has_impact_or_belief = bool(slot_updates.get("functional_impact") or slot_updates.get("core_belief"))
+    combined = " ".join(str(slot_updates.get(key) or "") for key in _CONTEXT_KEYS).lower()
+    social_focus = any(
+        marker in combined
+        for marker in (
+            "not my closest friends",
+            "outside my closest friends",
+            "people outside",
+            "talking to people",
+            "strangers",
+            "acquaintances",
+            "social",
+            "conversation",
+        )
+    )
+
+    if has_concern and has_trigger and has_impact_or_belief:
+        return True
+    if filled >= FOCUSED_CONTEXT_MIN_SLOTS and has_concern and (has_trigger or social_focus):
+        return True
+    if social_focus and has_concern and filled >= 2:
+        return True
+    return False
+
+
 def resolve_conversation_context(state: MentalHealthState) -> dict:
     """Resolve the latest user message against the same-session thread."""
     messages = state.get("messages") or []
@@ -470,6 +554,19 @@ def resolve_conversation_context(state: MentalHealthState) -> dict:
     )
     slot_updates = _apply_slot_updates(state, current, user_act, expected_answer_type, active_thread)
     active_thread_summary = _build_active_thread_summary(slot_updates, active_thread)
+
+    if (
+        intent == "contextual_followup"
+        and response_task == "ask_next_context_question"
+        and (
+            _has_enough_context_for_next_step(slot_updates, current)
+            or _focused_answer_completes_context(slot_updates, current, expected_answer_type)
+        )
+    ):
+        response_task = "formulate_and_offer_help"
+        for flag in ("rich_context_answer", "context_complete"):
+            if flag not in flags:
+                flags.append(flag)
 
     resolved = {
         "user_act": user_act,

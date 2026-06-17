@@ -36,6 +36,7 @@ from ..utils.turn_signals import (
     
     has_negative_feedback_signal,
     has_positive_outcome_signal,
+    is_explicit_exercise_request,
     is_no_thanks,
     is_polite_acknowledgement,
     is_technique_acceptance_reply,
@@ -1081,7 +1082,7 @@ Routing rules:
    - If the user says the prior technique helped/worked/calmed them, route positive_feedback, not accept_technique.
    - "thanks", "thank you", "ok thanks", or "thanks for it" alone are polite acknowledgement, not acceptance and not positive outcome feedback.
    - "yes thanks" only means acceptance when the immediately previous assistant turn was a technique consent offer.
-   - "no thanks" after a technique offer means the user declined the exercise for now; set exercise_consent="denied" and solution_preference="listen_only".
+   - "no thanks" after a technique offer means the user declined the exercise for now; set exercise_consent="denied_soft" and solution_preference="listen_only".
    - A stored older technique is not enough for accept_technique; the immediately previous assistant turn must be a technique consent offer.
 8. Positive result after a technique -> positive_feedback.
 9. Asking for a previously mentioned item/name ("what was its name?", "which technique was that?") -> memory_query.
@@ -1151,7 +1152,7 @@ Return exactly this JSON shape:
   "intensity_hint": 0.0,
   "needs_full_pipeline": true,
   "should_skip_mood_analysis": false,
-  "exercise_consent": "unknown | denied | allowed",
+  "exercise_consent": "unknown | denied_soft | denied_hard | allowed",
   "solution_preference": "unknown | listen_only | advice_allowed | exercise_requested",
   "suppression_signal": "none | corrects_history",
   "suppressed_topic": null,
@@ -1197,7 +1198,7 @@ def _normalize_smart_gate_result(parsed: dict, message: str, recent_context: str
             raw_route = "contextual_followup"
             flags.extend(["decline_technique_offer", "technique_declined"])
             metadata["feedback_sentiment"] = "declined"
-            parsed["exercise_consent"] = "denied"
+            parsed["exercise_consent"] = "denied_soft"
             parsed["solution_preference"] = "listen_only"
         elif has_negative_feedback_signal(message):
             raw_route = "technique_follow_up"
@@ -1239,6 +1240,11 @@ def _normalize_smart_gate_result(parsed: dict, message: str, recent_context: str
             flags = [flag for flag in flags if flag != "accept_technique"]
         if raw_route == "positive_feedback":
             flags = [flag for flag in flags if flag != "accept_technique"]
+        if is_explicit_exercise_request(message):
+            raw_route = "technique_request"
+            flags.extend(["explicit_technique_request", "help_request"])
+            parsed["exercise_consent"] = "allowed"
+            parsed["solution_preference"] = "exercise_requested"
 
     if raw_route != "crisis" and _message_says_no_more_details(message):
         raw_route = "contextual_followup"

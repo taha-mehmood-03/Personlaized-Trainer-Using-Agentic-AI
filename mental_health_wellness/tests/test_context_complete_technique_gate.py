@@ -8,6 +8,7 @@ from mental_health_wellness.nodes.optimized_response_generator import _build_str
 import mental_health_wellness.nodes.technique_selector_node as technique_selector_module
 from mental_health_wellness.nodes.technique_selector_node import _build_technique_need_query
 from mental_health_wellness.nodes.technique_selector_node import select_technique
+from mental_health_wellness.utils.turn_signals import is_explicit_exercise_request
 
 
 @pytest.mark.asyncio
@@ -96,6 +97,52 @@ def test_structured_context_injects_solution_preference():
     assert "- Solution preference: listen_only" in context
 
 
+def test_structured_prompt_does_not_reask_permission_for_explicit_exercise_request():
+    context = _build_structured_context(
+        emotion="anxiety",
+        intensity=0.7,
+        sentiment="negative",
+        technique={"name": "Worry Time", "category": "CBT"},
+        agent_role="coach",
+        is_new_user=False,
+        user_message="Please get on with it and give me the exercise.",
+        needs_technique=True,
+        current_intent="technique_request",
+        response_task="offer_one_technique",
+        solution_preference="exercise_requested",
+        exercise_consent="allowed",
+        primary_concern="nighttime overthinking",
+        triggering_context="at night",
+        functional_impact="stops me from sleeping",
+        core_belief="I feel stuck",
+    )
+
+    assert "Lifecycle mode: explicit_exercise_requested" in context
+    assert "Do not ask permission again" in context
+    assert "Begin the first small step" in context
+
+
+def test_structured_prompt_prevents_repeated_context_question():
+    context = _build_structured_context(
+        emotion="sadness",
+        intensity=0.5,
+        sentiment="negative",
+        technique={},
+        agent_role="coach",
+        is_new_user=False,
+        user_message="Overthinking.",
+        needs_technique=False,
+        current_intent="contextual_followup",
+        response_task="ask_next_context_question",
+        primary_concern="loneliness and overthinking",
+        last_assistant_question="What part of that feels hardest to carry today?",
+        expected_answer_type="pain_point",
+    )
+
+    assert "Ask exactly one focused next question for a missing detail, not a repeated detail" in context
+    assert "do not ask that again" in context
+
+
 def test_bare_later_does_not_create_exercise_denial_without_exercise_context():
     result = parse_consent_and_suppression(
         {
@@ -173,6 +220,263 @@ def test_technique_need_query_uses_followup_context_not_bare_acceptance():
     assert "symptoms: sleep_disturbance" in query
     assert "behaviors: rumination" in query
     assert "context tags: exam_stress" in query
+
+
+def test_rich_followup_answer_marks_context_complete_without_new_question():
+    result = resolve_conversation_context(
+        {
+            "messages": [
+                HumanMessage(content="I spend most of my time alone listening to music. I feel lonely and anxious."),
+                AIMessage(content="What has been the hardest part of it today?"),
+                HumanMessage(content="The hardest part has been coping with my overthinking."),
+                AIMessage(content="What part of that feels hardest to carry today?"),
+                HumanMessage(
+                    content=(
+                        "I keep overthinking everything at night, it stops me from sleeping "
+                        "and I just feel stuck and don't know how to get out of it."
+                    )
+                ),
+            ],
+            "exercise_consent": "unknown",
+            "solution_preference": "unknown",
+        }
+    )
+
+    assert result["intent"] == "contextual_followup"
+    assert result["response_task"] == "formulate_and_offer_help"
+    assert "context_complete" in result["gate_context_flags"]
+    assert "rich_context_answer" in result["gate_context_flags"]
+    assert "sleeping" in result["functional_impact"]
+    assert "at night" in result["triggering_context"]
+
+
+def test_thin_followup_answer_keeps_context_question_open():
+    result = resolve_conversation_context(
+        {
+            "messages": [
+                HumanMessage(content="I feel lonely and anxious."),
+                AIMessage(content="What part of that feels hardest to carry today?"),
+                HumanMessage(content="Overthinking."),
+            ],
+            "exercise_consent": "unknown",
+            "solution_preference": "unknown",
+        }
+    )
+
+    assert result["intent"] == "contextual_followup"
+    assert result["response_task"] == "ask_next_context_question"
+    assert "context_complete" not in result["gate_context_flags"]
+    assert "rich_context_answer" not in result["gate_context_flags"]
+
+
+def test_explicit_exercise_request_after_context_is_not_another_followup_question():
+    result = resolve_conversation_context(
+        {
+            "messages": [
+                HumanMessage(content="I feel lonely and anxious."),
+                AIMessage(content="What part of that feels hardest to carry today?"),
+                HumanMessage(content="I keep overthinking at night and it stops me from sleeping."),
+                AIMessage(content="We can stay with that and move toward what would help."),
+                HumanMessage(content="Please get on with it and give me the exercises."),
+            ],
+            "primary_concern": "nighttime overthinking and anxiety",
+            "triggering_context": "overthinking at night",
+            "functional_impact": "it stops me from sleeping",
+            "core_belief": "I feel stuck",
+            "exercise_consent": "unknown",
+            "solution_preference": "unknown",
+        }
+    )
+
+    assert result["intent"] == "technique_request"
+    assert result["response_task"] == "offer_one_technique"
+    assert "explicit_technique_request" in result["gate_context_flags"]
+    assert "answering_previous_question" not in result["gate_context_flags"]
+
+
+def test_explicit_exercise_request_after_permission_offer_accepts_pending_technique():
+    result = resolve_conversation_context(
+        {
+            "messages": [
+                HumanMessage(content="I keep overthinking at night and it stops me from sleeping."),
+                AIMessage(content="I have something that might help. Would you like me to share it?"),
+                HumanMessage(content="Please get on with it and give me the exercise."),
+            ],
+            "expected_answer_type": "technique_acceptance",
+            "response_task": "ask_permission_before_technique",
+            "primary_concern": "nighttime overthinking",
+            "triggering_context": "at night",
+            "functional_impact": "stops me from sleeping",
+            "pending_recommended_technique": {"id": "worry-time", "name": "Worry Time", "category": "CBT"},
+            "exercise_consent": "unknown",
+            "solution_preference": "unknown",
+        }
+    )
+
+    assert result["intent"] == "accept_technique"
+    assert result["response_task"] == "continue_active_technique"
+    assert "accept_technique" in result["gate_context_flags"]
+    assert "technique_offer_deferred" not in result["gate_context_flags"]
+
+
+def test_advice_seeking_is_internal_resolver_intent_not_smart_gate_route():
+    result = resolve_conversation_context(
+        {
+            "messages": [
+                HumanMessage(content="I keep overthinking at night and it stops me sleeping."),
+                AIMessage(content="What feels most urgent right now?"),
+                HumanMessage(content="What should I do now?"),
+            ],
+            "primary_concern": "nighttime overthinking",
+            "triggering_context": "at night",
+            "functional_impact": "stops me sleeping",
+            "exercise_consent": "unknown",
+            "solution_preference": "unknown",
+        }
+    )
+
+    assert result["intent"] == "advice_seeking"
+    assert result["response_task"] == "ask_next_context_question"
+    assert "help_request" in result["gate_context_flags"]
+
+
+def test_try_something_suggestion_phrase_is_explicit_exercise_request():
+    assert is_explicit_exercise_request(
+        "Yes please, I really want to try something. What do you suggest?"
+    )
+
+
+@pytest.mark.asyncio
+async def test_planner_offers_technique_for_explicit_request_with_context():
+    result = await conversation_planner_node(
+        {
+            "messages": [
+                HumanMessage(content="I feel lonely and anxious."),
+                AIMessage(content="What part of that feels hardest to carry today?"),
+                HumanMessage(content="I keep overthinking at night and it stops me from sleeping."),
+                AIMessage(content="We can stay with that and move toward what would help."),
+                HumanMessage(content="Please get on with it and give me the exercises."),
+            ],
+            "session_message_count": 3,
+            "fused_emotion": "anxiety",
+            "fused_intensity": 0.72,
+            "emotional_trend": "stable",
+            "crisis_detected": False,
+            "exercise_consent": "allowed",
+            "solution_preference": "exercise_requested",
+            "prefetched_intent": {
+                "intent": "technique_request",
+                "confidence": 0.92,
+                "source": "smart_gate",
+            },
+            "gate_route": "technique_request",
+            "gate_emotional_register": "distress",
+            "gate_context_flags": ["explicit_technique_request", "help_request"],
+            "resolved_user_act": {
+                "intent": "technique_request",
+                "context_flags": ["continuation", "explicit_technique_request", "help_request"],
+                "referent": "active_concern",
+                "response_task": "offer_one_technique",
+                "slot_updates": {
+                    "primary_concern": "nighttime overthinking and anxiety",
+                    "triggering_context": "overthinking at night",
+                    "functional_impact": "it stops me from sleeping",
+                    "core_belief": "I feel stuck",
+                },
+            },
+            "primary_concern": "nighttime overthinking and anxiety",
+            "triggering_context": "overthinking at night",
+            "functional_impact": "it stops me from sleeping",
+            "core_belief": "I feel stuck",
+        }
+    )
+
+    assert result["needs_technique"] is True
+    assert result["conversation_strategy"] == "suggest_technique"
+    assert result["conversation_stage"] == "INTERVENTION"
+    assert result["response_task"] == "offer_one_technique"
+
+
+@pytest.mark.asyncio
+async def test_planner_respects_try_something_request_without_extra_context_question():
+    result = await conversation_planner_node(
+        {
+            "messages": [
+                HumanMessage(content="I spend most of my time alone and feel lonely."),
+                AIMessage(content="When does the loneliness hit the hardest?"),
+                HumanMessage(content="It is worst at night and I overthink until I can't sleep."),
+                AIMessage(content="What kind of support do you feel you are missing?"),
+                HumanMessage(content="Yes please, I really want to try something. What do you suggest?"),
+            ],
+            "session_message_count": 3,
+            "fused_emotion": "anxiety",
+            "fused_intensity": 0.68,
+            "emotional_trend": "stable",
+            "crisis_detected": False,
+            "exercise_consent": "allowed",
+            "solution_preference": "exercise_requested",
+            "prefetched_intent": {
+                "intent": "contextual_followup",
+                "confidence": 0.74,
+                "source": "smart_gate",
+            },
+            "gate_route": "contextual_followup",
+            "gate_emotional_register": "distress",
+            "gate_context_flags": ["answering_previous_question"],
+            "primary_concern": "loneliness with anxiety and overthinking",
+            "triggering_context": "worst at night",
+            "functional_impact": "overthinking stops sleep",
+            "core_belief": "I feel stuck",
+        }
+    )
+
+    assert result["needs_technique"] is True
+    assert result["conversation_strategy"] == "suggest_technique"
+    assert result["conversation_stage"] == "INTERVENTION"
+    assert result["response_task"] == "offer_one_technique"
+
+
+@pytest.mark.asyncio
+async def test_planner_asks_context_question_for_bare_exercise_request():
+    result = await conversation_planner_node(
+        {
+            "messages": [HumanMessage(content="Give me an exercise.")],
+            "session_message_count": 1,
+            "fused_emotion": "neutral",
+            "fused_intensity": 0.2,
+            "emotional_trend": "stable",
+            "crisis_detected": False,
+            "exercise_consent": "allowed",
+            "solution_preference": "exercise_requested",
+            "prefetched_intent": {
+                "intent": "technique_request",
+                "confidence": 0.9,
+                "source": "smart_gate",
+            },
+            "gate_route": "technique_request",
+            "gate_emotional_register": "neutral",
+            "gate_context_flags": ["explicit_technique_request", "help_request"],
+            "resolved_user_act": {
+                "intent": "technique_request",
+                "context_flags": ["explicit_technique_request", "help_request"],
+                "referent": "active_concern",
+                "response_task": "offer_one_technique",
+                "slot_updates": {},
+            },
+        }
+    )
+
+    assert result["needs_technique"] is False
+    assert result["conversation_strategy"] == "ask_question"
+    assert result["conversation_stage"] == "UNDERSTANDING"
+    # v13.0: "Give me an exercise." also matches is_solution_requested(), so the
+    # SOLUTION_REQUESTED routing block (conversation_planner_node.py) now owns
+    # this turn ahead of the older technique_request path. With no emotion,
+    # intensity, or problem signal yet, _context_is_enough() is False, so the
+    # planner asks a single *targeted* context question (context_missing_reason
+    # = "vague_disclosure") instead of the older generic question task.
+    assert result["response_task"] == "ask_one_missing_context_question"
+    assert result["context_missing_reason"] == "vague_disclosure"
 
 
 def test_elaboration_after_technique_offer_defers_instead_of_new_disclosure():

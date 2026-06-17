@@ -208,10 +208,16 @@ async def test_select_technique_context_sufficiency_gate():
         "messages": [],
     }
     res = await select_technique(state)
+    # technique_area/technique_plan_mode/technique_series were added to the
+    # skip-path payload by the v12.0/v13.0 technique-area + series-plan work,
+    # so the empty-selection contract now carries them through too.
     assert res == {
         "recommended_technique": {},
         "recommended_techniques_by_category": {},
         "alternative_techniques": [],
+        "technique_area": [],
+        "technique_plan_mode": "single",
+        "technique_series": [],
     }
 
     # Bypassed by high context sufficiency

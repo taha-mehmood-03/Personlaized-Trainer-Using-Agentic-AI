@@ -172,41 +172,15 @@ def _derive_followup_enrichment(
     previous_behaviors: list[str] | None,
     previous_contexts: list[str] | None,
 ) -> dict:
-    try:
-        from ..tools.mood_tools import _derive_structured_tags
-
-        subs, symptoms, behaviors, contexts = _derive_structured_tags(current_message)
-    except Exception:
-        subs, symptoms, behaviors, contexts = [], [], [], []
-
-    if not any((subs, symptoms, behaviors, contexts)):
-        return {
-            "enriched": False,
-            "primary_sub_emotion": previous_sub_emotion,
-            "secondary_sub_emotions": list(previous_secondary or []),
-            "detected_symptoms": list(previous_symptoms or []),
-            "detected_behaviors": list(previous_behaviors or []),
-            "detected_contexts": list(previous_contexts or []),
-        }
-
-    generic_previous = {
-        "", "neutral", "joy", "surprise", "calm", "content", "desire",
-        "relief", "approval", "optimism", "gratitude", "acknowledgement",
-        "sadness", "anxiety", "fear", "anger", "stress", "worry", "nervousness",
-    }
-    previous = str(previous_sub_emotion or "").lower().strip()
-    primary = subs[0] if subs and previous in generic_previous else previous or (subs[0] if subs else "")
-    secondary = _append_unique_lower(
-        [item for item in [previous] if item and item != primary] + list(previous_secondary or []),
-        [item for item in subs if item != primary],
-    )
+    # v9.0: LLM-only mode — no keyword fallback
+    # All sub-emotion, symptoms, behaviors, contexts extraction is handled by Gemini mood analyzer
     return {
-        "enriched": True,
-        "primary_sub_emotion": primary,
-        "secondary_sub_emotions": secondary,
-        "detected_symptoms": _append_unique_lower(previous_symptoms, symptoms),
-        "detected_behaviors": _append_unique_lower(previous_behaviors, behaviors),
-        "detected_contexts": _append_unique_lower(previous_contexts, contexts),
+        "enriched": False,
+        "primary_sub_emotion": previous_sub_emotion,
+        "secondary_sub_emotions": list(previous_secondary or []),
+        "detected_symptoms": list(previous_symptoms or []),
+        "detected_behaviors": list(previous_behaviors or []),
+        "detected_contexts": list(previous_contexts or []),
     }
 
 

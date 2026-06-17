@@ -17,6 +17,7 @@ import re
 
 from ..agent.state import MentalHealthState
 from ..llm import get_chat_llm, get_llm_manager
+from ..utils.turn_signals import has_medical_warning_signal
 
 
 _context_logger = logging.getLogger("sentimind.context")
@@ -126,14 +127,15 @@ def _strip_response_metadata_prefix(response: str) -> str:
         count=1,
         flags=re.IGNORECASE,
     )
-    # Strip bare CUID/ID token the LLM sometimes emits without the label.
-    # Shape: 8-32 lowercase alphanumeric chars at the very start, followed
-    # by whitespace, so it won't eat real opening words like "certainly".
+    # Strip bare DB ids the LLM sometimes emits without the label. Require a
+    # short alphanumeric token with both a letter and a digit so ordinary
+    # opening words like "certainly" are not removed.
     text = re.sub(
-        r"^\s*[a-z0-9]{8,32}(?=\s)",
+        r"^\s*(?=[a-z0-9]{5,32}\s)(?=[a-z0-9]*\d)(?=[a-z0-9]*[a-z])[a-z0-9]+\s+",
         "",
         text,
         count=1,
+        flags=re.IGNORECASE,
     )
     text = re.sub(r"^\s*(?:0|1(?:\.0)?|0\.\d+)\s*(?:\r?\n)+", "", text)
     text = re.sub(
@@ -152,16 +154,26 @@ def _clean_final_response(response: str, recent_history: list | None = None) -> 
 
 
 def _response_includes_technique(response: str, technique: dict | None) -> bool:
+    """GAP 4 fix: require BOTH a name/id match AND at least one structural exercise
+    marker to avoid false positives from incidental keyword matches (e.g. a
+    response mentioning 'breathing' in an empathetic sentence triggering a
+    phantom TechniqueOutcome when no exercise was actually delivered)."""
     if not response or not isinstance(technique, dict):
         return False
     name = str(technique.get("name") or "").strip().lower()
     lowered = response.lower()
-    if name and name in lowered:
-        return True
-    return bool(
-        technique.get("id")
-        and any(marker in lowered for marker in ("try this", "step 1", "start by", "breathe", "write down", "exercise"))
+    # Structural markers that appear only when a formatted exercise card is delivered
+    _STRUCTURAL_MARKERS = (
+        "**steps:**", "### exercise:", "* **category:**", "* **duration:**",
+        "* **difficulty:**", "**why it helps", "step 1.", "step 1:",
     )
+    has_structural = any(marker in lowered for marker in _STRUCTURAL_MARKERS)
+    if name and name in lowered and has_structural:
+        return True
+    # Fallback: technique id is set and a structural marker confirms delivery
+    if technique.get("id") and has_structural:
+        return True
+    return False
 
 
 def _extract_selected_technique_id(response: str) -> str:
@@ -211,11 +223,30 @@ def _format_technique_candidates(candidates: list[dict]) -> str:
             ]
         ) or "none"
         reasons = "; ".join((item.get("score_reasons") or [])[:3]) or "semantic shortlist"
+
+        # Get steps (each step as a numbered item)
+        steps = item.get("steps") or []
+        steps_formatted = ""
+        if steps:
+            if isinstance(steps, list):
+                steps_formatted = " | Steps: " + " → ".join(steps[:5])  # First 5 steps
+            elif isinstance(steps, str):
+                steps_formatted = f" | Steps: {steps[:200]}"
+
+        # Get other helpful context
+        duration = item.get("duration_minutes") or item.get("durationMinutes") or "N/A"
+        difficulty = item.get("difficulty") or "N/A"
+        why_it_works = item.get("why_it_works") or item.get("whyItWorks") or ""
+        why_works_short = why_it_works[:100] if why_it_works else ""
+        description = item.get("description", "")[:150] if item.get("description") else ""
+
         lines.append(
             f"{index}. id={item.get('id')} | name={item.get('name')} | "
             f"category={item.get('category', 'Unknown')} | brief={item.get('brief', '')} | "
+            f"duration={duration}m | difficulty={difficulty} | "
             f"targets={targets} | symptoms={symptoms} | behaviors={behaviors} | "
-            f"avoid={avoids} | reasons={reasons}"
+            f"avoid={avoids}{steps_formatted}"
+            f"{(' | Why: ' + why_works_short) if why_works_short else ''} | reasons={reasons}"
         )
     return "\n".join(lines)
 
@@ -236,13 +267,13 @@ async def _invoke_response_llm(
 ):
     """Final-response LLM call with Gemini key rotation and E2E streaming support."""
     manager = get_llm_manager()
-    
+
     # Detect streaming request
     streaming = config and "tags" in config and "final_response_llm" in config["tags"]
-    
+
     if streaming:
         if hasattr(manager, "astream_gemini_with_rotation"):
-            print("[RESPONSE-GENERATOR] 🌀 True stream response active (Gemini key rotation)")
+            print("[RESPONSE-GENERATOR] True stream response active (Gemini key rotation)")
             chunks = []
             async for chunk in manager.astream_gemini_with_rotation(
                 messages,
@@ -350,13 +381,13 @@ class OptimizedResponse(BaseModel):
 async def generate_response(state: MentalHealthState) -> dict:
     """
     OPTIMIZED RESPONSE GENERATOR - Single LLM call only.
-    
+
     Process:
     1. Build ultra-concise system prompt (<150 tokens)
     2. Structure input data: emotion, intensity, technique, role
     3. Single LLM call with structured context
     4. Parse response
-    
+
     Input State:
         - emotion: From mood analyzer
         - intensity: From mood analyzer
@@ -364,17 +395,17 @@ async def generate_response(state: MentalHealthState) -> dict:
         - agent_role: From role selector (or from crisis detection)
         - messages: Current user message
         - chat_history: For context
-    
+
     Output State:
         - final_response: Complete response to send to user
     """
-    
+
     try:
         # Guard: Don't overwrite crisis response
         if state.get("crisis_detected") and state.get("final_response"):
-            print("[RESPONSE]  Crisis response already set")
+            print("[RESPONSE] Crisis response already set")
             return {"final_response": state.get("final_response")}
-        
+
         # Extract structured data
         emotion = state.get("fused_emotion", state.get("emotion", "neutral"))
         intensity = state.get("fused_intensity", state.get("intensity", 0.5))
@@ -390,7 +421,7 @@ async def generate_response(state: MentalHealthState) -> dict:
         messages = state.get("messages", [])
         is_new_user = state.get("is_new_user", False)
         crisis_detected = state.get("crisis_detected", False)
-        
+
         # NEW v3: distortion and behavioral activation context
         conversation_strategy = state.get("conversation_strategy", "validate_only")
         emotional_trend = state.get("emotional_trend", "stable")
@@ -415,14 +446,19 @@ async def generate_response(state: MentalHealthState) -> dict:
         preferred_techniques = state.get("preferred_techniques", []) or []
         if not needs_technique and current_intent != "accept_technique":
             recommended_technique = {}
+        
+        # Define and filter technique_candidates for streaming node too
+        technique_candidates = _valid_technique_candidates(state.get("technique_candidates") or [])
+        if response_task not in {"offer_one_technique", "ask_permission_before_technique", "start_grounding_now"}:
             technique_candidates = []
-        if response_task not in {"offer_one_technique", "ask_permission_before_technique"}:
+            technique_candidates = []
+        if response_task not in {"offer_one_technique", "ask_permission_before_technique", "start_grounding_now"}:
             technique_candidates = []
 
         # NEW: voice acoustic context
         voice_features  = state.get("voice_features") or {}
         voice_processed = state.get("voice_processed", False)
-        
+
         user_message = messages[-1].content if messages else ""
         # Within-session: full rolling message window from LangGraph state
         # (graph.py caps this at _MAX_MESSAGE_HISTORY, so this stays bounded).
@@ -453,7 +489,7 @@ async def generate_response(state: MentalHealthState) -> dict:
                 "latest_rejected_technique": latest_rejected_technique,
             }
 
-        #  Technique rejection detection 
+        # Technique rejection detection
         # Scan recent history for: (1) an AI message that contained a technique
         # suggestion, followed by (2) a user message expressing that it didn't work.
         _REJECTION_SIGNALS = {
@@ -472,7 +508,7 @@ async def generate_response(state: MentalHealthState) -> dict:
                     prev_ai_content = _safe_content(prev_ai_msgs[-1]).lower()
                     if any(kw in prev_ai_content for kw in ["technique", "exercise", "breathing", "mindfulness", "meditation"]):
                         user_rejected_technique = True
-                        print(f"[NODE:RESPONSE]  TECHNIQUE REJECTION DETECTED  user signalled previous technique didn't help")
+                        print(f"[NODE:RESPONSE] TECHNIQUE REJECTION DETECTED - user signalled previous technique didn't help")
 
         # Technique acceptance is decided upstream by the LLM smart gate/planner.
         # Do not reinterpret "yes/ok/sure" here with keyword rules.
@@ -480,20 +516,20 @@ async def generate_response(state: MentalHealthState) -> dict:
         accepted_source = recommended_technique or latest_recommended_technique or state.get("active_technique") or {}
         accepted_technique_name = accepted_source.get("name") if isinstance(accepted_source, dict) else None
         if user_accepted_technique and accepted_technique_name:
-            print(f"[NODE:RESPONSE]  Technique acceptance from planner: {accepted_technique_name}")
+            print(f"[NODE:RESPONSE] Technique acceptance from planner: {accepted_technique_name}")
 
-        print(f"[NODE:RESPONSE]  Generating | Role: {agent_role} | Emotion: {emotion} ({intensity:.0%}) | Strategy: {conversation_strategy}")
+        print(f"[NODE:RESPONSE] Generating | Role: {agent_role} | Emotion: {emotion} ({intensity:.0%}) | Strategy: {conversation_strategy}")
         if user_rejected_technique:
-            print(f"[NODE:RESPONSE]  Will adapt response to acknowledge technique rejection")
+            print(f"[NODE:RESPONSE] Will adapt response to acknowledge technique rejection")
         if distortion_type:
-            print(f"[NODE:RESPONSE]  CBT Distortion: {distortion_type}")
+            print(f"[NODE:RESPONSE] CBT Distortion: {distortion_type}")
         if memory_context:
-            print(f"[NODE:RESPONSE]  Memory context available ({len(memory_context)} chars)  injecting into prompt")
+            print(f"[NODE:RESPONSE] Memory context available ({len(memory_context)} chars) - injecting into prompt")
 
         # ============================================
         # BUILD ULTRA-CONCISE SYSTEM PROMPT (<150 tokens)
         # ============================================
-        
+
         # ============================================
         # FAST PATH: no_action (casual chitchat)
         # Avoid injecting all the emotion analysis noise into a grocery-list conversation
@@ -505,12 +541,12 @@ async def generate_response(state: MentalHealthState) -> dict:
                 memory_info = f"\nPAST SESSION MEMORIES: {memory_context[:600]}\nIMPORTANT MEMORY RULE: You DO have memory. If asked, refer to these memories. Do not invent past conversations."
             else:
                 memory_info = "\nIMPORTANT MEMORY RULE: You DO have memory capabilities, but since this is a new session/account, there are no past memories yet. If asked, state honestly that we haven't talked much yet."
-                
+
             simple_prompt = f"""You are SentiMind, a friendly companion. This is casual conversation unless the recent session thread shows the user is continuing a distress concern.
 Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emotion analysis, NO technique suggestions. If the current message is a short reply to an earlier distress thread, connect it back with empathy and ask one gentle follow-up.{memory_info}
 
- EMERGENCY SAFETY CLAUSE: If the user expresses ANY sudden sadness, fear, self-harm, or distress in this specific message, drop the casual tone immediately. Acknowledge their pain and offer gentle support instead of casual chitchat."""
-            
+EMERGENCY SAFETY CLAUSE: If the user expresses ANY sudden sadness, fear, self-harm, or distress in this specific message, drop the casual tone immediately. Acknowledge their pain and offer gentle support instead of casual chitchat."""
+
             simple_msg = user_message
 
             # Build messages with within-session history so it can resolve references
@@ -528,8 +564,8 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
                             fast_messages.append(HumanMessage(content=content))
                         else:
                             fast_messages.append(AIMessage(content=content))
-                print(f"[NODE:RESPONSE]  Injected {len(recent_history)} recent turns into fast path")
-            
+                print(f"[NODE:RESPONSE] Injected {len(recent_history)} recent turns into fast path")
+
             fast_messages.append(HumanMessage(content=simple_msg))
             # Tag the call so we can filter its stream events later
             casual_response = await _invoke_response_llm(
@@ -538,10 +574,10 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
                 temperature=0.5,
                 config={"tags": ["final_response_llm"]},
             )
-            
+
             final_response = _safe_content(casual_response)
             final_response = _clean_final_response(final_response, recent_history)
-            print(f"[NODE:RESPONSE]  Casual response generated (no_action fast path)")
+            print(f"[NODE:RESPONSE] Casual response generated (no_action fast path)")
             return {"final_response": final_response}
 
         # ============================================
@@ -572,15 +608,21 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
             mismatch=bool(state.get("mismatch", False)),
             possible_masking=bool(state.get("possible_masking", False)),
             fusion_confidence=state.get("fusion_confidence"),
+            # v13.0: new planning/routing signals
+            immediate_regulation_request=bool(state.get("immediate_regulation_request", False)),
+            latest_user_need=state.get("latest_user_need"),
+            question_budget=int(state.get("question_budget", 1)),
+            context_missing_reason=state.get("context_missing_reason"),
+            has_medical_signal=has_medical_warning_signal(user_message) or bool(state.get("has_persistent_medical_signal")),
         )
 
-        #  Rejection override: inject strong instruction into system prompt 
+        # Rejection override: inject strong instruction into system prompt
         if user_rejected_technique:
             rejection_instruction = (
-                "\n\n CRITICAL CONTEXT  TECHNIQUE WAS REJECTED:\n"
+                "\n\n=== CRITICAL CONTEXT - TECHNIQUE WAS REJECTED ===\n"
                 "The user has told you that the PREVIOUS technique or exercise you suggested did NOT help them.\n"
                 "You MUST:\n"
-                "  1. Acknowledge their frustration warmly (1 sentence)  e.g. 'I hear you, that one didn't resonate.'\n"
+                "  1. Acknowledge their frustration warmly (1 sentence) - e.g. 'I hear you, that one didn't resonate.'\n"
                 "  2. Do NOT apologize excessively or repeat the same technique.\n"
                 "  3. Do NOT suggest a replacement technique yet. Ask what felt unhelpful so you can understand.\n"
                 "  4. Keep the response concise and compassionate.\n"
@@ -588,39 +630,92 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
             )
             system_prompt += rejection_instruction
 
-        #  Acceptance override: deliver the previously-offered technique 
-        if user_accepted_technique:
-            _tech_label = f'"{accepted_technique_name}"' if accepted_technique_name else "the technique you just offered"
-            acceptance_instruction = (
-                f"\n\n CRITICAL CONTEXT  USER ACCEPTED THE OFFERED TECHNIQUE:\n"
-                f"The planner/gate has resolved the latest user message as agreement to try {_tech_label}. "
-                f"Latest user message: \"{user_message}\".\n"
-                f"You MUST:\n"
-                f"  1. Respond warmly to their acceptance (1 sentence)  e.g. 'Great, let's do this together!'\n"
-                f"  2. Name {_tech_label} and tell them the steps are ready in the exercise panel/sidebar.\n"
-                f"  3. Do NOT suggest a completely different technique.\n"
-                f"  4. Do NOT repeat the offer  they already accepted it.\n"
-                f"  5. Ignore the freshly-detected emotion below if it contradicts this context  \n"
-                f"     the user's intent is clear from upstream contextual routing. Follow through.\n"
-                f"  6. Do NOT list, paraphrase, or invent technique steps. Steps come from the database/sidebar.\n"
-                f"NEVER start a fresh technique suggestion when the user has already agreed to one."
-            )
-            system_prompt += acceptance_instruction
-            print(f"[NODE:RESPONSE]  Acceptance override injected into system prompt")
+        # Acceptance or Immediate Regulation override: deliver the technique inline
+        is_immediate = bool(state.get("immediate_regulation_request", False)) or response_task == "start_grounding_now"
+        if user_accepted_technique or (is_immediate and recommended_technique):
+            _tech_label = f'"{accepted_technique_name}"' if accepted_technique_name else f'"{recommended_technique.get("name")}"'
+
+            _accepted_steps = []
+            if user_accepted_technique and isinstance(accepted_source, dict):
+                _accepted_steps = accepted_source.get("steps") or []
+            elif is_immediate and isinstance(recommended_technique, dict):
+                _accepted_steps = recommended_technique.get("steps") or []
+
+            if _accepted_steps and isinstance(_accepted_steps, list) and _accepted_steps:
+                _steps_block = "\n".join(
+                    f"     {i}. {str(step).strip()}"
+                    for i, step in enumerate(_accepted_steps, 1)
+                )
+            elif _accepted_steps and isinstance(_accepted_steps, str) and _accepted_steps.strip():
+                _steps_block = f"     1. {_accepted_steps.strip()}"
+            else:
+                _steps_block = (
+                    "     (No stored steps were provided for this technique. "
+                    "Write 4-6 concrete, personalised steps yourself, grounded in "
+                    "the user's exact situation.)"
+                )
+
+            if is_immediate:
+                delivery_instruction = (
+                    f"\n\n=== CRITICAL CONTEXT - IMMEDIATE REGULATION REQUEST ===\n"
+                    f"The user has requested immediate help to calm down. "
+                    f"You MUST:\n"
+                    f"  1. Start with 1-2 validating, warm sentences (e.g. 'I hear you, let's take a slow breath together.').\n"
+                    f"  2. Present the breathing/grounding exercise {_tech_label} inline immediately. Do not ask for permission, and do not ask any questions at the end of the response.\n"
+                    f"     Since the database steps provided below are general, you MUST translate and convert each step to target the user's current specific physiological distress (e.g. rapid breathing, shaking, racing heart).\n"
+                    f"     Use this exact style:\n"
+                    f"     ### Exercise: <Technique Name>\n"
+                    f"     * **Category:** <Category>\n"
+                    f"     * **Duration:** <Duration> min\n"
+                    f"     * **Difficulty:** <Difficulty>\n"
+                    f"     * **Why it helps you right now:** <Write a custom, highly personalised explanation of why this works for what they just shared>\n"
+                    f"     \n"
+                    f"     **Steps:**\n"
+                    f"     (Use these general base steps but translate/rewrite them to be problem-specific to the user's situation):\n"
+                    f"{_steps_block}\n"
+                    f"  3. Do NOT ask any follow-up questions at all (question budget is 0)."
+                )
+            else:
+                delivery_instruction = (
+                    f"\n\n=== CRITICAL CONTEXT - USER ACCEPTED THE OFFERED TECHNIQUE ===\n"
+                    f"The planner/gate has resolved the latest user message as agreement to try {_tech_label}. "
+                    f"Latest user message: \"{user_message}\".\n"
+                    f"You MUST:\n"
+                    f"  1. Respond warmly to their acceptance (1 sentence) - e.g. 'Great, let's do this together!'\n"
+                    f"  2. Name {_tech_label} and present it directly in this message in the exact style as the technique panel.\n"
+                    f"     Since the database steps provided below are general, you MUST translate and convert each step to target the user's specific problem, distress, or context (e.g., if they are stressed about exams, conflict, loneliness, etc., frame the breathing, focus, or journaling actions directly around that specific situation).\n"
+                    f"     Use this exact style:\n"
+                    f"     ### Exercise: <Technique Name>\n"
+                    f"     * **Category:** <Category>\n"
+                    f"     * **Duration:** <Duration> min\n"
+                    f"     * **Difficulty:** <Difficulty>\n"
+                    f"     * **Why it helps you right now:** <Write a custom, highly personalised explanation of why this works for what they just shared: \"{user_message[:120]}\">\n"
+                    f"     \n"
+                    f"     **Steps:**\n"
+                    f"     (Use these general base steps but translate/rewrite them to be problem-specific to the user's situation):\n"
+                    f"{_steps_block}\n"
+                    f"  3. Do NOT suggest a completely different technique.\n"
+                    f"  4. Do NOT repeat the offer - they already accepted it.\n"
+                    f"  5. Ignore the freshly-detected emotion below if it contradicts this context - \n"
+                    f"     the user's intent is clear from upstream contextual routing. Follow through.\n"
+                    f"NEVER start a fresh technique suggestion when the user has already agreed to one."
+                )
+            system_prompt += delivery_instruction
+            print(f"[NODE:RESPONSE] Delivery/Acceptance override injected into system prompt")
 
             # Force UI to display the accepted technique instead of whatever new one was just picked
             if accepted_technique_name:
-                print(f"[NODE:RESPONSE]  Fetching accepted technique: {accepted_technique_name}")
+                print(f"[NODE:RESPONSE] Fetching accepted technique: {accepted_technique_name}")
                 try:
                     from ..tools.technique_tools import get_technique_by_name
                     accepted_tech = await get_technique_by_name(accepted_technique_name)
                     if accepted_tech:
                         recommended_technique = accepted_tech
-                        print(f"[NODE:RESPONSE]  State override: UI will now display '{accepted_tech['name']}'")
+                        print(f"[NODE:RESPONSE] State override: UI will now display '{accepted_tech['name']}'")
                 except Exception as e:
-                    print(f"[NODE:RESPONSE]  Failed to fetch accepted technique: {e}")
+                    print(f"[NODE:RESPONSE] Failed to fetch accepted technique: {e}")
 
-        #  Safety net: force-fetch a new technique if rejection was detected but
+        # Safety net: force-fetch a new technique if rejection was detected but
         # the planner/selector didn't pick one (e.g., intent was misclassified as venting)
         consent_allows_force_fetch = (
             state.get("exercise_consent", "unknown") not in {"denied_soft", "denied_hard"}
@@ -628,7 +723,7 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
             and response_task != "ask_permission_before_technique"
         )
         if user_rejected_technique and needs_technique and not recommended_technique and consent_allows_force_fetch:
-            print(f"[NODE:RESPONSE]  Rejection detected but no technique selected  force-fetching alternative")
+            print(f"[NODE:RESPONSE] Rejection detected but no technique selected - force-fetching alternative")
             try:
                 from ..tools.technique_tools import recommend_technique as _rt
                 alt_top3 = await _rt.ainvoke({
@@ -643,9 +738,9 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
                 })
                 if alt_top3:
                     recommended_technique = alt_top3[0]
-                    print(f"[NODE:RESPONSE]  Force-fetched alternative: {recommended_technique.get('name')}")
+                    print(f"[NODE:RESPONSE] Force-fetched alternative: {recommended_technique.get('name')}")
             except Exception as fe:
-                print(f"[NODE:RESPONSE]  Force-fetch failed: {fe}")
+                print(f"[NODE:RESPONSE] Force-fetch failed: {fe}")
 
 
         # ============================================
@@ -706,6 +801,12 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
             mismatch=bool(state.get("mismatch", False)),
             possible_masking=bool(state.get("possible_masking", False)),
             fusion_confidence=state.get("fusion_confidence"),
+            # v13.0: new planning/routing signals
+            immediate_regulation_request=bool(state.get("immediate_regulation_request", False)),
+            latest_user_need=state.get("latest_user_need"),
+            question_budget=int(state.get("question_budget", 1)),
+            context_missing_reason=state.get("context_missing_reason"),
+            has_medical_signal=has_medical_warning_signal(user_message) or bool(state.get("has_persistent_medical_signal")),
         )
 
         # ============================================
@@ -717,7 +818,7 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
         if continuity_context:
             llm_messages.append(SystemMessage(content=continuity_context))
 
-        # Layer 1: Within-session recall  last 6 turns from LangGraph state (no DB, no token bloat)
+        # Layer 1: Within-session recall - last N turns from LangGraph state (no DB, no token bloat)
         if recent_history:
             for turn in recent_history:
                 role = getattr(turn, 'type', 'human')
@@ -727,7 +828,7 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
                         llm_messages.append(HumanMessage(content=content))
                     else:
                         llm_messages.append(AIMessage(content=content))
-            print(f"[NODE:RESPONSE]  Injected {len(recent_history)} recent turns (within-session memory)")
+            print(f"[NODE:RESPONSE] Injected {len(recent_history)} recent turns (within-session memory)")
 
         # Layer 2: Structured analysis of current message (always last)
         llm_messages.append(HumanMessage(content=context_text))
@@ -739,13 +840,13 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
             context_text=context_text,
             llm_messages=llm_messages,
         )
-        
+
         start_time = time.time()
-        
+
         # ============================================
         # SINGLE LLM CALL
         # ============================================
-        
+
         # Tag the core therapeutic LLM call for event streaming filtering
         response = await _invoke_response_llm(
             llm_messages,
@@ -753,7 +854,7 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
             temperature=0.7,
             config={"tags": ["final_response_llm"]},
         )
-        
+
         elapsed_ms = int((time.time() - start_time) * 1000)
         raw_response = _safe_content(response)
         selected_technique_id = _extract_selected_technique_id(raw_response)
@@ -782,7 +883,7 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
             if selected_technique:
                 print(f"\u2502  \u2714 LLM PICKED : {selected_technique.get('name')} (id={selected_technique_id})")
             elif selected_technique_id:
-                print(f"\u2502  \u26a0 Invalid id : '{selected_technique_id}' not in shortlist \u2014 using pre-selected")
+                print(f"\u2502  \u26a0 Invalid id : '{selected_technique_id}' not in shortlist - using pre-selected")
             else:
                 print(f"\u2502  \u2139 No LLM pick: using pre-selected technique from selector node")
             print(f"\u2514{_bar}\u2518")
@@ -837,9 +938,10 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
 
         return result
 
-        
+
     except Exception as e:
-        print(f"[NODE:RESPONSE]  Error generating response: {str(e)[:100]}")
+        _context_logger.exception("Response generation failed; using contextual fallback")
+        print(f"[NODE:RESPONSE] Error generating response: {type(e).__name__}: {str(e)[:180]}")
         fallback = _build_contextual_fallback_response(state)
         return {"final_response": fallback}
 
@@ -863,7 +965,30 @@ def _build_contextual_fallback_response(state: MentalHealthState) -> str:
         return (
             f"From what you've shared, this seems less like a small mood shift and more like something that has been weighing on you"
             f"{f' for {duration}' if duration else ''}. "
-            "It makes sense that it would feel heavy. What feels like the biggest part of it right now?"
+            "It makes sense that it would feel heavy. A useful next step is to work with the specific loop you described "
+            "instead of trying to solve your whole life at once."
+        )
+
+    if response_task == "ask_next_context_question" and state.get("intent") == "technique_request":
+        return (
+            "I can help with an exercise. To match it properly, tell me one thing first: "
+            "is this mainly for sleep, panic, overthinking, loneliness, or something else?"
+        )
+
+    if response_task in {"offer_one_technique", "continue_active_technique"} or (
+        state.get("intent") == "technique_request" and state.get("needs_technique")
+    ):
+        technique = state.get("recommended_technique") or state.get("pending_recommended_technique") or {}
+        name = technique.get("name") if isinstance(technique, dict) else ""
+        if name:
+            return (
+                f"You're right, you have given enough context. Let's move into something practical: {name}. "
+                "It fits this moment because you are dealing with a repeated loop that needs a small interruption. "
+                "Start with the first step shown for that exercise and keep it gentle."
+            )
+        return (
+            "You're right, you have given enough context. Let's move into one practical exercise for this pattern now, "
+            "starting small and keeping it focused on the overthinking loop."
         )
 
     if response_task == "summarize_known_context" or "context_complete" in (state.get("gate_context_flags") or []):
@@ -890,13 +1015,13 @@ def _build_contextual_fallback_response(state: MentalHealthState) -> str:
 
     if primary and primary != user_message:
         return (
-            f"I hear you. It sounds like the main thread is {primary}. "
-            "What part of that feels hardest to carry today?"
+            f"I hear you. The main thread I have is {primary}. "
+            "Let's use that as our anchor and take the next step from there."
         )
 
     return (
         "I hear you. That sounds like a lot to sit with. "
-        "What has been the hardest part of it today?"
+        "We can slow it down and focus on the next manageable step."
     )
 
 
@@ -1008,14 +1133,20 @@ def _build_optimized_system_prompt(
     mismatch: bool = False,
     possible_masking: bool = False,
     fusion_confidence: float | None = None,
+    # v13.0: new planning/routing signals
+    immediate_regulation_request: bool = False,
+    latest_user_need: str | None = None,
+    question_budget: int = 1,
+    context_missing_reason: str | None = None,
+    has_medical_signal: bool = False,
 ) -> str:
     """
-    Build the SentiMind system prompt  comprehensive, scenario-aware, edge-case hardened.
+    Build the SentiMind system prompt - comprehensive, scenario-aware, edge-case hardened.
     Handles: technique rejection, refusal of exercises, venting only, good news,
     anger at bot, short messages, clinical signals, and cross-session memory.
     """
 
-    #  CRISIS OVERRIDE 
+    # CRISIS OVERRIDE
     if crisis_detected:
         return """You are SentiMind, a mental health companion in CRISIS MODE.
 
@@ -1040,23 +1171,23 @@ Response shape:
 Tone: Deeply human, calm, protective, and present. The goal is not therapy; the goal is helping them not act on the urge right now."""
 
     # ============================================
-    # v11.0: CONSENT OVERRIDE — Listen-only mode
-    # If exercise_consent == "denied", inject a hard rule that blocks ALL
-    # technique language regardless of strategy or response_task.
+    # v11.0: CONSENT OVERRIDE - Listen-only mode
+    # If exercise_consent is denied_soft or denied_hard, inject a hard rule
+    # that blocks ALL technique language regardless of strategy or response_task.
     # ============================================
     consent_override_block = ""
     # v11.0: Differentiate between listen_only mode and advice_allowed mode.
     # Case 1: The user wants to talk and just be heard (venting only). No exercises and no advice.
     if solution_preference == "listen_only":
         _lines = [
-            "╔══════════════════════════════════════════════════╗",
-            "║  CONSENT OVERRIDE — LISTEN-ONLY MODE ACTIVE     ║",
-            "╚══════════════════════════════════════════════════╝",
+            "================================================",
+            "  CONSENT OVERRIDE - LISTEN-ONLY MODE ACTIVE",
+            "================================================",
             "The user has explicitly said they just want to vent and be heard. They do NOT want exercises or advice.",
-            "STRICT PROHIBITIONS — any violation is a critical failure:",
-            "  • NEVER suggest, name, hint at, or prepare ANY technique or coping exercise.",
-            "  • NEVER offer suggestions, advice, or problem-solving solutions.",
-            "  • NEVER say 'Would you like to try…', 'We could practice…', or similar.",
+            "STRICT PROHIBITIONS - any violation is a critical failure:",
+            "  - NEVER suggest, name, hint at, or prepare ANY technique or coping exercise.",
+            "  - NEVER offer suggestions, advice, or problem-solving solutions.",
+            "  - NEVER say 'Would you like to try...', 'We could practice...', or similar.",
             "Your ONLY job is to LISTEN, VALIDATE, and REFLECT with warm, compassionate friendship.",
         ]
         consent_override_block = "\n\n" + "\n".join(_lines)
@@ -1064,17 +1195,17 @@ Tone: Deeply human, calm, protective, and present. The goal is not therapy; the 
     # Case 2: The user is open to dialogue-based advice/suggestions but has blocked formal/physical exercises.
     elif exercise_consent in ("denied_soft", "denied_hard") or solution_preference == "advice_allowed":
         _lines = [
-            "╔══════════════════════════════════════════════════╗",
-            "║  CONSENT OVERRIDE — CBT EXERCISES BLOCKED        ║",
-            "╚══════════════════════════════════════════════════╝",
+            "================================================",
+            "  CONSENT OVERRIDE - CBT EXERCISES BLOCKED",
+            "================================================",
             "The user wants warm suggestions and advice, but does NOT want homework, breathing exercises, or formal CBT techniques.",
-            "STRICT PROHIBITIONS — any violation is a critical failure:",
-            "  • NEVER suggest, name, hint at, or prepare ANY formal coping exercise or technique.",
-            "  • NEVER list therapy exercises (e.g. journaling, breathing exercises, progressive relaxation).",
-            "  • NEVER end a reply with an offer to try a practice or exercise.",
+            "STRICT PROHIBITIONS - any violation is a critical failure:",
+            "  - NEVER suggest, name, hint at, or prepare ANY formal coping exercise or technique.",
+            "  - NEVER list therapy exercises (e.g. journaling, breathing exercises, progressive relaxation).",
+            "  - NEVER end a reply with an offer to try a practice or exercise.",
             "PERMITTED SOLUTIONS:",
-            "  • Provide warm, conversational CBT suggestions, alternate perspectives, and gentle reframings directly in dialogue.",
-            "  • Act as a wise, supportive, compassionate friend who helps them think through things verbally.",
+            "  - Provide warm, conversational CBT suggestions, alternate perspectives, and gentle reframings directly in dialogue.",
+            "  - Act as a wise, supportive, compassionate friend who helps them think through things verbally.",
         ]
         consent_override_block = "\n\n" + "\n".join(_lines)
 
@@ -1089,7 +1220,7 @@ Tone: Deeply human, calm, protective, and present. The goal is not therapy; the 
     ]
     if _suppressed_labels:
         _suppression_lines = [
-            "STALE TOPIC SUPPRESSION — MANDATORY:",
+            "STALE TOPIC SUPPRESSION - MANDATORY:",
             "The user has explicitly corrected you. The following topics are NOT the reason",
             "for their current distress and MUST NEVER be referenced, implied, or used to",
             "select a technique:",
@@ -1119,16 +1250,16 @@ Tone: Deeply human, calm, protective, and present. The goal is not therapy; the 
             "- Validate what they stated first, then make room for hidden strain without over-interpreting."
         )
 
-    #  ROLE INSTRUCTIONS 
+    # ROLE INSTRUCTIONS
     role_instructions = {
         "friend":        "You are a warm, non-clinical friend. ONLY listen and validate. Never push exercises unless explicitly asked.",
         "coach":         "You are a supportive coach. Validate first, then guide gently. Introduce a technique only if the strategy says so.",
-        "trainer":       "You are a confident trainer. Validate strongly, then present the technique with energy. Do not generate steps; the database/sidebar provides them.",
+        "trainer":       "You are a confident trainer. Validate strongly, then present the technique with energy. Walk the user through the steps directly in the response, personalising each step to their situation.",
         "crisis_support":"You are in crisis support mode. Keep the user alive and connected right now. Be direct, warm, and protective. Ask for immediate safety and real-world support. No normal wellness techniques.",
     }
     role_desc = role_instructions.get(agent_role, role_instructions["coach"])
 
-    #  TECHNIQUE DESCRIPTION 
+    # TECHNIQUE DESCRIPTION
     technique_desc = ""
     candidate_selection_allowed = (
         bool(technique_candidates)
@@ -1144,55 +1275,66 @@ Tone: Deeply human, calm, protective, and present. The goal is not therapy; the 
             "- Your first line MUST be exactly: SELECTED_TECHNIQUE_ID: <candidate_id>\n"
             "- After that first line, write only the user-facing response.\n"
             "- If response_task is ask_permission_before_technique, still choose an id, but do not name or describe the technique to the user.\n"
-            "- If response_task is offer_one_technique, name only the chosen technique and do not mention unselected candidates.\n"
+            "- If response_task is offer_one_technique, name only the chosen technique, do not mention unselected candidates, and walk the user through its steps directly in the response personalised to their situation.\n"
             "- Never choose an exercise whose avoid tags conflict with the user's current state."
         )
     elif needs_technique and technique and technique.get("name"):
+        _t_steps = technique.get("steps") or []
+        _t_steps_text = ""
+        if _t_steps and isinstance(_t_steps, list):
+            _t_steps_text = "\n- Steps (personalise each to user context):\n" + "\n".join(
+                f"  {i}. {s}" for i, s in enumerate(_t_steps, 1)
+            )
+        _score_reasons = (
+            f"\n- Reasons it fits this moment: {'; '.join(technique.get('score_reasons', []))}"
+            if technique.get("score_reasons") else ""
+        )
         technique_desc = (
             f"\n\nTECHNIQUE TO INTRODUCE:\n"
             f"- Name: {technique.get('name')}\n"
             f"- Duration: {technique.get('duration_minutes', 'N/A')} min\n"
             f"- Category: {technique.get('category', 'N/A')}\n"
             f"- Why it works: {technique.get('why_it_works', '')}"
-            f"\n- Reasons it fits this moment: {'; '.join(technique.get('score_reasons', []))}" if technique.get("score_reasons") else ""
+            f"{_score_reasons}"
+            f"{_t_steps_text}"
         )
 
-    #  STRATEGY INSTRUCTIONS 
+    # STRATEGY INSTRUCTIONS
     strategy_instructions = {
         "no_action": (
-            "STRATEGY  CASUAL CONVERSATION:\n"
+            "STRATEGY - CASUAL CONVERSATION:\n"
             "This message is casual or off-topic. Respond like a warm, friendly companion.\n"
             "Do NOT analyze emotions, validate feelings therapeutically, or suggest any technique.\n"
             "Keep it short (1-2 sentences), natural, and friendly."
         ),
         "validate_only": (
-            "STRATEGY  PURE VALIDATION:\n"
-            "The user needs to feel heard  not fixed. Only listen and validate.\n"
-            "Do NOT suggest any technique, exercise, or coping mechanism  even if one is listed below.\n"
+            "STRATEGY - PURE VALIDATION:\n"
+            "The user needs to feel heard - not fixed. Only listen and validate.\n"
+            "Do NOT suggest any technique, exercise, or coping mechanism - even if one is listed below.\n"
             "Reflect their emotion back to them with warmth and empathy."
         ),
         "ask_question": (
-            "STRATEGY  UNDERSTAND FIRST:\n"
+            "STRATEGY - UNDERSTAND FIRST:\n"
             "Validate their feelings briefly, then ask ONE thoughtful, open-ended question.\n"
             "The question should build on known details from the recent thread before any action.\n"
             "Do NOT ask broad restart questions like 'what's been going on?' if the recent thread already contains details.\n"
             "Do NOT suggest, name, hint at, or prepare a technique yet. Do NOT ask more than 1 question."
         ),
         "encourage_reflection": (
-            "STRATEGY  ENCOURAGE REFLECTION:\n"
+            "STRATEGY - ENCOURAGE REFLECTION:\n"
             "The user is reflecting on their feelings or reporting on a technique they tried.\n"
             "Celebrate or validate their self-awareness.\n"
             "Ask a gentle question about their experience (e.g., 'What did you notice in your body?').\n"
-            "Do NOT introduce a new technique  they are already in a reflective process."
+            "Do NOT introduce a new technique - they are already in a reflective process."
         ),
         "reframe": (
-            "STRATEGY  GENTLE REFRAME:\n"
+            "STRATEGY - GENTLE REFRAME:\n"
             "Validate first, then gently offer a new perspective without being preachy.\n"
-            "Don't label their thinking as a 'distortion'  just model the alternative thinking naturally.\n"
+            "Don't label their thinking as a 'distortion' - just model the alternative thinking naturally.\n"
             "End with an open question or a supportive next step."
         ),
         "suggest_technique": (
-            "STRATEGY  SUGGEST TECHNIQUE:\n"
+            "STRATEGY - SUGGEST TECHNIQUE:\n"
             "Validate the user's feelings first (1-2 sentences).\n"
             "Only introduce the technique listed below if response_task is offer_one_technique, continue_active_technique, or crisis_support AND needs_technique=true.\n"
             "If the thread is still in early exploration, the user is answering a follow-up, or needs_technique=false, postpone the technique and ask ONE focused follow-up instead.\n"
@@ -1201,21 +1343,27 @@ Tone: Deeply human, calm, protective, and present. The goal is not therapy; the 
             "After introducing it, invite them: 'Would you like to give it a try?'"
         ),
         "distract": (
-            "STRATEGY  POSITIVE REDIRECTION:\n"
+            "STRATEGY - POSITIVE REDIRECTION:\n"
             "Acknowledge briefly, then gently redirect to something lighter or positive.\n"
             "Keep it warm and never dismissive."
         ),
     }
     strategy_desc = strategy_instructions.get(strategy, strategy_instructions["validate_only"])
 
-    #  TREND CONTEXT 
+    explicit_exercise_requested = (
+        current_intent == "technique_request"
+        or solution_preference == "exercise_requested"
+        or exercise_consent == "allowed"
+    )
+
+    # TREND CONTEXT
     trend_desc = {
-        "improving":  " TREND: The user's emotional state has been IMPROVING  affirm their progress.",
-        "worsening":  " TREND: The user's emotional state is WORSENING  show extra care and urgency. Don't minimize.",
+        "improving":  "TREND: The user's emotional state has been IMPROVING - affirm their progress.",
+        "worsening":  "TREND: The user's emotional state is WORSENING - show extra care and urgency. Don't minimize.",
         "stable":     "",
     }.get(trend, "")
 
-    #  CBT DISTORTION 
+    # CBT DISTORTION
     distortion_desc = ""
     if distortion_type:
         distortion_map = {
@@ -1232,12 +1380,12 @@ Tone: Deeply human, calm, protective, and present. The goal is not therapy; the 
         if instruction:
             distortion_desc = (
                 f"\n\nCBT INSIGHT: {instruction}\n"
-                " Maintain clinical empathy even if role is 'friend'. Never sound dismissive."
+                "Maintain clinical empathy even if role is 'friend'. Never sound dismissive."
             )
 
-    #  ABSOLUTE HARD RULES 
+    # ABSOLUTE HARD RULES
     hard_rules = """
-ABSOLUTE RULES  NEVER VIOLATE THESE:
+ABSOLUTE RULES - NEVER VIOLATE THESE:
 1.  NEVER suggest a technique if the user has explicitly said they don't want exercises, "I just want to talk", "I don't want to do exercises", or similar.
 2.  NEVER re-suggest the SAME technique the user just said didn't help. Always offer a DIFFERENT approach.
 3.  NEVER invent past conversations or memories. If you don't have memory context, just respond to now.
@@ -1246,22 +1394,38 @@ ABSOLUTE RULES  NEVER VIOLATE THESE:
 6.  NEVER be preachy, lecture, or repeat the same advice multiple times.
 7.  NEVER dismiss positive news with unsolicited therapy (e.g., if the user says "I got the job!", just celebrate with them).
 8.  If the user seems angry at you or says "you're not helping", validate their frustration honestly and ask what would actually help them right now.
-9.  If the user sends a very short reply ("ok", "yes", "no", "maybe"), treat it as a cue to reflect or gently ask a follow-up  don't over-explain.
-10.  If the user mentions clinical symptoms (poor sleep, appetite changes, concentration issues, persistent hopelessness for weeks), acknowledge gently and ask if they've spoken to anyone  but never diagnose.
+9.  If the user sends a very short reply ("ok", "yes", "no", "maybe"), treat it as a cue to reflect or gently ask a follow-up - don't over-explain.
+10.  If the user mentions clinical symptoms (poor sleep, appetite changes, concentration issues, persistent hopelessness for weeks), acknowledge gently and ask if they've spoken to anyone - but never diagnose.
 11.  If the user says a technique HELPED, celebrate it warmly and encourage them to keep using it.
 12.  Use the user's name if you know it (from memory context). It makes the conversation feel personal.
 13.  Resolve short answers and pronouns from the current session before replying. If the user says "about 3 weeks", "maths", "that", or "it", treat it as part of the active thread, not a standalone topic.
 14.  Do NOT offer a technique on the first distress disclosure unless the user accepts a technique already offered.
-15.  A request like "help me", "what should I do", "can you suggest something", or "any advice" is not enough by itself. First ask one focused follow-up unless the thread already contains a concrete formulation.
+15.  When solution_requested is True or response_task is give_tiny_first_step, you MUST give a brief stabilising action or first step immediately. Validate in 1–2 sentences, deliver the action or first step, THEN (if question_budget >= 1) ask ONE focused follow-up question after the action. Never ask a question before giving any action on a solution_requested turn.
 16.  When needs_technique=false, no new technique language is allowed: no "I can suggest", no "we could try", no coping lists, and no therapy homework. Only mention an existing stored technique for memory queries, acceptance/rejection, or positive feedback.
 17.  If the user says they have no more details ("nothing else", "I shared everything", "that's all"), do not ask another exploratory context question. Use what is already known.
 18.  Do not reuse the same empathy opener in adjacent replies. If the last assistant reply said "that sounds really heavy/painful", start differently.
 19.  Never claim to be a licensed therapist, doctor, emergency responder, or substitute for professional care.
 20.  Keep crisis replies plain, direct, and safety-focused. Do not add decorative language.
 21.  When a candidate shortlist is present, choose exactly one listed candidate id and use only that selected technique. Otherwise, when a recommended or active technique is present, use only that exact technique name. Never invent, rename, list, or switch to a technique outside the provided data.
-22.  If the user accepted a technique, acknowledge consent, name the selected technique once, explain why it fits the exact issue, then begin the first step.
+22.  If the user accepted a technique (or if you are presenting/introducing a technique), present it directly in this response in the same style as it was in the panel. The database steps are general/generic, so you MUST convert each step to target the user's current specific problem/stressor. For example, rewrite general step descriptions to directly address the specific thoughts, feelings, triggers, or situations the user has shared in this conversation (e.g. if the user is stressed about an exam, frame the breathing/relaxation steps explicitly around exam stress). Use this exact style:
+     ### Exercise: <Name>
+     * **Category:** <Category>
+     * **Duration:** <Duration> min
+     * **Difficulty:** <Difficulty>
+     * **Why it helps you right now:** <Personalised explanation of why this fits their current distress/context>
+
+     **Steps:**
+     1. <Step 1, rewritten from the generic database step to address the user's current problem specifically>
+     2. <Step 2, rewritten from the generic database step to address the user's current problem specifically>
+     ...
+     NEVER tell the user to check the sidebar or panel. All information must be inline.
 23.  Do not treat "thanks", "thank you", "ok thanks", or "thanks for it" as technique acceptance or improvement feedback. Only say a technique helped if the user explicitly says helped, worked, calmer, better, or similar.
 24.  If the response task is acknowledge_and_pause, reply briefly and naturally; do not analyze, offer a technique, or mark it as progress.
+25.  Do not ask the same context question twice. If the user answered the last question, use the answer to either ask a new missing-detail question or move forward according to response_task.
+26.  If immediate_regulation_request is True or response_task is start_grounding_now, you MUST bypass all context/permission checks, name and deliver the selected breathing/grounding exercise inline immediately in the same response, and ask 0 questions.
+27.  MEDICAL SAFETY: If has_medical_signal is True, you MUST append this exact medical recommendation at the end of the response: "Please make sure you are in a safe place, and if you feel any chest pain, severe shortness of breath, or feel faint, please contact medical professionals or a trusted person immediately."
+28.  DIRECT REGULATION TECHNIQUE: For IMMEDIATE_REGULATION_REQUEST, you MUST open the response with 1-2 validating sentences, transition directly to presenting the breathing/grounding technique inline, and ask no follow-up questions.
+29.  QUESTION BUDGET: If question_budget is 0, do not ask a question. If question_budget is 1, ask exactly one question. If context_missing_reason is set, target that specific detail (e.g. if vague_disclosure ask what they are feeling; if missing_trigger ask what triggered it; if missing_user_goal ask what they hope to get from the session).
 """
 
     continuity_rules = """
@@ -1274,6 +1438,7 @@ IN-SESSION CONTINUITY:
 - Keep the central thread alive across turns. Do not reset to generic advice just because the latest message is brief.
 - If the user says they are "not good", "not okay", or "currently" struggling, treat that as a worsening of the active thread, not a new opening disclosure.
 - If the user says they have already shared everything, treat the context-gathering step as complete. Summarize the known concern and move to the planned next step.
+- If response_task is summarize_known_context, give_reflective_opinion, offer_one_technique, continue_active_technique, or ask_permission_before_technique, do not ask another exploratory "hardest part" question.
 - Use the already gathered pattern. For example: if they described shutdown, guilt, tiredness, chest tightness, or small things piling up, reflect that pattern explicitly before asking anything.
 - Avoid repeating stock validation phrases like "it takes courage" or "your feelings are valid" in every turn.
 - Avoid back-to-back "That sounds..." openings. Vary empathy naturally: "I can see why...", "That must feel...", "I'm sorry you're carrying...", "It makes sense that..."
@@ -1283,12 +1448,13 @@ IN-SESSION CONTINUITY:
     technique_pacing_rules = """
 TECHNIQUE PACING:
 - A recommended technique is a candidate, not a command.
-- Follow-up questions come before therapy or technique offers. The user must feel understood first.
+- Follow-up questions come before therapy or technique offers. The user must feel understood first. Exception: when solution_requested is True or response_task is give_tiny_first_step, deliver the first stabilising action immediately, then ask one missing-detail question after (if question_budget >= 1). Do not hold the action hostage to context collection.
 - Before suggesting a technique, gather a concrete formulation: concern plus at least one detail such as duration, trigger, subject, situation, body feeling, impact, or belief.
-- If the current turn is still an early disclosure or a short answer to your follow-up question, do not suggest a technique yet. Validate and ask one focused follow-up instead.
+- If the current turn is still an early disclosure or a short answer to your follow-up question, do not suggest a technique yet. Validate and ask one focused follow-up for the single most missing detail.
+- If the user already gave a rich disclosure in one message, do not artificially stretch the discovery phase. Use the formulation and move forward according to response_task.
 - Loneliness needs slower pacing than exam stress or acute anxiety. If the user has only shared loneliness once or twice, offer warmth and one gentle exploration question before any technique.
 - Stop context gathering when the planner marks context_complete/no_more_details/followup_limit_reached. At that point, do not ask "is there anything else?"
-- Suggest a technique only when strategy is SUGGEST_TECHNIQUE, response_task permits it, needs_technique=true, and the thread has enough context, or when the user accepts a previous offer.
+- Suggest a technique only when strategy is SUGGEST_TECHNIQUE, response_task permits it, needs_technique=true, and the thread has enough context, or when the user accepts or explicitly requests an exercise.
 """
 
     stage_rules = f"""
@@ -1333,9 +1499,9 @@ STAGE MACHINE:
             "RESPONSE TASK - GIVE REFLECTIVE OPINION:\n"
             f"Ground your advice in addressing the user's detected thinking pattern: {reframe_hint}.\n"
             "CRITICAL THERAPEUTIC RULES:\n"
-            "  • NEVER expose the clinical name of the distortion to the user (e.g., NEVER say 'You are catastrophizing' or 'This is mind-reading').\n"
-            "  • Integrate the cognitive reframe naturally, and do not offer or mention any structured coping technique.\n"
-            "  • Keep it conversational, warm, and supportive."
+            "  - NEVER expose the clinical name of the distortion to the user (e.g., NEVER say 'You are catastrophizing' or 'This is mind-reading').\n"
+            "  - Integrate the cognitive reframe naturally, and do not offer or mention any structured coping technique.\n"
+            "  - Keep it conversational, warm, and supportive."
         )
     else:
         give_reflective_opinion_rule = (
@@ -1344,10 +1510,27 @@ STAGE MACHINE:
             "Do not ask another exploratory question unless absolutely necessary. Do not mention a technique."
         )
 
+    if explicit_exercise_requested:
+        offer_one_technique_rule = (
+            "RESPONSE TASK - OFFER ONE TECHNIQUE:\n"
+            "The user has explicitly asked for an exercise or already allowed one. Do not ask permission again. "
+            "Use the known formulation to explain why the listed technique fits. Name exactly one listed technique. "
+            "Tie the rationale to the user's exact issue, then begin the first small step or invite them to do the first step now. "
+            "Do not list multiple options, and do not mention techniques that were not selected."
+        )
+    else:
+        offer_one_technique_rule = (
+            "RESPONSE TASK - OFFER ONE TECHNIQUE:\n"
+            "Use the known formulation to explain why the listed technique fits. Name exactly one listed technique. "
+            "Tie the rationale to the user's exact issue (for example bedtime exam rumination, fear of failure, or a specific catastrophic thought). "
+            "Ask consent to try it together. Do not list multiple options, and do not mention techniques that were not selected."
+        )
+
     response_task_rules = {
         "ask_next_context_question": (
             "RESPONSE TASK - ASK NEXT CONTEXT QUESTION:\n"
             "Reflect the active thread, then ask exactly one focused question based on the missing detail. "
+            "Do not repeat the previous question or ask generic 'hardest part' wording if the user already answered it. "
             "Do not restart with broad questions like 'what has been going on?' Do not mention any technique."
         ),
         "give_reflective_opinion": give_reflective_opinion_rule,
@@ -1356,12 +1539,7 @@ STAGE MACHINE:
             "The user has indicated there are no more details to add. Briefly summarize the active concern using exact known details. "
             "Do not ask another exploratory question. If needs_technique=false, end with a supportive next step without naming a technique."
         ),
-        "offer_one_technique": (
-            "RESPONSE TASK - OFFER ONE TECHNIQUE:\n"
-            "Use the known formulation to explain why the listed technique fits. Name exactly one listed technique. "
-            "Tie the rationale to the user's exact issue (for example bedtime exam rumination, fear of failure, or a specific catastrophic thought). "
-            "Ask consent to try it together. Do not list multiple options, and do not mention techniques that were not selected."
-        ),
+        "offer_one_technique": offer_one_technique_rule,
         "continue_active_technique": (
             "RESPONSE TASK - CONTINUE ACTIVE TECHNIQUE:\n"
             "The user accepted the previously offered technique. Continue that same technique. "
@@ -1398,6 +1576,49 @@ STAGE MACHINE:
             "If the user added more detail after a previous technique offer, briefly acknowledge that detail and then ask permission again from the same formulation. "
             "Before sharing it, ask the user if they would like you to share it. "
             "Do NOT name the technique yet. Do NOT describe it yet. Just ask permission."
+        ),
+        "start_grounding_now": (
+            "RESPONSE TASK - START GROUNDING NOW:\n"
+            "The user is experiencing acute body distress. Validate their feelings in 1 sentence, then IMMEDIATELY introduce "
+            "the breathing or grounding technique inline. Do not ask for permission, do not ask any follow-up question. "
+            "Format the technique clearly inline with its category, duration, and personalized steps."
+        ),
+        "ask_one_missing_context_question": (
+            "RESPONSE TASK - ASK ONE MISSING CONTEXT QUESTION:\n"
+            "Validate their explicit request/need, then offer a tiny first step or brief grounding, and ask exactly one "
+            "focused question to get the missing detail indicated by context_missing_reason. Do not ask more than one question."
+        ),
+        "acknowledge_medical_and_check": (
+            "RESPONSE TASK - ACKNOWLEDGE MEDICAL AND CHECK:\n"
+            "The user's message contains a medical or somatic warning signal (chest pain, shortness of breath, physical symptoms).\n"
+            "Follow this exact order:\n"
+            "  1. Lead immediately with the medical safety note: 'Please make sure you are in a safe place, and if you feel any "
+            "chest pain, severe shortness of breath, or feel faint, please contact medical professionals or a trusted person immediately.'\n"
+            "  2. Validate warmly (1–2 sentences).\n"
+            "  3. Do NOT ask a context question this turn (question_budget=0).\n"
+            "  4. Offer a brief grounding anchor (one sentence) they can do right now if they feel physically unsafe.\n"
+            "Do not rush to gather context while the user may be physically at risk."
+        ),
+        "give_tiny_first_step": (
+            "RESPONSE TASK - GIVE TINY FIRST STEP (action-first principle):\n"
+            "The user asked for help or a solution. Follow this exact response order:\n"
+            "  1. Validate briefly (1–2 sentences max).\n"
+            "  2. Give direct support — name and deliver one concrete first step or stabilising action immediately.\n"
+            "  3. State the one next step they can take.\n"
+            "  4. If question_budget >= 1, ask ONE focused follow-up question AFTER the action (to personalise the next step).\n"
+            "     If question_budget is 0, do not ask any question.\n"
+            "Never ask a question BEFORE giving an action on this response task. "
+            "Do not push a full formal exercise unless they asked. Do not ask multiple questions."
+        ),
+        "offer_low_pressure_message": (
+            "RESPONSE TASK - OFFER LOW PRESSURE MESSAGE:\n"
+            "Offer a gentle draft message or option to reach out to a friend/support. Keep it very simple, low-pressure, "
+            "and do not ask any follow-up question."
+        ),
+        "offer_overthinking_tool": (
+            "RESPONSE TASK - OFFER OVERTHINKING TOOL:\n"
+            "Offer a concrete, simple mental tool or strategy for overthinking (e.g. worry time, thought recording). "
+            "Do not ask any follow-up question."
         ),
     }
     response_task_desc = response_task_rules.get(response_task, response_task_rules["ask_next_context_question"])
@@ -1436,12 +1657,12 @@ RESPONSE FORMAT:
 
 MEMORY RULE:
 If past session memories are provided below, use them only to personalize naturally.
-Do NOT open with "I remember you said..."  just weave the context in.
+Do NOT open with "I remember you said..." - just weave the context in.
 If there are no memories, respond to what the user is sharing right now.
 
 {hard_rules}"""
 
-    # v9.0: CLINICAL SEVERITY GUIDANCE — append after base prompt
+    # v9.0: CLINICAL SEVERITY GUIDANCE - append after base prompt
     if clinical_severity and clinical_severity != "minimal":
         _clinical_map = {
             "mild": "\nCLINICAL NOTE: User shows MILD clinical indicators. Continue supportive care. Monitor for escalation.",
@@ -1533,13 +1754,27 @@ def _build_structured_context(
     suppressed_topics: list | None = None,
     active_issue_source: str | None = None,
     solution_preference: str = "unknown",
+    mismatch: bool = False,
+    possible_masking: bool = False,
+    fusion_confidence: float | None = None,
+    # v13.0: new planning/routing signals
+    immediate_regulation_request: bool = False,
+    latest_user_need: str | None = None,
+    question_budget: int = 1,
+    context_missing_reason: str | None = None,
+    has_medical_signal: bool = False,
 ) -> str:
     """
     Build structured context for LLM prompt.
     Now includes strategy, trend, phase, distortion, micro-action, and proactive hint.
     """
-    
+
     candidates = _valid_technique_candidates(technique_candidates)
+    explicit_exercise_requested = (
+        current_intent == "technique_request"
+        or solution_preference == "exercise_requested"
+        or exercise_consent == "allowed"
+    )
     technique_info = ""
     if needs_technique and candidates and response_task in {"offer_one_technique", "ask_permission_before_technique"}:
         technique_info = f"""
@@ -1547,13 +1782,19 @@ TECHNIQUE CANDIDATE SHORTLIST:
 Select exactly one candidate by id. These are safe DB exercises already narrowed by semantic search.
 {_format_technique_candidates(candidates)}"""
     elif needs_technique and technique:
+        _sc_steps = technique.get("steps") or []
+        _sc_steps_text = ""
+        if _sc_steps and isinstance(_sc_steps, list):
+            _sc_steps_text = "\n- Steps (personalise each step's wording to fit the user's exact message and emotional context):\n" + "\n".join(
+                f"  {i}. {s}" for i, s in enumerate(_sc_steps, 1)
+            )
         technique_info = f"""
 RECOMMENDED TECHNIQUE:
 - Name: {technique.get('name', 'Unknown')}
 - Category: {technique.get('category', 'Unknown')}
 - Duration: {technique.get('duration_minutes', 'N/A')} minutes
 - Difficulty: {technique.get('difficulty', 'N/A')}
-- Why it works: {technique.get('why_it_works', 'N/A')}"""
+- Why it works: {technique.get('why_it_works', 'N/A')}{_sc_steps_text}"""
     elif not needs_technique:
         withheld_reason = "withheld because the current response must understand first and ask a follow-up."
         if response_task == "summarize_known_context":
@@ -1561,26 +1802,26 @@ RECOMMENDED TECHNIQUE:
         technique_info = """
 RECOMMENDED TECHNIQUE:
 - {withheld_reason}""".format(withheld_reason=withheld_reason)
-    
+
     # Strategy-specific task instructions
     # For reframe: dynamically name the exact distortion so the LLM is surgically precise
     _distortion_label = distortion_type.replace("_", " ") if distortion_type else "unhelpful thinking"
     _distortion_reframe_hints = {
-        "catastrophizing":     f"gently replace absolute language ('always'/'never') with conditional alternatives ('sometimes'/'right now')",
-        "black_white":         f"help them find the nuanced middle ground between the two extremes",
-        "overgeneralization":  f"help them see this as one isolated event, not a universal pattern about themselves",
-        "mind_reading":        f"gently question whether they can actually know what the other person is thinking",
-        "personalization":     f"help them separate what is genuinely within their control vs. what is not",
-        "should_statements":   f"soften rigid 'should/must' language into flexible 'could/might' alternatives",
-        "emotional_reasoning": f"gently distinguish between how something feels and what is objectively true",
-        "magnification":       f"offer a proportionate perspective  acknowledge the difficulty without amplifying it",
+        "catastrophizing":     "gently replace absolute language ('always'/'never') with conditional alternatives ('sometimes'/'right now')",
+        "black_white":         "help them find the nuanced middle ground between the two extremes",
+        "overgeneralization":  "help them see this as one isolated event, not a universal pattern about themselves",
+        "mind_reading":        "gently question whether they can actually know what the other person is thinking",
+        "personalization":     "help them separate what is genuinely within their control vs. what is not",
+        "should_statements":   "soften rigid 'should/must' language into flexible 'could/might' alternatives",
+        "emotional_reasoning": "gently distinguish between how something feels and what is objectively true",
+        "magnification":       "offer a proportionate perspective - acknowledge the difficulty without amplifying it",
     }
     _reframe_hint = _distortion_reframe_hints.get(distortion_type or "", "help them see their situation from a new, more constructive angle")
 
     strategy_tasks = {
         "validate_only": "1. Acknowledge their emotion in fresh, plain language\n2. Validate their feelings without repeating the previous assistant wording\n3. Show you're listening and present\n4. Do NOT suggest any technique",
-        "ask_question": "1. Acknowledge their emotion in fresh, plain language\n2. Validate briefly without repeating the previous assistant wording\n3. Ask ONE thoughtful open-ended question\n4. For loneliness/isolation, explore the missing connection before any technique\n5. Do NOT suggest, name, hint at, or prepare any technique yet",
-        "encourage_reflection": "1. Celebrate or validate that the user is actively practicing a technique or reflecting\n2. Ask a gentle question about their experience with it (e.g., 'What does it feel like in your body?')\n3. Encourage them to keep going or share what they notice\n4. Do NOT suggest a new technique  they are already practicing",
+        "ask_question": "1. Acknowledge their emotion in fresh, plain language\n2. Validate briefly without repeating the previous assistant wording\n3. Ask ONE focused question for the most important missing slot\n4. Do not repeat the previous assistant question\n5. For loneliness/isolation, explore the missing connection before any technique\n6. Do NOT suggest, name, hint at, or prepare any technique yet",
+        "encourage_reflection": "1. Celebrate or validate that the user is actively practicing a technique or reflecting\n2. Ask a gentle question about their experience with it (e.g., 'What does it feel like in your body?')\n3. Encourage them to keep going or share what they notice\n4. Do NOT suggest a new technique - they are already practicing",
         "reframe": (
             f"1. Acknowledge their emotion warmly\n"
             f"2. Notice (without labelling clinically) that their language reflects {_distortion_label}\n"
@@ -1629,12 +1870,31 @@ RECOMMENDED TECHNIQUE:
             "4. Do not mention any technique"
         )
 
+    if explicit_exercise_requested:
+        _offer_one_technique_task = (
+            "1. Acknowledge that the user asked for something practical\n"
+            "2. Summarize the formulation briefly using the known trigger/impact/belief\n"
+            "3. Introduce exactly one listed technique\n"
+            "4. Explain why it fits this specific thread, such as bedtime rumination, sleep disruption, loneliness, or a scary belief\n"
+            "5. Begin the first small step or invite them to start the first step now\n"
+            "6. Do not ask permission again and do not mention unselected techniques"
+        )
+    else:
+        _offer_one_technique_task = (
+            "1. Summarize the formulation briefly\n"
+            "2. Introduce exactly one listed technique\n"
+            "3. Explain why it fits this specific thread, such as bedtime exam rumination or a scary failure belief\n"
+            "4. Ask if they would like to try it together\n"
+            "5. Do not mention unselected techniques"
+        )
+
     response_task_tasks = {
         "ask_next_context_question": (
             "1. Use the active thread before asking\n"
-            "2. Ask exactly one focused next question\n"
-            "3. If the active thread is loneliness/isolation, ask about when it hits or what kind of connection feels missing\n"
-            "4. Do not suggest, name, hint at, or prepare a technique"
+            "2. Ask exactly one focused next question for a missing detail, not a repeated detail\n"
+            "3. If the previous assistant already asked what was hardest and the user answered, do not ask that again\n"
+            "4. If the active thread is loneliness/isolation, ask about when it hits or what kind of connection feels missing\n"
+            "5. Do not suggest, name, hint at, or prepare a technique"
         ),
         "give_reflective_opinion": _give_opinion_task,
         "summarize_known_context": (
@@ -1643,13 +1903,7 @@ RECOMMENDED TECHNIQUE:
             "3. Do not ask another exploratory question\n"
             "4. If needs_technique is false, end with a supportive next step without naming a technique"
         ),
-        "offer_one_technique": (
-            "1. Summarize the formulation briefly\n"
-            "2. Introduce exactly one listed technique\n"
-            "3. Explain why it fits this specific thread, such as bedtime exam rumination or a scary failure belief\n"
-            "4. Ask if they would like to try it together\n"
-            "5. Do not mention unselected techniques"
-        ),
+        "offer_one_technique": _offer_one_technique_task,
         "continue_active_technique": (
             "1. Acknowledge the user's consent\n"
             "2. Continue the same technique already offered and use only its exact name\n"
@@ -1682,14 +1936,56 @@ RECOMMENDED TECHNIQUE:
             "You have a potentially helpful technique to share. "
             "If the user added more detail after a previous technique offer, briefly acknowledge that detail and then ask permission again from the same formulation. "
             "Before sharing it, ask the user if they would like you to share it. "
-            "Say something like: 'I have something that might help — would you like me to share it?' "
+            "Say something like: 'I have something that might help - would you like me to share it?' "
             "Do NOT name the technique yet. Do NOT describe it yet. Just ask permission."
+        ),
+        "start_grounding_now": (
+            "RESPONSE TASK - START GROUNDING NOW:\n"
+            "Validate their feelings in 1 sentence, then IMMEDIATELY introduce "
+            "the breathing or grounding technique inline. Do not ask for permission, do not ask any follow-up question. "
+            "Format the technique clearly inline with its category, duration, and personalized steps."
+        ),
+        "ask_one_missing_context_question": (
+            "RESPONSE TASK - ASK ONE MISSING CONTEXT QUESTION:\n"
+            "Validate their explicit request/need, then offer a tiny first step or brief grounding, and ask exactly one "
+            "focused question to get the missing detail indicated by context_missing_reason. Do not ask more than one question."
+        ),
+        "acknowledge_medical_and_check": (
+            "RESPONSE TASK - ACKNOWLEDGE MEDICAL AND CHECK:\n"
+            "The user's message contains a medical or somatic warning signal (chest pain, shortness of breath, physical symptoms).\n"
+            "Follow this exact order:\n"
+            "  1. Lead immediately with the medical safety note: 'Please make sure you are in a safe place, and if you feel any "
+            "chest pain, severe shortness of breath, or feel faint, please contact medical professionals or a trusted person immediately.'\n"
+            "  2. Validate warmly (1–2 sentences).\n"
+            "  3. Do NOT ask a context question this turn (question_budget=0).\n"
+            "  4. Offer a brief grounding anchor (one sentence) they can do right now if they feel physically unsafe.\n"
+            "Do not rush to gather context while the user may be physically at risk."
+        ),
+        "give_tiny_first_step": (
+            "RESPONSE TASK - GIVE TINY FIRST STEP (action-first principle):\n"
+            "The user asked for help or a solution. Follow this exact response order:\n"
+            "  1. Validate briefly (1–2 sentences max).\n"
+            "  2. Give direct support — name and deliver one concrete first step or stabilising action immediately.\n"
+            "  3. State the one next step they can take.\n"
+            "  4. If question_budget >= 1, ask ONE focused follow-up question AFTER the action (to personalise the next step).\n"
+            "     If question_budget is 0, do not ask any question.\n"
+            "Never ask a question BEFORE giving an action on this response task. "
+            "Do not push a full formal exercise unless they asked. Do not ask multiple questions."
+        ),
+        "offer_low_pressure_message": (
+            "RESPONSE TASK - OFFER LOW PRESSURE MESSAGE:\n"
+            "Offer a gentle draft message or option to reach out to a friend/support. Keep it very simple, low-pressure, "
+            "and do not ask any follow-up question."
+        ),
+        "offer_overthinking_tool": (
+            "RESPONSE TASK - OFFER OVERTHINKING TOOL:\n"
+            "Offer a concrete, simple mental tool or strategy for overthinking. Do not ask any follow-up question."
         ),
 
     }
     if response_task in response_task_tasks:
         task_text = response_task_tasks[response_task]
-    
+
     # Cognitive distortion context [v3 NEW]
     distortion_info = ""
     if distortion_type and distortion_explanation:
@@ -1735,6 +2031,7 @@ RECOMMENDED TECHNIQUE:
 - Intent: {current_intent or 'unknown'}
 - Response task: {response_task}
 - Needs technique now: {needs_technique}
+- Lifecycle mode: {'explicit_exercise_requested' if explicit_exercise_requested else 'context_gathering_or_reflection'}
 - Primary concern: {primary_concern or 'unknown'}
 - Active thread summary: {active_thread_summary or 'unknown'}
 - Duration: {concern_duration or 'unknown'}
@@ -1749,6 +2046,9 @@ RECOMMENDED TECHNIQUE:
 - Preferred techniques: {', '.join(preferred_names) if preferred_names else 'none'}
 - Exercise consent: {exercise_consent}
 - Solution preference: {solution_preference}
+- Emotion mismatch: {mismatch}
+- Possible masking: {possible_masking}
+- Fusion confidence: {fusion_confidence if fusion_confidence is not None else 'unknown'}
 - Suppressed topics: {", ".join([t.get("topic","") for t in (suppressed_topics or []) if t.get("topic")]) or "none"}
 - Active issue source: {active_issue_source or "not specified"}"""
 
@@ -1759,7 +2059,7 @@ RECOMMENDED TECHNIQUE:
 \nPAST SESSION MEMORIES (use to personalize, do not quote directly):
 {memory_context[:600]}"""  # Cap at 600 chars to stay within token budget
 
-    #  VOICE ACOUSTIC CONTEXT [new] 
+    # VOICE ACOUSTIC CONTEXT [new]
     # Inject psychoacoustic signals so the LLM adapts tone, depth, and urgency.
     voice_context = ""
     if voice_processed and voice_features:
@@ -1771,33 +2071,33 @@ RECOMMENDED TECHNIQUE:
         conflict       = voice_emotion != text_emotion_raw
 
         distress_label = (
-            " HIGH  user may be masking their true emotional state"
+            "HIGH - user may be masking their true emotional state"
             if distress_idx > 0.60 else
-            " MODERATE  some vocal tension present"
+            "MODERATE - some vocal tension present"
             if distress_idx > 0.35 else
-            " LOW  voice sounds relaxed"
+            "LOW - voice sounds relaxed"
         )
         arousal_label  = "elevated" if arousal_val > 0.65 else "normal"
         pause_label    = "hesitant/slow speech" if pause_val > 0.35 else "fluent speech"
         conflict_label = (
-            " MISALIGNMENT  voice and text express different emotions. "
+            "MISALIGNMENT - voice and text express different emotions. "
             "The user may be downplaying how they truly feel."
             if conflict else
-            " aligned  voice and text agree"
+            "aligned - voice and text agree"
         )
 
         voice_context = f"""
-\n VOICE ACOUSTIC ANALYSIS (raw microphone signal  NOT text):
+\nVOICE ACOUSTIC ANALYSIS (raw microphone signal - NOT text):
 - Voice emotion detected: {voice_emotion.upper()} (confidence: {voice_conf:.0%})
-- Psychoacoustic distress index: {distress_idx:.2f}  {distress_label}
+- Psychoacoustic distress index: {distress_idx:.2f} - {distress_label}
 - Arousal level: {arousal_val:.0%} ({arousal_label})
 - Pause density: {pause_val:.2f} ({pause_label})
 - Voice vs. text alignment: {conflict_label}
 
 INSTRUCTION: Let these acoustic signals guide your TONE:
- If distress_index > 0.6  be extra gentle even if the text seems calm
- If voice/text conflict  gently invite the user to share more (don't confront directly)
- If pause_density > 0.4  the user may be finding it hard to speak; give them space
+- If distress_index > 0.6 - be extra gentle even if the text seems calm
+- If voice/text conflict - gently invite the user to share more (don't confront directly)
+- If pause_density > 0.4 - the user may be finding it hard to speak; give them space
 """
 
     return f"""STRUCTURED ANALYSIS:
@@ -1835,6 +2135,13 @@ USER CONTEXT:
 
 STRATEGY TO EXECUTE:
 {task_text}
+
+PLANNING & ROUTING STATE:
+- Immediate Regulation Request: {immediate_regulation_request}
+- Latest User Goal/Need: {latest_user_need or 'None'}
+- Question Budget: {question_budget}
+- Context Missing Reason: {context_missing_reason or 'None'}
+- Medical Warning Signal: {has_medical_signal}
     """.strip()
 
 
@@ -1845,10 +2152,10 @@ STRATEGY TO EXECUTE:
 async def stream_response_tokens(llm, llm_messages) -> AsyncIterator[str]:
     """
     Stream LLM response token-by-token using Groq's streaming API.
-    
+
     Yields:
         Individual tokens from the LLM as they arrive.
-    
+
     This allows the client to display text incrementally instead of waiting
     for the full response to generate (saves perceived latency by 1-3 seconds).
     """
@@ -1874,29 +2181,29 @@ async def stream_response_tokens(llm, llm_messages) -> AsyncIterator[str]:
             if cleaned and not re.fullmatch(r"\s*(?:0|1(?:\.0)?|0\.\d+)\s*", cleaned):
                 yield cleaned
     except Exception as e:
-        print(f"[STREAM]  Streaming error: {e}")
+        print(f"[STREAM] Streaming error: {e}")
         yield f"\n\n[Error streaming response: {str(e)[:50]}]"
 
 
 async def optimized_response_generator_node_streaming(state: MentalHealthState):
     """
     STREAMING VARIANT - Returns an async generator instead of blocking.
-    
+
     Use this when you need to stream tokens to the client via SSE/WebSocket.
     Returns a tuple of (async_generator, state_updates) so the graph can
     continue while tokens are being streamed.
-    
+
     This is called by the /chat/stream endpoint INSTEAD OF optimized_response_generator_node.
     """
     try:
         # Guard: Don't overwrite crisis response
         if state.get("crisis_detected") and state.get("final_response"):
-            print("[RESPONSE]  Crisis response already set (streaming)")
+            print("[RESPONSE] Crisis response already set (streaming)")
             # For crisis, return pre-computed response (no streaming) because safety is paramount
             async def _crisis_gen():
                 yield state.get("final_response", "")
             return _crisis_gen(), {"final_response_streamed": True}
-        
+
         # Extract structured data (same as non-streaming)
         emotion = state.get("fused_emotion", state.get("emotion", "neutral"))
         intensity = state.get("fused_intensity", state.get("intensity", 0.5))
@@ -1911,7 +2218,7 @@ async def optimized_response_generator_node_streaming(state: MentalHealthState):
         messages = state.get("messages", [])
         is_new_user = state.get("is_new_user", False)
         crisis_detected = state.get("crisis_detected", False)
-        
+
         conversation_strategy = state.get("conversation_strategy", "validate_only")
         emotional_trend = state.get("emotional_trend", "stable")
         conversation_phase = state.get("conversation_phase", "venting")
@@ -1930,6 +2237,11 @@ async def optimized_response_generator_node_streaming(state: MentalHealthState):
         preferred_techniques = state.get("preferred_techniques", []) or []
         if not needs_technique and current_intent != "accept_technique":
             recommended_technique = {}
+        
+        # Define and filter technique_candidates for streaming node too
+        technique_candidates = _valid_technique_candidates(state.get("technique_candidates") or [])
+        if response_task not in {"offer_one_technique", "ask_permission_before_technique", "start_grounding_now"}:
+            technique_candidates = []
 
         # Voice acoustic context (streaming path)
         voice_features  = state.get("voice_features") or {}
@@ -1938,24 +2250,24 @@ async def optimized_response_generator_node_streaming(state: MentalHealthState):
         user_message = messages[-1].content if messages else ""
         recent_history = _select_prompt_history(messages)
         memory_context = state.get("memory_context", "")
-        
-        print(f"[NODE:RESPONSE-STREAM]  Streaming | Role: {agent_role} | Emotion: {emotion} ({intensity:.0%}) | Strategy: {conversation_strategy}")
-        
+
+        print(f"[NODE:RESPONSE-STREAM] Streaming | Role: {agent_role} | Emotion: {emotion} ({intensity:.0%}) | Strategy: {conversation_strategy}")
+
         llm = get_chat_llm()
-        
-        # FAST PATH: no_action (casual chitchat)  don't stream, too fast
+
+        # FAST PATH: no_action (casual chitchat) - don't stream, too fast
         if conversation_strategy == "no_action":
             memory_info = ""
             if memory_context:
                 memory_info = f"\nPAST SESSION MEMORIES: {memory_context[:600]}\nIMPORTANT MEMORY RULE: You DO have memory. If asked, refer to these memories. Do not invent past conversations."
             else:
                 memory_info = "\nIMPORTANT MEMORY RULE: You DO have memory capabilities, but since this is a new session/account, there are no past memories yet. If asked, state honestly that we haven't talked much yet."
-                
+
             simple_prompt = f"""You are SentiMind, a friendly companion. This is casual conversation unless the recent session thread shows the user is continuing a distress concern.
 Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emotion analysis, NO technique suggestions. If the current message is a short reply to an earlier distress thread, connect it back with empathy and ask one gentle follow-up.{memory_info}
 
- EMERGENCY SAFETY CLAUSE: If the user expresses ANY sudden sadness, fear, self-harm, or distress in this specific message, drop the casual tone immediately. Acknowledge their pain and offer gentle support instead of casual chitchat."""
-            
+EMERGENCY SAFETY CLAUSE: If the user expresses ANY sudden sadness, fear, self-harm, or distress in this specific message, drop the casual tone immediately. Acknowledge their pain and offer gentle support instead of casual chitchat."""
+
             simple_msg = user_message
             fast_messages = [SystemMessage(content=simple_prompt)]
             continuity_context = _build_session_continuity_context(recent_history, user_message)
@@ -1970,16 +2282,16 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
                             fast_messages.append(HumanMessage(content=content))
                         else:
                             fast_messages.append(AIMessage(content=content))
-            
+
             fast_messages.append(HumanMessage(content=simple_msg))
-            
+
             # For casual, stream it anyway for consistency
             async def _casual_generator():
                 async for token in stream_response_tokens(llm, fast_messages):
                     yield token
-            
+
             return _casual_generator(), {"final_response_streamed": True}
-        
+
         # BUILD SYSTEM PROMPT AND CONTEXT (same as non-streaming)
         system_prompt = _build_optimized_system_prompt(
             agent_role=agent_role,
@@ -1996,13 +2308,20 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
             current_intent=current_intent,
             needs_technique=needs_technique,
             response_task=response_task,
-            # v11.0: consent governance (was missing in streaming path — critical fix)
+            technique_candidates=technique_candidates,
+            # v11.0: consent governance (was missing in streaming path - critical fix)
             exercise_consent=state.get("exercise_consent", "unknown"),
             suppressed_topics=state.get("suppressed_topics") or [],
             active_issue_source=state.get("active_issue_source"),
             solution_preference=state.get("solution_preference", "unknown"),
+            # v13.0: new planning/routing signals
+            immediate_regulation_request=bool(state.get("immediate_regulation_request", False)),
+            latest_user_need=state.get("latest_user_need"),
+            question_budget=int(state.get("question_budget", 1)),
+            context_missing_reason=state.get("context_missing_reason"),
+            has_medical_signal=has_medical_warning_signal(user_message) or bool(state.get("has_persistent_medical_signal")),
         )
-        
+
         context_text = _build_structured_context(
             emotion=emotion,
             intensity=intensity,
@@ -2035,6 +2354,7 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
             conversation_stage=conversation_stage,
             current_intent=current_intent,
             needs_technique=needs_technique,
+            technique_candidates=technique_candidates,
             primary_concern=state.get("primary_concern"),
             concern_duration=state.get("concern_duration"),
             triggering_subject=state.get("triggering_subject"),
@@ -2053,14 +2373,20 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
             suppressed_topics=state.get("suppressed_topics") or [],
             active_issue_source=state.get("active_issue_source"),
             solution_preference=state.get("solution_preference", "unknown"),
+            # v13.0: new planning/routing signals
+            immediate_regulation_request=bool(state.get("immediate_regulation_request", False)),
+            latest_user_need=state.get("latest_user_need"),
+            question_budget=int(state.get("question_budget", 1)),
+            context_missing_reason=state.get("context_missing_reason"),
+            has_medical_signal=has_medical_warning_signal(user_message) or bool(state.get("has_persistent_medical_signal")),
         )
-        
+
         # PREPARE LLM MESSAGES
         llm_messages = [SystemMessage(content=system_prompt)]
         continuity_context = _build_session_continuity_context(recent_history, user_message)
         if continuity_context:
             llm_messages.append(SystemMessage(content=continuity_context))
-        
+
         if recent_history:
             for turn in recent_history:
                 role = getattr(turn, 'type', 'human')
@@ -2070,8 +2396,8 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
                         llm_messages.append(HumanMessage(content=content))
                     else:
                         llm_messages.append(AIMessage(content=content))
-            print(f"[NODE:RESPONSE-STREAM]  Injected {len(recent_history)} recent turns")
-        
+            print(f"[NODE:RESPONSE-STREAM] Injected {len(recent_history)} recent turns")
+
         llm_messages.append(HumanMessage(content=context_text))
 
         _debug_print_response_context(
@@ -2081,19 +2407,19 @@ Respond naturally and warmly. Keep it short (1-2 sentences). NO therapy, NO emot
             context_text=context_text,
             llm_messages=llm_messages,
         )
-        
-        print("[NODE:RESPONSE-STREAM]  Starting token stream...")
-        
+
+        print("[NODE:RESPONSE-STREAM] Starting token stream...")
+
         # Return the async generator
         async def _streaming_generator():
             async for token in stream_response_tokens(llm, llm_messages):
                 yield token
-            print("[NODE:RESPONSE-STREAM]  Stream complete")
-        
+            print("[NODE:RESPONSE-STREAM] Stream complete")
+
         return _streaming_generator(), {"final_response_streamed": True}
-        
+
     except Exception as e:
-        print(f"[NODE:RESPONSE-STREAM]  Error in streaming generator: {str(e)[:100]}")
+        print(f"[NODE:RESPONSE-STREAM] Error in streaming generator: {str(e)[:100]}")
         async def _error_generator():
             yield "I hear you. Thank you for sharing. How can I support you right now? "
         return _error_generator(), {"final_response_streamed": False}
