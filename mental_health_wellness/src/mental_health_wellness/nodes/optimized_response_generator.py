@@ -153,6 +153,49 @@ def _clean_final_response(response: str, recent_history: list | None = None) -> 
     return text or "I hear you. Thank you for sharing. How can I support you right now?"
 
 
+def _build_complement_offer_line(pending_complement: dict | None, signal: str | None) -> str:
+    """
+    Deterministic one-sentence offer for a queued series complement. Used after an
+    immediate-regulation exercise is delivered so the second exercise is always
+    surfaced (never silently dropped, never left to LLM compliance).
+    """
+    if not pending_complement or not pending_complement.get("name"):
+        return ""
+    name = pending_complement.get("name")
+    target = (signal or "what's still sitting with you").strip()
+    return (
+        f"Once you've had a moment to settle with that, I also have **{name}** ready "
+        f"for {target} — just let me know whenever you'd like to try it."
+    )
+
+
+def _maybe_append_complement_offer(
+    final_response: str,
+    *,
+    response_task: str,
+    pending_complement: dict | None,
+    pending_complement_signal: str | None,
+    primary_delivered: bool,
+) -> str:
+    """
+    Append the complement offer to an immediate-regulation delivery when it is not
+    already present. Gated to start_grounding_now so it cannot duplicate the offer
+    flow or fire before the primary exercise has actually been delivered.
+    """
+    if response_task != "start_grounding_now":
+        return final_response
+    if not primary_delivered or not pending_complement or not pending_complement.get("name"):
+        return final_response
+    comp_name = str(pending_complement.get("name") or "").strip().lower()
+    if comp_name and comp_name in (final_response or "").lower():
+        return final_response  # LLM already surfaced it — don't duplicate
+    offer = _build_complement_offer_line(pending_complement, pending_complement_signal)
+    if not offer:
+        return final_response
+    sep = "\n\n" if final_response and not final_response.endswith("\n") else ""
+    return f"{final_response}{sep}{offer}"
+
+
 def _response_includes_technique(response: str, technique: dict | None) -> bool:
     """GAP 4 fix: require BOTH a name/id match AND at least one structural exercise
     marker to avoid false positives from incidental keyword matches (e.g. a
@@ -198,6 +241,44 @@ def _valid_technique_candidates(candidates) -> list[dict]:
         seen.add(tech_id)
         cleaned.append(item)
     return cleaned[:8]
+
+
+def _extract_personalized_steps(response: str) -> list[str]:
+    """
+    Extract personalized steps from the LLM response markdown.
+    
+    Looks for the format:
+      **Steps:**
+      [personalized steps - either as numbered list or bullet points]
+    
+    Returns list of step strings, or empty list if not found.
+    """
+    if not response or not isinstance(response, str):
+        return []
+    
+    # Find the **Steps:** section
+    steps_match = re.search(r"\*\*steps:\*\*\s*\n([\s\S]*?)(?=\n\n|\n###|\Z)", response, re.IGNORECASE)
+    if not steps_match:
+        return []
+    
+    steps_block = steps_match.group(1).strip()
+    if not steps_block:
+        return []
+    
+    steps = []
+    # Match both numbered (1., 2., etc.) and bullet (-, *, •) formats
+    for line in steps_block.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        # Remove numbering: "1.", "1)", etc.
+        line = re.sub(r"^[\d]+[\.\)]\s+", "", line)
+        # Remove bullet points: "-", "*", "•"
+        line = re.sub(r"^[-*•]\s+", "", line)
+        if line:
+            steps.append(line)
+    
+    return steps if steps else []
 
 
 def _candidate_by_selected_id(candidates: list[dict], selected_id: str) -> dict:
@@ -614,6 +695,7 @@ EMERGENCY SAFETY CLAUSE: If the user expresses ANY sudden sadness, fear, self-ha
             question_budget=int(state.get("question_budget", 1)),
             context_missing_reason=state.get("context_missing_reason"),
             has_medical_signal=has_medical_warning_signal(user_message) or bool(state.get("has_persistent_medical_signal")),
+            alternative_techniques=state.get("alternative_techniques") or [],
         )
 
         # Rejection override: inject strong instruction into system prompt
@@ -807,6 +889,11 @@ EMERGENCY SAFETY CLAUSE: If the user expresses ANY sudden sadness, fear, self-ha
             question_budget=int(state.get("question_budget", 1)),
             context_missing_reason=state.get("context_missing_reason"),
             has_medical_signal=has_medical_warning_signal(user_message) or bool(state.get("has_persistent_medical_signal")),
+            alternative_techniques=state.get("alternative_techniques") or [],
+            closure_technique_name=(state.get("recommended_technique") or state.get("latest_recommended_technique") or {}).get("name", ""),
+            closure_start_emotion=state.get("session_start_emotion", state.get("last_detected_emotion", "")),
+            closure_current_emotion=state.get("last_detected_emotion", ""),
+            closure_trend=state.get("emotional_trend", "stable"),
         )
 
         # ============================================
@@ -916,9 +1003,22 @@ EMERGENCY SAFETY CLAUSE: If the user expresses ANY sudden sadness, fear, self-ha
         if recommended_technique and recommended_technique.get("name"):
             cat = recommended_technique.get("category", "Recommended")
             technique_offered_this_turn = _response_includes_technique(final_response, recommended_technique)
-            result["recommended_technique"] = recommended_technique
-            result["recommended_techniques_by_category"] = {cat: recommended_technique}
-            result["latest_recommended_technique"] = recommended_technique
+            
+            # Extract personalized steps from LLM response and override database steps
+            personalized_steps = _extract_personalized_steps(final_response)
+            if personalized_steps:
+                recommended_technique_with_personalized = recommended_technique.copy()
+                recommended_technique_with_personalized["steps"] = personalized_steps
+                print(f"[NODE:RESPONSE] Using personalized steps ({len(personalized_steps)} steps) instead of DB steps")
+                result["recommended_technique"] = recommended_technique_with_personalized
+                result["recommended_techniques_by_category"] = {cat: recommended_technique_with_personalized}
+                result["latest_recommended_technique"] = recommended_technique_with_personalized
+            else:
+                # Fallback to database steps if extraction fails
+                result["recommended_technique"] = recommended_technique
+                result["recommended_techniques_by_category"] = {cat: recommended_technique}
+                result["latest_recommended_technique"] = recommended_technique
+            
             result["technique_offered_this_turn"] = technique_offered_this_turn
             if technique_offered_this_turn:
                 result["turn_technique_id"] = (
@@ -926,6 +1026,21 @@ EMERGENCY SAFETY CLAUSE: If the user expresses ANY sudden sadness, fear, self-ha
                     or recommended_technique.get("technique_id")
                     or recommended_technique.get("techniqueId")
                 )
+            # Deterministically surface the queued series complement after an
+            # immediate-regulation delivery so it is never silently dropped.
+            _final_with_offer = _maybe_append_complement_offer(
+                result["final_response"],
+                response_task=response_task,
+                pending_complement=state.get("pending_complement_technique"),
+                pending_complement_signal=state.get("pending_complement_signal"),
+                primary_delivered=technique_offered_this_turn,
+            )
+            if _final_with_offer != result["final_response"]:
+                result["final_response"] = _final_with_offer
+                # Flag so the streaming worker can emit the offer as a trailing chunk
+                # (the LLM token stream already finished without it).
+                result["complement_offer_appended"] = True
+                print("[NODE:RESPONSE] Complement offer appended (deterministic series surface)")
         elif latest_recommended_technique:
             result["latest_recommended_technique"] = latest_recommended_technique
             result["technique_offered_this_turn"] = False
@@ -1011,6 +1126,36 @@ def _build_contextual_fallback_response(state: MentalHealthState) -> str:
         return (
             f"That makes sense, {name + ' ' if name else 'that exercise '}didn't fit for you. "
             "What part felt unhelpful: the timing, the steps, or the feeling it brought up?"
+        )
+
+    if response_task == "offer_alternative_technique":
+        return (
+            "I hear you — that approach didn't land the way I hoped. "
+            "Let me try something from a completely different angle that might suit you better."
+        )
+
+    if response_task == "acknowledge_partial_progress":
+        return (
+            "It sounds like something did shift — even a small change matters. "
+            "Would you like to try something complementary to go a bit further, or does this feel like enough for now?"
+        )
+
+    if response_task == "compassionate_close":
+        return (
+            "Not every technique clicks, and that's completely okay — what matters is that you reached out and shared what you're carrying. "
+            "Whenever you'd like to explore more, I'm here."
+        )
+
+    if response_task == "immediate_close":
+        return (
+            "Of course — thank you for sharing with me today. "
+            "Whenever you're ready to pick up where we left off, I'll be right here."
+        )
+
+    if response_task == "reopen_therapeutic_thread":
+        return (
+            "That makes complete sense — it sounds like there's still something sitting with you. "
+            "Tell me what's still feeling heavy and we'll work through it together."
         )
 
     if primary and primary != user_message:
@@ -1139,6 +1284,7 @@ def _build_optimized_system_prompt(
     question_budget: int = 1,
     context_missing_reason: str | None = None,
     has_medical_signal: bool = False,
+    alternative_techniques: list | None = None,
 ) -> str:
     """
     Build the SentiMind system prompt - comprehensive, scenario-aware, edge-case hardened.
@@ -1510,6 +1656,15 @@ STAGE MACHINE:
             "Do not ask another exploratory question unless absolutely necessary. Do not mention a technique."
         )
 
+    _has_complement = bool(alternative_techniques)
+    _complement_suffix = (
+        " After presenting the primary technique steps, add a brief separator (---) and a short "
+        "'Also addressing [remaining signal]:' preview for the complement technique listed second — "
+        "name it, give its duration, and one sentence on what it targets. "
+        "End with: 'Once you've tried the exercise above, we can go deeper into this one.'"
+        if _has_complement else ""
+    )
+
     if explicit_exercise_requested:
         offer_one_technique_rule = (
             "RESPONSE TASK - OFFER ONE TECHNIQUE:\n"
@@ -1517,6 +1672,7 @@ STAGE MACHINE:
             "Use the known formulation to explain why the listed technique fits. Name exactly one listed technique. "
             "Tie the rationale to the user's exact issue, then begin the first small step or invite them to do the first step now. "
             "Do not list multiple options, and do not mention techniques that were not selected."
+            + _complement_suffix
         )
     else:
         offer_one_technique_rule = (
@@ -1524,6 +1680,7 @@ STAGE MACHINE:
             "Use the known formulation to explain why the listed technique fits. Name exactly one listed technique. "
             "Tie the rationale to the user's exact issue (for example bedtime exam rumination, fear of failure, or a specific catastrophic thought). "
             "Ask consent to try it together. Do not list multiple options, and do not mention techniques that were not selected."
+            + _complement_suffix
         )
 
     response_task_rules = {
@@ -1540,16 +1697,81 @@ STAGE MACHINE:
             "Do not ask another exploratory question. If needs_technique=false, end with a supportive next step without naming a technique."
         ),
         "offer_one_technique": offer_one_technique_rule,
+        "offer_complement_technique": (
+            "RESPONSE TASK - OFFER COMPLEMENT TECHNIQUE:\n"
+            "The user completed the first technique and felt better. A second technique is queued targeting "
+            "a different aspect of their emotional state (e.g. sleep, racing thoughts, avoidance).\n"
+            "Follow this exact order:\n"
+            "  1. Celebrate the progress from the first technique in one sentence.\n"
+            "  2. Transition naturally, naming the specific remaining signal the complement addresses.\n"
+            "  3. Introduce the complement technique (second in list) using its exact name.\n"
+            "  4. Explain why it addresses the remaining issue, not the already-resolved one.\n"
+            "  5. Walk through its steps, personalised to the user's context.\n"
+            "  6. Keep the tone light — optional progress. No question at the end.\n"
+        ),
         "continue_active_technique": (
             "RESPONSE TASK - CONTINUE ACTIVE TECHNIQUE:\n"
             "The user accepted the previously offered technique. Continue that same technique. "
             "Acknowledge consent, name only the selected technique, explain why it fits this specific concern, and invite the first step. "
-            "Do not switch to a new one or repeat the offer as if they have not accepted."
+            "Do not switch to a new one or repeat the offer as if they have not accepted. "
+            "After the steps, add ONE gentle check-in inviting them to report how it felt "
+            "(e.g. 'Once you've tried it, let me know how that feels')."
         ),
         "handle_technique_rejection": (
             "RESPONSE TASK - HANDLE REJECTION:\n"
             "Acknowledge that the technique did not fit. Do not defend it or offer a replacement yet. "
             "Ask what felt unhelpful so the next support can adapt."
+        ),
+        "offer_alternative_technique": (
+            "RESPONSE TASK - OFFER ALTERNATIVE TECHNIQUE:\n"
+            "The user tried the previous technique and it didn't help. They just explained why. "
+            "Follow this exact order:\n"
+            "  1. In ONE sentence, briefly acknowledge what they shared about why it didn't work.\n"
+            "  2. Offer ONE completely different technique from a DIFFERENT category than the last one "
+            "     (e.g. if previous was breathing, try grounding, journaling, or body scan).\n"
+            "  3. Name the technique and give a 1–2 sentence description of why this one might fit better.\n"
+            "  4. Keep the total response under 4 sentences. No question at the end."
+        ),
+        "acknowledge_partial_progress": (
+            "RESPONSE TASK - ACKNOWLEDGE PARTIAL PROGRESS:\n"
+            "The user says the technique helped a little but not fully. Follow this exact order:\n"
+            "  1. Warmly acknowledge the partial shift — name it specifically ('It sounds like the breathing "
+            "     helped take the edge off'). Even small progress is meaningful.\n"
+            "  2. Ask ONE gentle question: 'Would you like to try something complementary to go a bit further, "
+            "     or does this feel like enough for now?' — wait for their answer before offering anything.\n"
+            "  3. No new technique this turn. No question beyond the one above."
+        ),
+        "compassionate_close": (
+            "RESPONSE TASK - COMPASSIONATE CLOSE:\n"
+            "The techniques offered this session didn't quite click for the user. Follow this exact order:\n"
+            "  1. Acknowledge warmly and WITHOUT judgment that the techniques didn't fit this time — "
+            "     normalise it: 'Not every approach resonates with everyone, and that's completely okay.'\n"
+            "  2. Affirm what MATTERS: that they reached out and shared what they were going through — "
+            "     that act itself takes courage and is valuable.\n"
+            "  3. Close with a gentle, specific invitation to return: reference their situation "
+            "     (the stressor or emotion they named) so it feels personal, not generic.\n"
+            "  4. NO new technique. NO question. Keep it under 3 sentences total."
+        ),
+        "immediate_close": (
+            "RESPONSE TASK - IMMEDIATE CLOSE (user is leaving):\n"
+            "The user has chosen to end the session on their own terms right now. Respect that immediately.\n"
+            "Follow this exact order:\n"
+            "  1. Acknowledge warmly and briefly that you heard them — 1 short sentence.\n"
+            "  2. End with a personal, specific invitation to return that references what they shared today.\n"
+            "  3. NO question. NO technique. NO summary. NO pushing more help. Under 2 sentences total.\n"
+            "  Example tone: 'Of course — thank you for sharing with me today. "
+            "     Whenever that [specific concern] feels heavy again, I'm right here.'"
+        ),
+        "reopen_therapeutic_thread": (
+            "RESPONSE TASK - REOPEN THERAPEUTIC THREAD:\n"
+            "After a technique, the user is still carrying unresolved distress. Do NOT close. Do NOT offer another technique yet.\n"
+            "Follow this exact order:\n"
+            "  1. Validate the continuing feeling warmly — 1 sentence (e.g. 'That makes complete sense — "
+            "     it sounds like [emotion/concern] is still there.').\n"
+            "  2. Open the space with ONE gentle question: 'What's still sitting heavy?' or "
+            "     'Tell me what's still feeling hard — I'm listening.'\n"
+            "  3. NO technique this turn. NO judgment. Under 3 sentences total.\n"
+            "  This re-enters the therapeutic exploration phase so the user can disclose further."
         ),
         "record_preference": (
             "RESPONSE TASK - RECORD PREFERENCE:\n"
@@ -1579,9 +1801,16 @@ STAGE MACHINE:
         ),
         "start_grounding_now": (
             "RESPONSE TASK - START GROUNDING NOW:\n"
-            "The user is experiencing acute body distress. Validate their feelings in 1 sentence, then IMMEDIATELY introduce "
-            "the breathing or grounding technique inline. Do not ask for permission, do not ask any follow-up question. "
-            "Format the technique clearly inline with its category, duration, and personalized steps."
+            "The user is experiencing acute body distress. Follow this exact order:\n"
+            "  1. Validate their feelings in 1 sentence.\n"
+            "  2. IMMEDIATELY deliver the PRIMARY breathing/grounding technique with full numbered steps — no permission request.\n"
+            "  3. After the technique steps, add ONE gentle check-in question (e.g. 'How are you feeling after trying that?').\n"
+            "  4. If a COMPLEMENT TECHNIQUE is provided in context: after the check-in, add ONE sentence that "
+            "     NAMES the specific remaining issue it would target and ASKS whether they want an exercise for it "
+            "     (e.g. 'Once you feel steadier, would you like an exercise to help quiet the racing thoughts that are "
+            "     keeping you up?'). Always name the concrete issue (racing thoughts / sleep difficulty / the worry "
+            "     spiral) — never a vague 'something'. Phrase it as a clear yes/no question so the user knows exactly "
+            "     what they are accepting. Do NOT deliver the complement's steps now. One sentence only."
         ),
         "ask_one_missing_context_question": (
             "RESPONSE TASK - ASK ONE MISSING CONTEXT QUESTION:\n"
@@ -1598,6 +1827,33 @@ STAGE MACHINE:
             "  3. Do NOT ask a context question this turn (question_budget=0).\n"
             "  4. Offer a brief grounding anchor (one sentence) they can do right now if they feel physically unsafe.\n"
             "Do not rush to gather context while the user may be physically at risk."
+        ),
+        "warm_close_and_invite": (
+            "RESPONSE TASK - WARM CLOSE AND INVITE:\n"
+            "The user has fully resolved their emotional need for this thread. Do NOT ask another question this turn.\n"
+            "Use CLOSURE CONTEXT to personalise your response. Follow this exact order:\n"
+            "  1. Name the specific technique the user completed (from CLOSURE CONTEXT) and briefly acknowledge "
+            "     what shifted — reference their emotion at disclosure vs. how they feel now.\n"
+            "  2. Validate the effort and the shift in one warm sentence.\n"
+            "  3. Craft ONE personalised forward-looking invitation that references the user's specific situation "
+            "     (the stressor they named, an upcoming event they mentioned, a relationship they discussed — "
+            "     visible in CLOSURE CONTEXT and conversation history). Do NOT write a generic 'I'll be here "
+            "     whenever you need me' sentence. Make it specific to THEIR story.\n"
+            "  4. Keep the tone light, warm, and spacious. No new technique. No question. No probing.\n"
+        ),
+        "offer_complement_technique": (
+            "RESPONSE TASK - OFFER COMPLEMENT TECHNIQUE:\n"
+            "The user completed the first technique and felt better. There is a second technique queued that targets "
+            "a different aspect of their emotional state (e.g. sleep difficulty, racing thoughts, avoidance).\n"
+            "Follow this exact order:\n"
+            "  1. Briefly celebrate the progress from the first technique (1 sentence — name what shifted).\n"
+            "  2. Transition naturally: 'Since you're feeling more settled, there's one more thing that could help "
+            "     with [name the specific remaining signal — e.g. the sleep disruption / the worry spiral]...'\n"
+            "  3. Introduce the complement technique listed below using its exact name.\n"
+            "  4. Explain why it addresses THIS specific remaining issue (not the already-resolved one).\n"
+            "  5. Walk through its steps, personalised to the user's context.\n"
+            "  6. Keep the tone light — this is optional progress, not a new burden. No question at the end.\n"
+            "IMPORTANT: Use the SECOND technique from the technique list (the complement), not the first.\n"
         ),
         "give_tiny_first_step": (
             "RESPONSE TASK - GIVE TINY FIRST STEP (action-first principle):\n"
@@ -1763,6 +2019,12 @@ def _build_structured_context(
     question_budget: int = 1,
     context_missing_reason: str | None = None,
     has_medical_signal: bool = False,
+    # complement + closure context (avoids state.get() inside this pure function)
+    alternative_techniques: list | None = None,
+    closure_technique_name: str = "",
+    closure_start_emotion: str = "",
+    closure_current_emotion: str = "",
+    closure_trend: str = "stable",
 ) -> str:
     """
     Build structured context for LLM prompt.
@@ -1770,17 +2032,83 @@ def _build_structured_context(
     """
 
     candidates = _valid_technique_candidates(technique_candidates)
+    _has_complement = bool(alternative_techniques)
     explicit_exercise_requested = (
         current_intent == "technique_request"
         or solution_preference == "exercise_requested"
         or exercise_consent == "allowed"
     )
     technique_info = ""
-    if needs_technique and candidates and response_task in {"offer_one_technique", "ask_permission_before_technique"}:
+    _alt_techniques: list = alternative_techniques or []
+
+    if response_task == "warm_close_and_invite":
+        technique_info = (
+            "CLOSURE CONTEXT (use this to personalise your closing — do NOT skip it):\n"
+            f"- Technique the user completed this session: {closure_technique_name or 'none'}\n"
+            f"- Emotion at disclosure: {closure_start_emotion or 'unknown'}\n"
+            f"- Current emotion: {closure_current_emotion or 'unknown'}\n"
+            f"- Emotional trend: {closure_trend}\n"
+            "Reference the technique by name. Acknowledge the emotional shift. "
+            "Offer a warm forward-looking invite. No question. No new technique."
+        )
+    elif response_task == "offer_complement_technique" and _alt_techniques:
+        # Complement offer: inject the queued alternative as the active technique
+        _alt = _alt_techniques[0]
+        _alt_steps = _alt.get("steps") or []
+        _alt_steps_text = ""
+        if _alt_steps and isinstance(_alt_steps, list):
+            _alt_steps_text = "\n- Steps (personalise each step's wording to fit the user's exact message and emotional context):\n" + "\n".join(
+                f"  {i}. {s}" for i, s in enumerate(_alt_steps, 1)
+            )
         technique_info = f"""
+RECOMMENDED TECHNIQUE (COMPLEMENT — addresses remaining signal after primary technique):
+- Name: {_alt.get('name', 'Unknown')}
+- Category: {_alt.get('category', 'Unknown')}
+- Duration: {_alt.get('duration_minutes', 'N/A')} minutes
+- Difficulty: {_alt.get('difficulty', 'N/A')}
+- Why it works: {_alt.get('why_it_works', _alt.get('whyItWorks', 'N/A'))}{_alt_steps_text}"""
+    elif needs_technique and candidates and response_task in {"offer_one_technique", "ask_permission_before_technique"}:
+        _primary_block = f"""
 TECHNIQUE CANDIDATE SHORTLIST:
 Select exactly one candidate by id. These are safe DB exercises already narrowed by semantic search.
 {_format_technique_candidates(candidates)}"""
+        # Append complement preview block if alternatives exist
+        if _alt_techniques:
+            _alt = _alt_techniques[0]
+            _primary_block += f"""
+
+COMPLEMENT TECHNIQUE (preview only — do NOT deliver steps for this one yet):
+- Name: {_alt.get('name', 'Unknown')}
+- Category: {_alt.get('category', 'Unknown')}
+- Duration: {_alt.get('duration_minutes', 'N/A')} minutes
+- Brief: {_alt.get('brief', _alt.get('description', ''))}
+Use this ONLY for the brief complement preview at the end of your response (after the '---' separator).
+Do NOT walk through its steps now. One sentence description only."""
+        technique_info = _primary_block
+    elif response_task == "start_grounding_now" and needs_technique and technique:
+        # v13.2: Immediate regulation — primary technique with optional complement preview
+        _sc_steps = technique.get("steps") or []
+        _sc_steps_text = ""
+        if _sc_steps and isinstance(_sc_steps, list):
+            _sc_steps_text = "\n- Steps (personalise each step's wording to fit the user's exact message and emotional context):\n" + "\n".join(
+                f"  {i}. {s}" for i, s in enumerate(_sc_steps, 1)
+            )
+        technique_info = f"""
+RECOMMENDED TECHNIQUE (PRIMARY — deliver steps now):
+- Name: {technique.get('name', 'Unknown')}
+- Category: {technique.get('category', 'Unknown')}
+- Duration: {technique.get('duration_minutes', 'N/A')} minutes
+- Why it works: {technique.get('why_it_works', 'N/A')}{_sc_steps_text}"""
+        if _alt_techniques:
+            _alt = _alt_techniques[0]
+            technique_info += f"""
+
+COMPLEMENT TECHNIQUE (preview only — do NOT deliver steps yet):
+- Name: {_alt.get('name', 'Unknown')}
+- Category: {_alt.get('category', 'Unknown')}
+- Brief: {_alt.get('brief', _alt.get('description', ''))}
+After the breathing steps and check-in question, add ONE sentence previewing this complement (e.g. "Once your breathing settles, I also have {_alt.get('name', 'a technique')} ready for the racing thoughts — just let me know when you're ready.").
+Do NOT walk through its steps now."""
     elif needs_technique and technique:
         _sc_steps = technique.get("steps") or []
         _sc_steps_text = ""
@@ -1870,6 +2198,14 @@ RECOMMENDED TECHNIQUE:
             "4. Do not mention any technique"
         )
 
+    _complement_task_suffix = (
+        "\n6. After the primary technique steps, add a '---' separator and a short complement preview:\n"
+        "   - Write '**Also addressing [remaining signal]:**'\n"
+        "   - Name the second listed technique, its duration, and one sentence on what it targets\n"
+        "   - End with: 'Once you've tried the exercise above, we can go deeper into this one.'"
+        if _has_complement else ""
+    )
+
     if explicit_exercise_requested:
         _offer_one_technique_task = (
             "1. Acknowledge that the user asked for something practical\n"
@@ -1878,6 +2214,7 @@ RECOMMENDED TECHNIQUE:
             "4. Explain why it fits this specific thread, such as bedtime rumination, sleep disruption, loneliness, or a scary belief\n"
             "5. Begin the first small step or invite them to start the first step now\n"
             "6. Do not ask permission again and do not mention unselected techniques"
+            + _complement_task_suffix
         )
     else:
         _offer_one_technique_task = (
@@ -1886,6 +2223,7 @@ RECOMMENDED TECHNIQUE:
             "3. Explain why it fits this specific thread, such as bedtime exam rumination or a scary failure belief\n"
             "4. Ask if they would like to try it together\n"
             "5. Do not mention unselected techniques"
+            + _complement_task_suffix
         )
 
     response_task_tasks = {
@@ -1904,17 +2242,53 @@ RECOMMENDED TECHNIQUE:
             "4. If needs_technique is false, end with a supportive next step without naming a technique"
         ),
         "offer_one_technique": _offer_one_technique_task,
+        "offer_complement_technique": (
+            "1. Celebrate the progress from the first technique in one sentence\n"
+            "2. Transition: name the specific remaining signal the complement addresses\n"
+            "3. Introduce the complement technique (second in the list) by its exact name\n"
+            "4. Explain why it fits the remaining issue specifically\n"
+            "5. Walk through its steps personalised to the user's context\n"
+            "6. Keep the tone light — this is optional progress, not a new task. No question."
+        ),
         "continue_active_technique": (
             "1. Acknowledge the user's consent\n"
             "2. Continue the same technique already offered and use only its exact name\n"
             "3. Explain why it fits this specific issue\n"
             "4. Begin the first step\n"
-            "5. Do not recommend a different technique or repeat the offer as if the user has not accepted"
+            "5. After the steps, add ONE gentle check-in inviting them to report how it felt (e.g. 'Let me know how that feels once you've tried it')\n"
+            "6. Do not recommend a different technique or repeat the offer as if the user has not accepted"
         ),
         "handle_technique_rejection": (
             "1. Acknowledge the technique did not fit\n"
             "2. Ask what felt unhelpful\n"
             "3. Do not suggest a replacement yet"
+        ),
+        "offer_alternative_technique": (
+            "1. One sentence: acknowledge what the user said didn't work\n"
+            "2. Offer ONE technique from a DIFFERENT category than the previous one\n"
+            "3. Name it and briefly explain why this one might fit better\n"
+            "4. Under 4 sentences total. No question."
+        ),
+        "acknowledge_partial_progress": (
+            "1. Warmly name the partial shift the user reported (e.g. 'It sounds like X helped a little')\n"
+            "2. Ask ONE question: 'Would you like to try something complementary, or does this feel like enough?'\n"
+            "3. Do NOT offer a technique yet — wait for their answer"
+        ),
+        "compassionate_close": (
+            "1. Acknowledge the techniques didn't fit this time — normalise it warmly, no judgment\n"
+            "2. Affirm the value of what they shared and reaching out\n"
+            "3. Close with a personalised invitation to return — reference their specific situation\n"
+            "4. No new technique. No question. Under 3 sentences."
+        ),
+        "immediate_close": (
+            "1. Acknowledge briefly that the user is leaving — 1 warm sentence\n"
+            "2. Invite them back with a personal reference to what they shared today\n"
+            "3. No question. No technique. No summary. Under 2 sentences."
+        ),
+        "reopen_therapeutic_thread": (
+            "1. Validate the continuing distress — 1 sentence naming what they're still feeling\n"
+            "2. Ask ONE open question: 'What's still sitting heavy?' or 'Tell me what's still hard'\n"
+            "3. No technique this turn. Under 3 sentences."
         ),
         "record_preference": (
             "1. Acknowledge the preference\n"
@@ -1941,9 +2315,16 @@ RECOMMENDED TECHNIQUE:
         ),
         "start_grounding_now": (
             "RESPONSE TASK - START GROUNDING NOW:\n"
-            "Validate their feelings in 1 sentence, then IMMEDIATELY introduce "
-            "the breathing or grounding technique inline. Do not ask for permission, do not ask any follow-up question. "
-            "Format the technique clearly inline with its category, duration, and personalized steps."
+            "The user is experiencing acute body distress. Follow this exact order:\n"
+            "  1. Validate their feelings in 1 sentence.\n"
+            "  2. IMMEDIATELY deliver the PRIMARY breathing/grounding technique with full numbered steps — no permission request.\n"
+            "  3. After the technique steps, add ONE gentle check-in question (e.g. 'How are you feeling after trying that?').\n"
+            "  4. If a COMPLEMENT TECHNIQUE is provided in context: after the check-in, add ONE sentence that "
+            "     NAMES the specific remaining issue it would target and ASKS whether they want an exercise for it "
+            "     (e.g. 'Once you feel steadier, would you like an exercise to help quiet the racing thoughts that are "
+            "     keeping you up?'). Always name the concrete issue (racing thoughts / sleep difficulty / the worry "
+            "     spiral) — never a vague 'something'. Phrase it as a clear yes/no question so the user knows exactly "
+            "     what they are accepting. Do NOT deliver the complement's steps now. One sentence only."
         ),
         "ask_one_missing_context_question": (
             "RESPONSE TASK - ASK ONE MISSING CONTEXT QUESTION:\n"
@@ -1960,6 +2341,33 @@ RECOMMENDED TECHNIQUE:
             "  3. Do NOT ask a context question this turn (question_budget=0).\n"
             "  4. Offer a brief grounding anchor (one sentence) they can do right now if they feel physically unsafe.\n"
             "Do not rush to gather context while the user may be physically at risk."
+        ),
+        "warm_close_and_invite": (
+            "RESPONSE TASK - WARM CLOSE AND INVITE:\n"
+            "The user has fully resolved their emotional need for this thread. Do NOT ask another question this turn.\n"
+            "Use CLOSURE CONTEXT to personalise your response. Follow this exact order:\n"
+            "  1. Name the specific technique the user completed (from CLOSURE CONTEXT) and briefly acknowledge "
+            "     what shifted — reference their emotion at disclosure vs. how they feel now.\n"
+            "  2. Validate the effort and the shift in one warm sentence.\n"
+            "  3. Craft ONE personalised forward-looking invitation that references the user's specific situation "
+            "     (the stressor they named, an upcoming event they mentioned, a relationship they discussed — "
+            "     visible in CLOSURE CONTEXT and conversation history). Do NOT write a generic 'I'll be here "
+            "     whenever you need me' sentence. Make it specific to THEIR story.\n"
+            "  4. Keep the tone light, warm, and spacious. No new technique. No question. No probing.\n"
+        ),
+        "offer_complement_technique": (
+            "RESPONSE TASK - OFFER COMPLEMENT TECHNIQUE:\n"
+            "The user completed the first technique and felt better. There is a second technique queued that targets "
+            "a different aspect of their emotional state (e.g. sleep difficulty, racing thoughts, avoidance).\n"
+            "Follow this exact order:\n"
+            "  1. Briefly celebrate the progress from the first technique (1 sentence — name what shifted).\n"
+            "  2. Transition naturally: 'Since you're feeling more settled, there's one more thing that could help "
+            "     with [name the specific remaining signal — e.g. the sleep disruption / the worry spiral]...'\n"
+            "  3. Introduce the complement technique listed below using its exact name.\n"
+            "  4. Explain why it addresses THIS specific remaining issue (not the already-resolved one).\n"
+            "  5. Walk through its steps, personalised to the user's context.\n"
+            "  6. Keep the tone light — this is optional progress, not a new burden. No question at the end.\n"
+            "IMPORTANT: Use the SECOND technique from the technique list (the complement), not the first.\n"
         ),
         "give_tiny_first_step": (
             "RESPONSE TASK - GIVE TINY FIRST STEP (action-first principle):\n"
@@ -2320,6 +2728,7 @@ EMERGENCY SAFETY CLAUSE: If the user expresses ANY sudden sadness, fear, self-ha
             question_budget=int(state.get("question_budget", 1)),
             context_missing_reason=state.get("context_missing_reason"),
             has_medical_signal=has_medical_warning_signal(user_message) or bool(state.get("has_persistent_medical_signal")),
+            alternative_techniques=state.get("alternative_techniques") or [],
         )
 
         context_text = _build_structured_context(
@@ -2379,6 +2788,11 @@ EMERGENCY SAFETY CLAUSE: If the user expresses ANY sudden sadness, fear, self-ha
             question_budget=int(state.get("question_budget", 1)),
             context_missing_reason=state.get("context_missing_reason"),
             has_medical_signal=has_medical_warning_signal(user_message) or bool(state.get("has_persistent_medical_signal")),
+            alternative_techniques=state.get("alternative_techniques") or [],
+            closure_technique_name=(state.get("recommended_technique") or state.get("latest_recommended_technique") or {}).get("name", ""),
+            closure_start_emotion=state.get("session_start_emotion", state.get("last_detected_emotion", "")),
+            closure_current_emotion=state.get("last_detected_emotion", ""),
+            closure_trend=state.get("emotional_trend", "stable"),
         )
 
         # PREPARE LLM MESSAGES

@@ -2,6 +2,7 @@
 
 import { api, userScopeHeader } from '@/lib/api'
 import {
+    ClinicalAssessmentStats,
     DashboardDataQuality,
     DashboardImprovementAnalysis,
     DashboardLongTermOutcomes,
@@ -16,6 +17,7 @@ import {
     SessionSummary,
     SubEmotionSlice,
     TopTechniqueEntry,
+    VoiceInsights,
 } from '@/types'
 
 const EMOTIONS: EmotionType[] = [
@@ -222,7 +224,40 @@ interface RawDashboardResponse {
         composite_score?: number
         session_outcome_stats?: { positive?: number; neutral?: number; negative?: number; total?: number }
     }
+    clinical?: {
+        has_data?: boolean
+        current_severity?: string
+        current_phq9?: number
+        current_gad7?: number
+        latest_delta?: number | null
+        improving?: boolean
+        trend?: Array<{
+            date?: string | null
+            session_title?: string | null
+            severity?: string
+            start_phq9?: number
+            start_gad7?: number
+            end_phq9?: number
+            end_gad7?: number
+            within_phq9_delta?: number
+            within_gad7_delta?: number
+            delta?: number | null
+            indicators?: string[]
+            confidence?: number
+            log_count?: number
+        }>
+    }
     suggestions?: DashboardSuggestion[]
+    voice_insights?: {
+        voice_used?: boolean
+        total_voice_messages?: number
+        dominant_voice_emotion?: string | null
+        avg_arousal?: number | null
+        avg_valence?: number | null
+        avg_confidence?: number | null
+        avg_acoustic_distress_proxy?: number | null
+        recent_voice_emotions?: { emotion?: string | null; arousal?: number | null; valence?: number | null; date?: string | null }[]
+    }
     data_quality?: {
         mood_logs?: number
         emotion_snapshots?: number
@@ -632,5 +667,54 @@ export async function getUserStats(userId: string): Promise<DashboardStats | nul
         dataQuality: mapDataQuality(d),
         scoreTrajectory: mapScoreTrajectory(d),
         compositeScore: longTerm.compositeScore,
+        voiceInsights: mapVoiceInsights(d),
+        clinicalAssessment: mapClinical(d),
+    }
+}
+
+function mapClinical(d: RawDashboardResponse): ClinicalAssessmentStats | undefined {
+    const c = d.clinical
+    if (!c) return undefined
+    return {
+        hasData: c.has_data ?? false,
+        currentPhq9: Number(c.current_phq9 ?? 0),
+        currentGad7: Number(c.current_gad7 ?? 0),
+        currentSeverity: c.current_severity ?? 'MINIMAL',
+        improving: c.improving ?? false,
+        latestDelta: c.latest_delta ?? null,
+        trend: (c.trend ?? []).map((pt, i) => ({
+            date: pt.date ?? null,
+            sessionTitle: pt.session_title ?? `Session ${i + 1}`,
+            severity: pt.severity ?? 'MINIMAL',
+            startPhq9: Number(pt.start_phq9 ?? 0),
+            startGad7: Number(pt.start_gad7 ?? 0),
+            endPhq9: Number(pt.end_phq9 ?? 0),
+            endGad7: Number(pt.end_gad7 ?? 0),
+            withinPhq9Delta: Number(pt.within_phq9_delta ?? 0),
+            withinGad7Delta: Number(pt.within_gad7_delta ?? 0),
+            delta: pt.delta ?? null,
+            indicators: pt.indicators ?? [],
+            confidence: Number(pt.confidence ?? 0),
+            logCount: Number(pt.log_count ?? 1),
+        })),
+    }
+}
+
+function mapVoiceInsights(d: RawDashboardResponse): VoiceInsights {
+    const v = d.voice_insights
+    return {
+        used: v?.voice_used ?? false,
+        totalVoiceMessages: v?.total_voice_messages ?? 0,
+        dominantEmotion: v?.dominant_voice_emotion ?? null,
+        avgArousal: v?.avg_arousal ?? null,
+        avgValence: v?.avg_valence ?? null,
+        avgConfidence: v?.avg_confidence ?? null,
+        avgAcousticDistressProxy: v?.avg_acoustic_distress_proxy ?? null,
+        recentEmotions: (v?.recent_voice_emotions ?? []).map(e => ({
+            emotion: e.emotion ?? null,
+            arousal: e.arousal ?? null,
+            valence: e.valence ?? null,
+            date: e.date ?? null,
+        })),
     }
 }

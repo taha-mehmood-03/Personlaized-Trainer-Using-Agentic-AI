@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 from langchain_core.messages import HumanMessage
 
-from mental_health_wellness.nodes.emotion_fusion_node import _fusion_metadata
+from mental_health_wellness.pipeline.emotion_fusion_node import _fusion_metadata
 from mental_health_wellness.nodes.optimized_response_generator import (
     _build_optimized_system_prompt,
     _response_includes_technique,

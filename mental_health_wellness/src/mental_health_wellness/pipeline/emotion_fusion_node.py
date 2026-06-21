@@ -128,6 +128,26 @@ _HEDGE_WORDS = [
 ]
 _HEDGE_MULTIPLIER = 0.50
 
+# Emphatic positive claims that contradict a distressed voice
+# ("I'm so happy!" while crying).  Distinct from minimising denial
+# ("I'm fine") — these assert strong positivity, so we need a higher
+# acoustic corroboration signal before overriding.
+_POSITIVE_OVERCLAIM_PHRASES = frozenset({
+    "i'm so happy", "im so happy", "i am so happy",
+    "i'm great", "im great", "i am great",
+    "i'm wonderful", "im wonderful", "i am wonderful",
+    "i'm amazing", "im amazing", "i am amazing",
+    "i'm fantastic", "im fantastic", "i am fantastic",
+    "i'm so good", "im so good", "i am so good",
+    "i'm doing great", "im doing great", "i am doing great",
+    "i'm doing amazing", "im doing amazing",
+    "everything is great", "everything is fine",
+    "everything is perfect", "everything is amazing",
+    "never been better", "couldn't be better",
+    "i'm perfectly fine", "im perfectly fine",
+    "i'm totally fine", "im totally fine",
+})
+
 
 # ============================================
 # HELPERS
@@ -290,38 +310,85 @@ def _apply_acoustic_overrides(
     fused_emotion: str,
     fused_intensity: float,
     voice_features: dict,
+    transcription: str = "",
+    actual_text_emotion: str = "",   # real NLP label; CASE 0 passes this separately
 ) -> tuple:
     """
     Apply psychoacoustic override rules to catch emotion masking.
 
     Rules (in priority order):
-    1. High distress index + neutral text  user is masking distress  sadness
-    2. High arousal + neutral text         suppressed anxiety  anxiety
-    3. High pause density + low intensity  hesitant speech  boost intensity
-    4. No override triggered               return unchanged
+    0. Masking language + elevated DSP distress proxy  crying while saying "I'm fine"  sadness
+       Lower threshold (0.50) because explicit denial language is a strong corroborating signal.
+    1. High effective distress (Gemini OR DSP) + neutral text  user masking distress  sadness
+    2. High arousal + neutral/positive text  suppressed anxiety  anxiety
+    3. High pause density + low intensity  hesitant flat speech  boost intensity
 
     Returns:
         (fused_emotion, fused_intensity, override_applied: bool, override_reason: str)
     """
-    distress_index = float(voice_features.get("distress_index", 0.0))
-    arousal        = float(voice_features.get("arousal", 0.5))
-    pause_density  = float(voice_features.get("pause_density", 0.25))
+    distress_index      = float(voice_features.get("distress_index", 0.0))
+    acoustic_dsp        = float(voice_features.get("acoustic_distress_proxy") or 0.0)
+    arousal             = float(voice_features.get("arousal", 0.5))
+    pause_density       = float(voice_features.get("pause_density", 0.25))
+    # Use the stronger of the two distress signals: Gemini holistic vs real DSP measurement
+    effective_distress  = max(distress_index, acoustic_dsp)
+
+    transcription_lower = str(transcription or "").lower()
+    masking_language = any(
+        phrase in transcription_lower
+        for phrase in ("i'm fine", "im fine", "i am fine", "i'm okay", "im okay", "i am okay",
+                       "i'm good", "im good", "i'm alright", "im alright")
+    )
 
     override_applied = False
     override_reason  = ""
 
-    # Rule 1: High psychoacoustic distress despite neutral text label
-    if distress_index > 0.65 and text_emotion in ("neutral", "joy", "surprise"):
-        print(f"[EMOTION_FUSION]  ACOUSTIC OVERRIDE: distress_index={distress_index:.2f} > 0.65 "
+    # Rule 0: Masking language + physical DSP distress signal
+    # Catches "crying + I'm fine" even when Gemini distress_index alone is below threshold.
+    if masking_language and effective_distress >= 0.50:
+        print(f"[EMOTION_FUSION]  MASKING OVERRIDE (Rule 0): masking_language=True "
+              f"effective_distress={effective_distress:.2f} (dsp={acoustic_dsp:.2f}, gemini={distress_index:.2f})"
+              f"  overriding to 'sadness'")
+        fused_emotion    = "sadness"
+        fused_intensity  = max(fused_intensity, 0.55)
+        override_applied = True
+        override_reason  = f"masking_language+distress={effective_distress:.2f}"
+
+    # Rule 0b: Positive overclaim language + acoustically distressed voice
+    # "I'm so happy / I'm wonderful!" while crying → voice already has sadness,
+    # just set override_applied so possible_masking fires downstream.
+    # Threshold 0.45 (lower than Rule 0's 0.50): emphatic positive claim while
+    # distressed is a stronger contradiction signal than minimising "I'm fine".
+    actual_text_norm = str(actual_text_emotion or "").lower()
+    positive_overclaim = any(p in transcription_lower for p in _POSITIVE_OVERCLAIM_PHRASES)
+    if (
+        not override_applied
+        and actual_text_norm
+        and positive_overclaim
+        and actual_text_norm in ("joy", "surprise")
+        and effective_distress >= 0.45
+    ):
+        print(
+            f"[EMOTION_FUSION]  POSITIVE-OVERCLAIM OVERRIDE (Rule 0b): "
+            f"positive_overclaim=True actual_text={actual_text_norm} "
+            f"effective_distress={effective_distress:.2f}  flagging masking"
+        )
+        fused_intensity  = max(fused_intensity, 0.55)
+        override_applied = True
+        override_reason  = f"positive_overclaim+distress={effective_distress:.2f}"
+
+    # Rule 1: High effective distress despite neutral/positive text label
+    elif effective_distress > 0.65 and text_emotion in ("neutral", "joy", "surprise"):
+        print(f"[EMOTION_FUSION]  ACOUSTIC OVERRIDE (Rule 1): effective_distress={effective_distress:.2f} > 0.65 "
               f"with text={text_emotion}  overriding to 'sadness'")
         fused_emotion    = "sadness"
         fused_intensity  = max(fused_intensity, 0.55)
         override_applied = True
-        override_reason  = f"distress_index={distress_index:.2f}"
+        override_reason  = f"effective_distress={effective_distress:.2f}"
 
     # Rule 2: Elevated arousal despite neutral/positive text  suppressed anxiety
     elif arousal > 0.75 and text_emotion in ("neutral", "joy") and not override_applied:
-        print(f"[EMOTION_FUSION]  ACOUSTIC OVERRIDE: arousal={arousal:.2f} > 0.75 "
+        print(f"[EMOTION_FUSION]  ACOUSTIC OVERRIDE (Rule 2): arousal={arousal:.2f} > 0.75 "
               f"with text={text_emotion}  overriding to 'anxiety'")
         fused_emotion    = "anxiety"
         fused_intensity  = max(fused_intensity, 0.50)
@@ -329,10 +396,10 @@ def _apply_acoustic_overrides(
         override_reason  = f"arousal={arousal:.2f}"
 
     # Rule 3: Hesitant speech (high pause_density) + low intensity  boost intensity
-    # This catches flat, monotone depressive speech
+    # Catches flat, monotone depressive speech
     if pause_density > 0.40 and fused_intensity < 0.40:
         boosted = min(1.0, fused_intensity + 0.15)
-        print(f"[EMOTION_FUSION]  PAUSE BOOST: pause_density={pause_density:.2f} > 0.40 "
+        print(f"[EMOTION_FUSION]  PAUSE BOOST (Rule 3): pause_density={pause_density:.2f} > 0.40 "
               f" intensity: {fused_intensity:.2f}  {boosted:.2f}")
         fused_intensity = round(boosted, 3)
 
@@ -362,8 +429,19 @@ def _fusion_metadata(
         phrase in transcription
         for phrase in ("i'm fine", "im fine", "i am fine", "i'm okay", "im okay", "i am okay", "i'm good", "im good")
     )
+    # Cross-valence opposition: voice positive + text negative (or vice versa).
+    # Signals discordance even when no acoustic threshold rule fires.
+    cross_valence_mismatch = bool(
+        mismatch
+        and voice_norm
+        and (
+            (voice_norm in {"joy", "surprise", "neutral"} and text_norm in {"sadness", "fear", "anxiety", "anger", "disgust"})
+            or (text_norm in {"joy", "surprise"} and voice_norm in {"sadness", "fear", "anxiety", "anger", "disgust"})
+        )
+    )
     possible_masking = bool(
         override_applied
+        or cross_valence_mismatch
         or (
             (masking_language or text_norm in {"neutral", "joy", "surprise"})
             and (distress_index >= 0.55 or fused_norm in {"sadness", "anxiety", "fear"})
@@ -472,16 +550,49 @@ def fuse_emotions(state: MentalHealthState) -> dict:
 
         # Acoustic safety overrides (still apply as clinical safety net)
         fused_emotion, fused_intensity, override_applied, override_reason = _apply_acoustic_overrides(
-            text_emotion=voice_emotion,   # voice IS the text in this path
+            text_emotion=voice_emotion,          # intentional: Rules 1-2 check voice label itself
             fused_emotion=fused_emotion,
             fused_intensity=fused_intensity,
             voice_features=voice_features,
+            transcription=str(state.get("transcription") or ""),
+            actual_text_emotion=text_emotion,    # real NLP label — used by Rule 0b
         )
         if override_applied:
             print(f"[EMOTION_FUSION]  Acoustic override applied: {override_reason}")
             voice_primary_sub = voice_features.get("primary_sub_emotion") or (
                 "hopelessness" if fused_emotion == "sadness"
                 else "panic" if fused_emotion == "anxiety"
+                else voice_primary_sub
+            )
+
+        # TEXT-DISCLOSURE-WINS CHECK (CASE 0 only)
+        # When voice is positive/neutral but text explicitly names a negative state,
+        # trust the deliberate verbal disclosure over the paralinguistic delivery.
+        # Example: laughing voice + "I'm really anxious today" → anxiety wins.
+        # Guard: only fires when NLP is confident and no acoustic rule already ran.
+        _VOICE_POS_NEUTRAL = {"joy", "surprise", "neutral"}
+        _voice_norm_c0 = str(voice_emotion or "").lower()
+        _text_norm_c0  = str(text_emotion  or "").lower()
+        _text_conf_c0  = float(state.get("confidence", 0.5) or 0.5)
+        if (
+            _voice_norm_c0 in _VOICE_POS_NEUTRAL
+            and _text_norm_c0 in _NEGATIVE_EMOTIONS
+            and _text_conf_c0 >= 0.55
+            and not override_applied
+        ):
+            print(
+                f"[EMOTION_FUSION]  TEXT-DISCLOSURE-WINS (CASE 0): "
+                f"voice={_voice_norm_c0} but text discloses {_text_norm_c0} "
+                f"(conf={_text_conf_c0:.0%})  fused={_text_norm_c0}"
+            )
+            fused_emotion    = _text_norm_c0
+            fused_intensity  = max(fused_intensity, 0.55)
+            override_applied = True
+            override_reason  = f"text_disclosure_wins:text={_text_norm_c0},voice={_voice_norm_c0}"
+            voice_primary_sub = (
+                "panic"        if fused_emotion == "anxiety"
+                else "hopelessness" if fused_emotion == "sadness"
+                else "terror"  if fused_emotion == "fear"
                 else voice_primary_sub
             )
 
@@ -533,6 +644,9 @@ def fuse_emotions(state: MentalHealthState) -> dict:
             "fused_intensity":         fused_intensity,
             "voice_processed":         True,
             "voice_features":          voice_features,
+            "voice_emotion":           voice_emotion,
+            "voice_confidence":        voice_confidence,
+            "voice_arousal":           float(voice_features.get("arousal", 0.5)),
             "primary_sub_emotion":     voice_primary_sub,
             "secondary_sub_emotions":  voice_secondary,
             "detected_symptoms":       voice_symptoms,
@@ -693,6 +807,7 @@ def fuse_emotions(state: MentalHealthState) -> dict:
         fused_emotion=fused_emotion,
         fused_intensity=fused_intensity,
         voice_features=voice_features,
+        transcription=str(state.get("transcription") or ""),
     )
     if override_applied:
         print(f"[NODE: EMOTION_FUSION]  Acoustic override applied: {override_reason}")

@@ -136,11 +136,10 @@ async def preprocess_voice_input(state: MentalHealthState) -> dict:
             "voice_transcribed": bool(transcription),
             "voice_processed": voice_processed,
             "voice_features": voice_features,
-            "voice_feature_snapshot": voice_features,
             "transcription_confidence": float(voice_features.get("confidence", 0.0)) if transcription else 0.0,
-            "voice_distress_index": voice_features["distress_index"],
-            "voice_pause_density": voice_features["pause_density"],
-            "voice_mfcc_vector": voice_features["mfcc_vector"],
+            "voice_distress_index": float(voice_features.get("distress_index", 0.0)),
+            "voice_pause_density": float(voice_features.get("pause_density", 0.25)),
+            "voice_mfcc_vector": voice_features.get("mfcc_vector", [0.0] * 13),
             "transcription": transcription,
             "final_message": final_message,
             "temp_audio_path": temp_audio_path,
@@ -193,22 +192,6 @@ def _voice_features_from_full_result(full_result: dict[str, Any]) -> Dict[str, A
         "extraction_method": full_result.get("extraction_method", "gemini_audio"),
     }
 
-
-def extract_voice_features_for_therapeutic_path(state: MentalHealthState) -> dict:
-    """
-    DEPRECATED: Voice feature extraction now happens in preprocess_voice_input().
-    
-    This function is kept for backward compatibility only. It will return a no-op
-    since features are already extracted and available via voice_features in state.
-    """
-    print(
-        "[NODE: VOICE_FEATURE_EXTRACTION]  DEPRECATED  "
-        "Feature extraction now happens in preprocess_voice_input()"
-    )
-    return {
-        "voice_processed": state.get("voice_processed", False),
-        "voice_features": state.get("voice_features"),
-    }
 
 
 def _get_default_voice_features() -> Dict[str, Any]:

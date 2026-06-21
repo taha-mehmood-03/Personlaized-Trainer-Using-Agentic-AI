@@ -3,7 +3,7 @@ import asyncio
 from langchain_core.messages import HumanMessage
 from mental_health_wellness.agent.state import get_initial_state
 from mental_health_wellness.nodes.parallel_intake import run_parallel_intake
-from mental_health_wellness.nodes.emotion_fusion_node import fuse_emotions
+from mental_health_wellness.pipeline.emotion_fusion_node import fuse_emotions
 
 @pytest.mark.asyncio
 async def test_voice_authoritative_flow():
@@ -50,7 +50,7 @@ async def test_voice_authoritative_flow():
 
 @pytest.mark.asyncio
 async def test_prefetched_voice_features_skip_text_mood_and_drive_fusion(monkeypatch):
-    from mental_health_wellness.nodes import context_loader, mood_analyzer_node
+    from mental_health_wellness.pipeline import context_loader, mood_analyzer_node
 
     async def fail_if_text_mood_runs(_state):
         raise AssertionError("text mood analysis should not run when authoritative voice features exist")

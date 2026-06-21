@@ -68,7 +68,7 @@ async def build_full_memory_context(
         # We decide which sections to inject after retrieval, so storage remains
         # complete while prompt context stays non-duplicative.
         facts_task = asyncio.create_task(get_user_facts(user_id))
-        summaries_task = asyncio.create_task(get_session_summaries(user_id))
+        summaries_task = asyncio.create_task(get_session_summaries(user_id, exclude_session_id=session_id or None))
         semantic_task = (
             asyncio.create_task(get_memory_context_for_prompt(
                 user_id,

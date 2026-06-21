@@ -42,12 +42,13 @@ from ..utils.distress_anchor import (
     has_active_therapeutic_thread,
     should_skip_mood_for_anchor_consent,
 )
-from ..utils.turn_signals import is_polite_acknowledgement
+from ..utils.turn_signals import is_polite_acknowledgement, is_bare_affirmation
 
 
 _MOOD_SKIP_ROUTES = {
     "chitchat",
-    "contextual_followup",
+    # v14.0: contextual_followup removed — full mood analysis now runs on follow-up turns
+    # so new symptoms disclosed in follow-ups are detected and merged with prior symptoms.
     "technique_follow_up",
     "memory_query",
     "positive_feedback",
@@ -397,8 +398,8 @@ async def run_parallel_intake(state: MentalHealthState) -> dict:
     All tasks read from the initial state only and write to disjoint keys.
     Returns: merged dict across all nodes' outputs.
     """
-    from ..nodes.context_loader import load_user_context
-    from ..nodes.mood_analyzer_node import analyze_mood
+    from ..pipeline.context_loader import load_user_context
+    from ..pipeline.mood_analyzer_node import analyze_mood
 
     messages = state.get("messages", [])
     current_message = messages[-1].content if messages else ""
@@ -414,7 +415,7 @@ async def run_parallel_intake(state: MentalHealthState) -> dict:
             lines.append(f"{role}: {content}")
         recent_context = "\n".join(lines)
 
-    from ..nodes.voice_preprocessing import preprocess_voice_input
+    from ..pipeline.voice_preprocessing import preprocess_voice_input
 
     # --- Gate-aware skip flags ---
     prefetched = state.get("prefetched_intent") or {}
@@ -448,6 +449,7 @@ async def run_parallel_intake(state: MentalHealthState) -> dict:
         bool(state.get("gate_should_skip_mood_analysis"))
         or gate_route in _MOOD_SKIP_ROUTES
         or should_skip_mood_for_anchor_consent(state, current_message)
+        or is_bare_affirmation(current_message)          # skip "yeah sure", "go for it", "yes please", etc.
         or (fast_gate_skip_mood and gate_source and gate_route != "crisis" and not blocking_mood_llm)
         or has_audio_input
         or has_authoritative_voice_features  # Authoritative voice override: skip text mood when voice data is present
@@ -458,11 +460,12 @@ async def run_parallel_intake(state: MentalHealthState) -> dict:
 
     # v9.2 latency mode: the smart gate is authoritative for crisis routing.
     # Set SENTIMIND_DUPLICATE_CRISIS_CHECK=1 to restore the backup crisis LLM.
+    # v14.0: also skip when gate confidently detected crisis (prevents duplicate WhatsApp alerts)
     duplicate_crisis_check = os.getenv("SENTIMIND_DUPLICATE_CRISIS_CHECK", "0").lower() in {"1", "true", "yes"}
     skip_crisis = (
         not duplicate_crisis_check
         and gate_source
-        and gate_route != "crisis"
+        and gate_confidence >= 0.6    # gate was confident enough — trust it regardless of route
         and "gate_error" not in gate_flags
     )
 
@@ -595,6 +598,14 @@ async def run_parallel_intake(state: MentalHealthState) -> dict:
                     "emotion_reasoning": vf.get("emotion_reasoning", "extracted from voice input"),
                     "voice_processed": True,
                     "voice_features": vf,
+                    # Keep flat voice state fields in sync with the voice_features dict so
+                    # any downstream code reading state["voice_emotion"] directly gets real values.
+                    "voice_emotion": vf.get("emotion", "neutral"),
+                    "voice_arousal": float(vf.get("arousal", 0.5)),
+                    "voice_valence": float(vf.get("valence", 0.5)),
+                    "voice_confidence": float(vf.get("confidence", 0.0)),
+                    # Persist DSP cross-check signal to state so it's visible in API responses.
+                    "acoustic_distress_proxy": vf.get("acoustic_distress_proxy"),
                 }
                 merged.update(calibrated)
                 print(

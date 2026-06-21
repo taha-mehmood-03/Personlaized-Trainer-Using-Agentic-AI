@@ -156,6 +156,9 @@ async def update_structured_session_handoff(state: MentalHealthState) -> dict:
 
         prisma = await get_prisma_client()
         session = await prisma.session.find_unique(where={"id": session_id})
+        if not session:
+            print(f"[NODE: SESSION_HANDOFF] Session {session_id[:20]} not found in DB, skipping")
+            return {"session_handoff_saved": False}
         snapshots = await prisma.emotionsnapshot.find_many(
             where={"sessionId": session_id},
             order={"createdAt": "asc"},
@@ -352,6 +355,7 @@ async def save_session(state: MentalHealthState) -> dict:
                         "voice_arousal": voice_features.get("arousal", 0.5),
                         "voice_valence": voice_features.get("valence", 0.5),
                         "voice_confidence": voice_features.get("confidence", 0.0),
+                        "voice_distress_proxy": voice_features.get("acoustic_distress_proxy"),
                     }
                     print(f"[NODE: SESSION_SAVER]  Including voice data")
                 except Exception as ve:
@@ -527,12 +531,22 @@ async def save_session(state: MentalHealthState) -> dict:
                                 "emotionScores": prisma_json(state.get("emotion_scores") or {}),
                                 "context": _turn_context_note(state),
                                 "retentionUntil": _retention_until(365),
+                                # v14.0: trend + gate fields enable filtered regression + dashboard charts
+                                "emotionalTrend": state.get("emotional_trend"),
+                                "gateRoute": state.get("gate_route"),
                             }
                         )
-                        if session_id and should_update_phase:
+                        if session_id:
+                            _session_data: dict = {
+                                # v14.0: persist per-session trend + recovery arc completion
+                                "emotionalTrend": state.get("emotional_trend"),
+                                "disclosureComplete": bool(state.get("session_disclosure_complete", False)),
+                            }
+                            if should_update_phase:
+                                _session_data["phase"] = db_phase
                             batch.session.update(
                                 where={"id": session_id},
-                                data={"phase": db_phase}
+                                data=_session_data,
                             )
                     
                     print(f"[NODE: SESSION_SAVER]  Batched write complete: mood={db_emotion}, phase={db_phase if should_update_phase else 'skipped'}")
@@ -559,7 +573,7 @@ async def save_session(state: MentalHealthState) -> dict:
                 )
                 should_summarize = background_summary and session_id and msg_count >= 4 and is_meaningful_turn
 
-                if should_summarize:
+                if should_summarize and not state.get("anonymous_mode", False):
                     try:
                         import asyncio
                         from ..memory.session_summarizer import summarize_session
@@ -568,13 +582,28 @@ async def save_session(state: MentalHealthState) -> dict:
                         technique_name = technique.get("name", "") if technique else ""
                         tech_list = [technique_name] if technique_name else []
 
+                        _sum_trend = state.get("emotional_trend", "")
+                        _sum_task = state.get("response_task", "")
+                        _sum_phase = state.get("conversation_phase", "")
+                        if (
+                            _sum_trend == "improving"
+                            or _sum_task in ("warm_close_and_invite", "positive_feedback")
+                            or _sum_phase == "recovery"
+                            or state.get("session_disclosure_complete", False)
+                        ):
+                            _sum_outcome = "helped"
+                        elif _sum_task == "handle_technique_rejection":
+                            _sum_outcome = "no_change"
+                        else:
+                            _sum_outcome = "neutral"
+
                         asyncio.create_task(summarize_session(
                             user_id=user_id,
                             session_id=session_id,
                             messages=messages,
                             emotion=persisted_emotion,
                             techniques=tech_list,
-                            outcome="neutral"
+                            outcome=_sum_outcome
                         ))
                         print(f"[NODE: SESSION_SAVER]  LLM session summary scheduled (msg #{msg_count})")
                     except Exception as sum_err:
@@ -587,31 +616,64 @@ async def save_session(state: MentalHealthState) -> dict:
                 # Only writes when severity > minimal (avoids noise)
                 # ============================================
                 clinical_severity = state.get("clinical_severity", "minimal")
-                if clinical_severity and clinical_severity != "minimal" and session_id:
-                    try:
-                        # Map severity string to Prisma ClinicalSeverity enum
-                        _SEVERITY_MAP = {
-                            "mild": "MILD",
-                            "moderate": "MODERATE",
-                            "moderately_severe": "MODERATELY_SEVERE",
-                            "severe": "SEVERE",
-                        }
-                        db_severity = _SEVERITY_MAP.get(clinical_severity, "MILD")
+                _SEVERITY_MAP = {
+                    "mild": "MILD",
+                    "moderate": "MODERATE",
+                    "moderately_severe": "MODERATELY_SEVERE",
+                    "severe": "SEVERE",
+                }
+                # positive_feedback stays here so _should_write_closing can fire on
+                # those turns (bypass route positive_feedback turns need a closing
+                # clinical snapshot). It is removed from analysis_and_planning's copy
+                # so the clinical cache still gets refreshed for those turns.
+                _CLINICAL_SKIP_ROUTES = {"chitchat", "positive_feedback", "memory_query", "technique_follow_up"}
+                _current_gate_route = state.get("gate_route", "therapeutic")
+                _skipped_this_turn = _current_gate_route in _CLINICAL_SKIP_ROUTES
 
+                # Write a clinical log when severity > minimal on normal turns.
+                # Also write on skip-route turns (positive_feedback/technique_follow_up)
+                # when a session baseline exists — this captures the "After Therapy" score
+                # even when the user sends a short follow-up message after completing an exercise.
+                _raw_phq9 = state.get("clinical_raw_phq9") or state.get("clinical_phq9_score", 0)
+                _raw_gad7 = state.get("clinical_raw_gad7") or state.get("clinical_gad7_score", 0)
+                _start_score = state.get("session_start_clinical_score")
+
+                _should_write_normal = (
+                    clinical_severity and clinical_severity != "minimal"
+                    and not _skipped_this_turn
+                    and session_id
+                )
+                # Write closing snapshot on skip-route turns IF we already have a session
+                # baseline (meaning a "Before Therapy" log was written earlier this session)
+                # and we have real clinical scores in state.
+                _should_write_closing = (
+                    _skipped_this_turn
+                    and session_id
+                    and _start_score is not None
+                    and _raw_phq9 > 0
+                    and not _should_write_normal  # avoid double write
+                )
+
+                if (_should_write_normal or _should_write_closing) and session_id:
+                    try:
+                        db_severity = _SEVERITY_MAP.get(clinical_severity, "MILD") if clinical_severity and clinical_severity != "minimal" else "MILD"
+                        # Within-session delta: raw current score vs session-start baseline
+                        _within_delta = round(_raw_phq9 - _start_score, 1) if _start_score is not None else state.get("clinical_delta")
                         await prisma.clinicalassessmentlog.create(data={
                             "sessionId": session_id,
                             "userId": user_id,
                             "severity": db_severity,
-                            "phq9Score": state.get("clinical_phq9_score", 0),
-                            "gad7Score": state.get("clinical_gad7_score", 0),
+                            "phq9Score": _raw_phq9,
+                            "gad7Score": _raw_gad7,
                             "indicators": state.get("clinical_indicators", []),
                             "confidence": state.get("clinical_confidence", 0.0),
-                            "justification": None,  # reasoning stored in state, not duplicated here
+                            "clinicalDelta": _within_delta,
+                            "justification": None,
                             "retentionUntil": _retention_until(2555),
                         })
-                        print(f"[NODE: SESSION_SAVER] 🏥 Clinical log saved: {db_severity} "
-                              f"(PHQ-9={state.get('clinical_phq9_score', 0)}, "
-                              f"GAD-7={state.get('clinical_gad7_score', 0)})")
+                        _log_kind = "closing snapshot" if _should_write_closing else db_severity
+                        print(f"[NODE: SESSION_SAVER] 🏥 Clinical log saved: {_log_kind} "
+                              f"(PHQ-9={_raw_phq9}, GAD-7={_raw_gad7}, delta={_within_delta})")
                     except Exception as clin_err:
                         print(f"[NODE: SESSION_SAVER]  Clinical log write failed: {str(clin_err)[:100]}")
                         save_errors.append(f"Clinical log: {str(clin_err)[:100]}")
@@ -683,6 +745,16 @@ async def save_session(state: MentalHealthState) -> dict:
             }
             print(f"[NODE: SESSION_SAVER] Session baseline captured: "
                   f"{session_start_emotion} ({session_start_intensity:.0%})  will be used by OUTCOME_TRACKER")
+
+        # Capture clinical baseline on the FIRST turn where real clinical data arrives.
+        # Use raw per-turn scores (not aggregated max) so baseline matches the actual DB log.
+        if state.get("session_start_clinical_score") is None:
+            _first_phq = state.get("clinical_raw_phq9") or state.get("clinical_phq9_score", 0)
+            _first_gad7 = state.get("clinical_raw_gad7") or state.get("clinical_gad7_score", 0)
+            if _first_phq and _first_phq > 0:
+                session_start_updates["session_start_clinical_score"] = float(_first_phq)
+                session_start_updates["session_start_gad7_score"] = float(_first_gad7)
+                print(f"[NODE: SESSION_SAVER] Clinical baseline captured: PHQ-9={_first_phq}, GAD-7={_first_gad7}")
 
         # ============================================
         # FIX 4: CAPTURE TECHNIQUE-DELIVERY MOMENT SNAPSHOT

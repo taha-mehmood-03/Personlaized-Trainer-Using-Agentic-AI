@@ -30,10 +30,10 @@ AFTER (parallel ~120ms):
 import asyncio
 import os
 from ..agent.state import MentalHealthState
-from .psych_profile_updater import update_psych_profile
-from .session_saver import save_session, update_structured_session_handoff
-from .outcome_tracker_node import track_outcome
-from .long_term_analytics_node import update_long_term_analytics
+from ..pipeline.psych_profile_updater import update_psych_profile
+from ..pipeline.session_saver import save_session, update_structured_session_handoff
+from ..pipeline.outcome_tracker_node import track_outcome
+from ..pipeline.long_term_analytics_node import update_long_term_analytics
 
 
 async def _update_profile_with_background_distortion(state: MentalHealthState) -> dict:
@@ -50,7 +50,7 @@ async def _update_profile_with_background_distortion(state: MentalHealthState) -
         return await update_psych_profile(state)
 
     try:
-        from .cognitive_distortion_node import detect_cognitive_distortions
+        from ..pipeline.cognitive_distortion_node import detect_cognitive_distortions
 
         distortion_result = await detect_cognitive_distortions(state)
         enriched_state = {**state, **(distortion_result or {})}

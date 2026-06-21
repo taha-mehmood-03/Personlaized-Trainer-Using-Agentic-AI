@@ -1,6 +1,7 @@
 // ─── Shared Domain Types ────────────────────────────────────────────────────
 
 export interface Message {
+    id?: string
     role: 'user' | 'assistant'
     content: string
     emotion?: string
@@ -23,6 +24,7 @@ export interface Message {
     sentiment?: string
     timestamp?: string
     technique?: Technique | null
+    techniqueOfferedThisTurn?: boolean
     voiceEmotion?: string
     voiceConfidence?: number
     crisis_detected?: boolean
@@ -271,6 +273,47 @@ export interface DashboardDataQuality {
     warnings: string[]
 }
 
+export interface VoiceInsights {
+    used: boolean
+    totalVoiceMessages: number
+    dominantEmotion: string | null
+    avgArousal: number | null
+    avgValence: number | null
+    avgConfidence: number | null
+    avgAcousticDistressProxy: number | null
+    recentEmotions: { emotion: string | null; arousal: number | null; valence: number | null; date: string | null }[]
+}
+
+export interface ClinicalAssessmentTrendPoint {
+    date: string | null
+    sessionTitle: string
+    severity: string
+    // Before therapy (first log in session)
+    startPhq9: number
+    startGad7: number
+    // After therapy / session closing (last log in session)
+    endPhq9: number
+    endGad7: number
+    // Within-session deltas (negative = improved during session)
+    withinPhq9Delta: number
+    withinGad7Delta: number
+    // Cross-session delta vs first-ever session baseline
+    delta: number | null
+    indicators: string[]
+    confidence: number
+    logCount: number
+}
+
+export interface ClinicalAssessmentStats {
+    hasData: boolean
+    currentPhq9: number
+    currentGad7: number
+    currentSeverity: string
+    improving: boolean
+    latestDelta: number | null
+    trend: ClinicalAssessmentTrendPoint[]
+}
+
 export interface DashboardStats {
     generatedAt?: string | null
     windowDays: number
@@ -301,6 +344,8 @@ export interface DashboardStats {
     scoreTrajectory: SessionScorePoint[]
     /** 0.0–1.0 weighted composite wellness score (same as longTermOutcomes.compositeScore) */
     compositeScore: number
+    voiceInsights: VoiceInsights
+    clinicalAssessment?: ClinicalAssessmentStats
 }
 
 // ─── Onboarding ─────────────────────────────────────────────────────────────

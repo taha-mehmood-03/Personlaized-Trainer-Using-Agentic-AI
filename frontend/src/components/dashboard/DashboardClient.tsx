@@ -21,6 +21,8 @@ import { TechniqueOutcomeChart } from '@/components/dashboard/TechniqueOutcomeCh
 import { SuggestionPanel } from '@/components/dashboard/SuggestionPanel'
 import { ImprovementAnalysisPanel } from '@/components/dashboard/ImprovementAnalysisPanel'
 import { SignalBreakdown } from '@/components/dashboard/SignalBreakdown'
+import { VoiceInsightsCard } from '@/components/dashboard/VoiceInsightsCard'
+import { ClinicalValidityCard } from '@/components/dashboard/ClinicalValidityCard'
 import { DashboardStats } from '@/types'
 
 const skeletons = Array.from({ length: 5 })
@@ -176,6 +178,11 @@ export function DashboardClient({ initialStats }: DashboardClientProps) {
                         />
                     </section>
 
+                    {/* ── Clinical Tool Validity (GAD-7 / PHQ-9) ───────────────────── */}
+                    {stats.clinicalAssessment?.hasData && (
+                        <ClinicalValidityCard assessment={stats.clinicalAssessment} />
+                    )}
+
                     <section id="outcomes" className="content-auto grid grid-cols-1 gap-4 xl:grid-cols-3">
                         <div className="xl:col-span-2">
                             <MoodChart data={stats.moodTimeline} />
@@ -187,6 +194,10 @@ export function DashboardClient({ initialStats }: DashboardClientProps) {
                         <ImprovementAnalysisPanel
                             analysis={stats.longTermOutcomes.improvementAnalysis}
                         />
+                    </div>
+
+                    <div className="content-auto">
+                        <VoiceInsightsCard insights={stats.voiceInsights} />
                     </div>
 
                     <div className="content-auto">

@@ -319,6 +319,36 @@ def is_no_thanks(text: str) -> bool:
     return clean in {"no thanks", "no thank you", "nah thanks", "no thx", "no ty"}
 
 
+_EXIT_PHRASES = {
+    "bye", "goodbye", "good bye", "see you", "see ya", "see you later", "see ya later",
+    "talk later", "talk to you later", "ttyl", "catch you later", "catch ya later",
+    "i have to go", "i gotta go", "gotta go", "gotta run", "have to run", "i have to run",
+    "need to go", "i need to go", "need to leave", "i need to leave",
+    "have to leave", "i have to leave", "i am leaving", "im leaving", "i'm leaving",
+    "i need to stop", "need to stop", "i need to stop here", "stopping here",
+    "done for today", "i am done for today", "im done for today", "i'm done for today",
+    "done for now", "i am done for now", "im done for now", "i'm done for now",
+    "i am done", "im done", "i'm done",
+    "signing off", "logging off",
+    "i'll try later", "ill try later", "try again later", "i will try later",
+    "i'll come back", "ill come back", "come back later",
+    "thanks for today", "thank you for today",
+    "i have to go now", "i need to go now", "gotta go now",
+}
+
+
+def is_session_exit(text: str) -> bool:
+    """True when the user explicitly signals they are ending the session now."""
+    clean = plain_text(text)
+    if not clean:
+        return False
+    if clean in _EXIT_PHRASES:
+        return True
+    if is_short_turn(text, 8):
+        return any(phrase in clean for phrase in _EXIT_PHRASES)
+    return False
+
+
 def is_polite_acknowledgement(text: str) -> bool:
     """True for short acknowledgement/gratitude without outcome feedback."""
     if has_positive_outcome_signal(text) or has_negative_feedback_signal(text):
@@ -335,6 +365,11 @@ def assistant_offered_technique(text: str, expected_answer_type: str | None = No
         return True
     lower = normalize_text(text)
     if not lower:
+        return False
+    # If the assistant already delivered steps inline, any offer language ("would you
+    # like to try?") is rhetorical — not a consent gate awaiting a delivery decision.
+    # "yes" after inline delivery means "I'll do it", not "please send the technique".
+    if assistant_likely_gave_steps(text):
         return False
     offer_markers = (
         "would you like me to share",
@@ -399,6 +434,7 @@ _BODY_DISTRESS_SIGNALS = (
     "heart beating fast", "heart racing", "heart pounding", "heart hammering",
     "hands shaking", "body shaking", "trembling", "shaking",
     "panic", "panicking", "having a panic",
+    "pnic", "pnic attack", "panik", "panick", "pannick",  # typo variants
     "dizzy", "dizziness", "faint", "fainting", "lightheaded",
     "something bad is going to happen", "feel like i'm dying", "feel like im dying",
     "help me calm", "calm me down", "calm my body", "calm my breathing",

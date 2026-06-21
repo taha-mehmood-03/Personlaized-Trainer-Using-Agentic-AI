@@ -92,14 +92,35 @@ async def ensure_pgvector_schema() -> None:
         ON {TABLE_NAME} ("sessionId")
         """
     )
-    await _execute(
-        f"""
-        CREATE INDEX IF NOT EXISTS "SemanticEmbedding_embedding_idx"
-        ON {TABLE_NAME}
-        USING ivfflat (embedding vector_cosine_ops)
-        WITH (lists = 100)
-        """
-    )
+    # Try HNSW first (pgvector ≥0.5, no minimum-row requirement).
+    # Fall back to IVFFlat (requires ≥3900 rows to train — fails on empty tables).
+    # If both fail, skip the ANN index: cosine search falls back to sequential scan,
+    # which is fine for small tables and still returns correct results.
+    try:
+        await _execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS "SemanticEmbedding_embedding_idx"
+            ON {TABLE_NAME}
+            USING hnsw (embedding vector_cosine_ops)
+            """
+        )
+        logger.info("pgvector | ANN index: HNSW created")
+    except Exception:
+        try:
+            await _execute(
+                f"""
+                CREATE INDEX IF NOT EXISTS "SemanticEmbedding_embedding_idx"
+                ON {TABLE_NAME}
+                USING ivfflat (embedding vector_cosine_ops)
+                WITH (lists = 100)
+                """
+            )
+            logger.info("pgvector | ANN index: IVFFlat created")
+        except Exception as idx_err:
+            logger.warning(
+                "pgvector | ANN index creation skipped (sequential scan will be used): %s",
+                str(idx_err)[:120],
+            )
     _initialized = True
 
 
@@ -241,13 +262,19 @@ async def rank_source_ids(
     source_type: str,
     source_ids: list[str],
     limit: int = 10,
+    user_id: str | None = None,
 ) -> dict[str, float]:
-    """Return semantic similarity scores for a constrained set of source ids."""
+    """Return semantic similarity scores for a constrained set of source ids.
+
+    Pass user_id to scope results to a specific user (required for message/fact
+    embeddings). Leave as None for global source types like techniques.
+    """
     rows = await search_embeddings(
         query=query,
         source_types=[source_type],
         source_ids=source_ids,
         limit=limit,
+        user_id=user_id,
     )
     return {
         str(row.get("sourceId")): float(row.get("similarity") or 0.0)

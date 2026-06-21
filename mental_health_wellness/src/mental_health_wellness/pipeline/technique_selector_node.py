@@ -43,6 +43,84 @@ def _clean_context_value(value) -> str:
     return " ".join(text.split())[:240]
 
 
+# Human-readable phrases for the remaining signal a complement technique targets.
+# Used to build pending_complement_signal so the agent can name the concrete issue
+# ("an exercise for the racing thoughts") instead of a vague "something else".
+_COMPLEMENT_SIGNAL_PHRASES = {
+    "rumination": "the looping thoughts",
+    "racing_thoughts": "the racing thoughts",
+    "obsessive_thoughts": "the intrusive thoughts",
+    "worry": "the worry",
+    "catastrophizing": "the worst-case thinking",
+    "fear_of_failure": "the fear of failing",
+    "feeling_disrespected": "the feeling of being disrespected",
+    "anger": "the anger that's still sitting with you",
+    "resentment": "the resentment",
+    "shame": "the shame",
+    "guilt": "the guilt",
+    "self_criticism": "the harsh self-talk",
+    "self_blame": "the self-blame",
+    "hopelessness": "the hopelessness",
+    "low_mood": "the low mood",
+    "loneliness": "the loneliness",
+    "avoidance": "the avoidance",
+    "procrastination": "the procrastination",
+}
+
+# Context tags → phrase, checked before sub-emotions when present.
+_COMPLEMENT_CONTEXT_PHRASES = {
+    "teacher_conflict": "the situation with your teacher",
+    "school_conflict": "what happened at school",
+    "family_conflict": "the conflict at home",
+    "relationship_conflict": "the relationship strain",
+    "work_stress": "the pressure at work",
+    "social_humiliation": "feeling humiliated",
+    "bedtime_rumination": "the night-time overthinking",
+    "sleep_difficulty": "the trouble sleeping",
+    "nighttime_worry": "the night-time worry",
+}
+
+
+def _describe_complement_signal(complement: dict, state: MentalHealthState) -> str:
+    """
+    Build a concrete, human-readable description of the remaining concern the
+    complement technique addresses (different from the acute signal the primary
+    just handled). Prefers a triggering context, then the complement's own target
+    sub-emotions, then the user's secondary emotions, then the category.
+    """
+    contexts = [str(c).lower() for c in (state.get("detected_contexts") or []) if c]
+    for ctx in contexts:
+        if ctx in _COMPLEMENT_CONTEXT_PHRASES:
+            return _COMPLEMENT_CONTEXT_PHRASES[ctx]
+
+    # The complement's own target sub-emotions (DB metadata) describe what it treats.
+    comp_targets = [
+        str(s).lower()
+        for s in (complement.get("matched_sub_emotions")
+                  or complement.get("targetSubEmotions")
+                  or complement.get("target_sub_emotions")
+                  or [])
+        if s
+    ]
+    secondary = [str(s).lower() for s in (state.get("secondary_sub_emotions") or []) if s]
+    primary_sub = str(state.get("primary_sub_emotion") or "").lower()
+    behaviors = [str(b).lower() for b in (state.get("detected_behaviors") or []) if b]
+
+    for signal in (*comp_targets, primary_sub, *secondary, *behaviors):
+        if signal in _COMPLEMENT_SIGNAL_PHRASES:
+            return _COMPLEMENT_SIGNAL_PHRASES[signal]
+
+    # Category-based fallback.
+    category = str(complement.get("category") or "").lower()
+    if category in {"cbt", "journaling"}:
+        return "the thoughts that are still weighing on you"
+    if category == "behavioral activation":
+        return "getting some momentum back"
+    if category == "dbt":
+        return "the intensity of the emotion underneath"
+    return "what's still sitting with you"
+
+
 def _build_technique_need_query(
     *,
     user_message: str,
@@ -215,6 +293,33 @@ async def select_technique(state: MentalHealthState) -> dict:
         response_task = state.get("response_task", "")
         is_permission_recheck = (response_task == "ask_permission_before_technique")
 
+        # ============================================
+        # SERIES COMPLEMENT PROMOTION
+        # The planner routed to offer_complement_technique because a complement was
+        # queued and the user accepted it. Promote the queued technique directly —
+        # no fresh re-selection — so the SAME exercise that was offered gets delivered
+        # (was previously replaced by an unrelated fresh pick).
+        # ============================================
+        if response_task == "offer_complement_technique":
+            _comp = state.get("pending_complement_technique") or (
+                (state.get("alternative_techniques") or [None])[0]
+            )
+            if _comp and isinstance(_comp, dict) and _comp.get("name"):
+                cat_name = _comp.get("category", "Recommended")
+                print(f"[ACCEPT_COMPLEMENT] Promoting queued complement: {_comp['name']}")
+                return {
+                    "recommended_technique": _comp,
+                    "recommended_techniques_by_category": {cat_name: _comp},
+                    "alternative_techniques": [_comp],
+                    "latest_recommended_technique": _comp,
+                    "technique_series": [_comp],
+                    "technique_plan_mode": "single",
+                    # Consumed — clear so it isn't re-offered next turn.
+                    "pending_complement_technique": None,
+                    "pending_complement_signal": None,
+                    **_selection_fields(),
+                }
+
         # v12.0: PRE-SELECT on permission turn.
         # Run full selection now so the right technique is locked in state.
         # We store it in pending_recommended_technique and return _empty (no
@@ -222,10 +327,51 @@ async def select_technique(state: MentalHealthState) -> dict:
         if is_permission_recheck:
             pending_already = state.get("pending_recommended_technique")
             if pending_already and isinstance(pending_already, dict) and pending_already.get("name"):
-                print(
-                    f"[TECHNIQUE_PENDING] Already stored '{pending_already['name']}' - skipping re-select"
-                )
-                return _empty
+                # Tier 1: gate flags (fast path)
+                _gate_flags_sel = list(state.get("gate_context_flags") or [])
+                _has_new_context = any(f in _gate_flags_sel for f in {
+                    "context_detail_answer",
+                    "rich_context_answer",
+                    "new_emotional_disclosure",
+                })
+                if _has_new_context:
+                    print(
+                        f"[TECHNIQUE_PENDING] New context flags {[f for f in _gate_flags_sel if f in {'context_detail_answer','rich_context_answer','new_emotional_disclosure'}]} "
+                        f"— re-selecting despite pending '{pending_already['name']}'"
+                    )
+                else:
+                    # Tier 2: deep clinical signal diff (emotion, sub-emotions, symptoms, behaviors)
+                    _snap = state.get("pending_technique_context_snapshot") or {}
+                    _cur_symptoms  = set(state.get("detected_symptoms") or [])
+                    _snap_symptoms = set(_snap.get("detected_symptoms") or [])
+                    _cur_sub  = {state.get("primary_sub_emotion", "")} | set(state.get("secondary_sub_emotions") or [])
+                    _snap_sub = {_snap.get("primary_sub_emotion", "")} | set(_snap.get("secondary_sub_emotions") or [])
+                    _cur_beh  = set(state.get("detected_behaviors") or [])
+                    _snap_beh = set(_snap.get("detected_behaviors") or [])
+                    _cur_emo  = state.get("fused_emotion") or state.get("emotion", "")
+                    _snap_emo = _snap.get("emotion", "")
+
+                    _new_symptoms  = _cur_symptoms - _snap_symptoms
+                    _new_sub       = _cur_sub - _snap_sub - {"", None}
+                    _new_behaviors = _cur_beh - _snap_beh
+                    _emotion_shift = (_cur_emo != _snap_emo) and bool(_cur_emo) and bool(_snap_emo)
+
+                    if _new_symptoms or _new_sub or _new_behaviors or _emotion_shift:
+                        _changes: list[str] = []
+                        if _new_symptoms:  _changes.append(f"symptoms={_new_symptoms}")
+                        if _new_sub:       _changes.append(f"sub_emotions={_new_sub}")
+                        if _new_behaviors: _changes.append(f"behaviors={_new_behaviors}")
+                        if _emotion_shift: _changes.append(f"emotion={_snap_emo}→{_cur_emo}")
+                        print(
+                            f"[TECHNIQUE_PENDING] Clinical signals changed {_changes} "
+                            f"— re-selecting despite pending '{pending_already['name']}'"
+                        )
+                        _has_new_context = True
+                    else:
+                        print(
+                            f"[TECHNIQUE_PENDING] Already stored '{pending_already['name']}' - no new context, skipping re-select"
+                        )
+                        return _empty
             # Fall through to the full selection logic below, but remember to
             # stash the result instead of returning it directly.
             # We set a flag so the post-selection code knows to reroute.
@@ -237,11 +383,23 @@ async def select_technique(state: MentalHealthState) -> dict:
             exercise_consent in {"denied_hard", "denied_soft"}
             or solution_preference == "listen_only"
         ):
-            print(
-                f"[TECHNIQUE] CONSENT GATE BLOCKED - "
-                f"exercise_consent={exercise_consent}, solution_preference={solution_preference}, response_task={response_task}"
+            # v14.0: acute physical distress overrides prior consent denial — the user
+            # needs grounding now even if they previously declined exercises.
+            _imm_reg_override = (
+                state.get("immediate_regulation_request")
+                or response_task == "start_grounding_now"
             )
-            return _empty
+            if _imm_reg_override:
+                print(
+                    f"[TECHNIQUE] CONSENT GATE OVERRIDDEN for immediate regulation "
+                    f"(exercise_consent={exercise_consent}) — acute distress takes priority"
+                )
+            else:
+                print(
+                    f"[TECHNIQUE] CONSENT GATE BLOCKED - "
+                    f"exercise_consent={exercise_consent}, solution_preference={solution_preference}, response_task={response_task}"
+                )
+                return _empty
 
         if not needs_technique:
             print(f"[TECHNIQUE] Skipping (needs_technique=false, stage={stage}, intent={intent})")
@@ -330,6 +488,7 @@ async def select_technique(state: MentalHealthState) -> dict:
                     "pending_recommended_technique": None,
                     "pending_technique_reason": None,
                     "pending_technique_created_at_turn": None,
+                    "pending_technique_context_snapshot": None,
                     **_selection_fields(),
                 }
 
@@ -507,15 +666,20 @@ async def select_technique(state: MentalHealthState) -> dict:
         }
 
         if immediate_regulation_request or response_task == "start_grounding_now":
-            reg_filtered = [
-                t for t in filtered
-                if (t.get("category") or "").lower() in ("breathing", "grounding")
-            ]
-            if reg_filtered:
-                filtered = reg_filtered
-                print(f"[TECHNIQUE] v13.0: Filtered shortlist to breathing/grounding only (immediate regulation/grounding task)")
+            # v13.2: Series-aware filter — when planner set technique_plan_mode="series" (multi-domain symptoms),
+            # keep breathing as primary AND include best cognitive/CBT technique as complement.
+            _imm_series = str(state.get("technique_plan_mode") or "single").lower() == "series"
+            physical_techs = [t for t in filtered if (t.get("category") or "").lower() in ("breathing", "grounding")]
+            cognitive_techs = [t for t in filtered if (t.get("category") or "").lower() not in ("breathing", "grounding")]
+
+            if _imm_series and physical_techs and cognitive_techs:
+                filtered = physical_techs[:1] + cognitive_techs[:1]
+                print("[TECHNIQUE] v13.2: Immediate regulation SERIES — breathing/grounding + cognitive complement")
+            elif physical_techs:
+                filtered = physical_techs
+                print("[TECHNIQUE] v13.0: Filtered shortlist to breathing/grounding only (single immediate regulation)")
             else:
-                print("[TECHNIQUE] v13.0: No breathing/grounding in shortlist, prioritizing them at top")
+                print("[TECHNIQUE] v13.0: No breathing/grounding in shortlist, prioritizing at top")
                 filtered = sorted(
                     filtered,
                     key=lambda x: 0 if (x.get("category") or "").lower() in ("breathing", "grounding") else 1
@@ -557,8 +721,42 @@ async def select_technique(state: MentalHealthState) -> dict:
             for area in (state.get("technique_area") or [])
             if str(area or "").strip()
         ][:4]
-        series_allowed = technique_plan_mode == "series"
-        alternatives = technique_candidates[1:3] if series_allowed else []
+        series_allowed = (
+            technique_plan_mode == "series"
+            or bool(state.get("series_requested"))
+        )
+        raw_alternatives = technique_candidates[1:3] if series_allowed else []
+
+        # Diversity enforcement: prefer a complement that targets a DIFFERENT primary signal
+        # so the two techniques address distinct aspects of the user's emotional state.
+        if raw_alternatives and series_allowed:
+            primary_top_sub = str(primary.get("matched_sub_emotions", [None])[0]
+                                  if primary.get("matched_sub_emotions")
+                                  else (primary.get("targetSubEmotions") or [None])[0] or "").lower()
+            diverse_alt = next(
+                (
+                    t for t in raw_alternatives
+                    if str(
+                        (t.get("matched_sub_emotions") or t.get("targetSubEmotions") or [None])[0] or ""
+                    ).lower() != primary_top_sub
+                ),
+                raw_alternatives[0],  # fallback to highest-scored if no diversity found
+            )
+            alternatives = [diverse_alt]
+            if diverse_alt.get("name") != raw_alternatives[0].get("name"):
+                print(
+                    f"[TECHNIQUE]  Diversity swap: {raw_alternatives[0].get('name')} → "
+                    f"{diverse_alt.get('name')} (different signal cluster)"
+                )
+        else:
+            alternatives = raw_alternatives
+
+        # v14.0: Series mode safety net — if diversity filter or DB shortage left
+        # alternatives empty, use the second candidate as-is so series mode doesn't
+        # silently degrade to single-exercise delivery.
+        if series_allowed and not alternatives and len(technique_candidates) > 1:
+            alternatives = [technique_candidates[1]]
+            print("[TECHNIQUE] Series fallback: diversity filter emptied alternatives — using 2nd candidate")
 
         cat_name = primary.get("category", "Recommended")
         _top_reason = (
@@ -593,6 +791,14 @@ async def select_technique(state: MentalHealthState) -> dict:
                 "pending_technique_reason": _top_reason,
                 "pending_technique_created_at_turn": state.get("session_message_count", 0),
                 "technique_candidates": technique_candidates,
+                "pending_technique_context_snapshot": {
+                    "emotion": state.get("fused_emotion") or state.get("emotion", ""),
+                    "primary_sub_emotion": state.get("primary_sub_emotion", ""),
+                    "secondary_sub_emotions": sorted(list(state.get("secondary_sub_emotions") or [])),
+                    "detected_symptoms": sorted(list(state.get("detected_symptoms") or [])),
+                    "detected_behaviors": sorted(list(state.get("detected_behaviors") or [])),
+                    "intensity": float(state.get("fused_intensity") or state.get("intensity") or 0.0),
+                },
             }
 
         # Build category dict: primary first, then alternatives (keyed uniquely)
@@ -605,6 +811,19 @@ async def select_technique(state: MentalHealthState) -> dict:
 
         technique_series = [primary, *alternatives] if series_allowed else [primary]
 
+        # Queue the complement as an explicit, persisted pending object so it can be
+        # surfaced deterministically after the primary and reused consistently when the
+        # user accepts it or raises the signal it targets (instead of a fresh re-select).
+        _pending_complement = None
+        _pending_complement_signal = None
+        if series_allowed and alternatives:
+            _pending_complement = alternatives[0]
+            _pending_complement_signal = _describe_complement_signal(_pending_complement, state)
+            print(
+                f"[TECHNIQUE] Complement queued: {_pending_complement.get('name')} "
+                f"→ targets '{_pending_complement_signal}'"
+            )
+
         return {
             "recommended_technique": primary,
             "recommended_techniques_by_category": _rec_by_cat,
@@ -614,6 +833,8 @@ async def select_technique(state: MentalHealthState) -> dict:
             "technique_area": technique_area,
             "technique_plan_mode": "series" if series_allowed else "single",
             "technique_series": technique_series,
+            "pending_complement_technique": _pending_complement,
+            "pending_complement_signal": _pending_complement_signal,
             **_selection_fields(),
         }
 

@@ -877,6 +877,62 @@ async def _empty_on_error(awaitable: Awaitable[list[Any]]) -> list[Any]:
         return []
 
 
+def _build_clinical_trend(logs: list) -> list:
+    """
+    Group ClinicalAssessmentLog entries by session and return one entry per
+    session showing before-therapy (first log) and after-therapy (last log)
+    scores so the dashboard can visualise within-session improvement.
+    """
+    from collections import OrderedDict
+    by_session: OrderedDict = OrderedDict()
+    for log in logs:
+        sid = getattr(log, "sessionId", None) or "unknown"
+        if sid not in by_session:
+            by_session[sid] = []
+        by_session[sid].append(log)
+
+    trend = []
+    for i, (sid, slogs) in enumerate(by_session.items()):
+        first = slogs[0]
+        last  = slogs[-1]
+        session_obj = getattr(last, "session", None) or getattr(first, "session", None)
+        title = getattr(session_obj, "title", None) or f"Session {i + 1}"
+
+        # Use the PEAK score within the session as the "before therapy" baseline.
+        # The first log frequently has a low score because the user hasn't fully
+        # disclosed their symptoms yet (background assessment had less context).
+        # Taking the peak gives a clinically meaningful pre-intervention reference.
+        all_phq9 = [_float(getattr(l, "phq9Score", 0), 0.0) for l in slogs]
+        all_gad7 = [_float(getattr(l, "gad7Score", 0), 0.0) for l in slogs]
+        start_phq9 = max(all_phq9) if len(all_phq9) > 1 else all_phq9[0]
+        start_gad7 = max(all_gad7) if len(all_gad7) > 1 else all_gad7[0]
+        end_phq9   = _float(getattr(last, "phq9Score", 0), 0.0)
+        end_gad7   = _float(getattr(last, "gad7Score", 0), 0.0)
+
+        all_indicators = sorted({
+            ind
+            for log in slogs
+            for ind in _safe_list(getattr(log, "indicators", []))
+        })
+
+        trend.append({
+            "date":               _iso(getattr(first, "assessedAt", None)),
+            "session_title":      title,
+            "severity":           _enum(getattr(last, "severity", None), "MINIMAL"),
+            "start_phq9":         start_phq9,
+            "start_gad7":         start_gad7,
+            "end_phq9":           end_phq9,
+            "end_gad7":           end_gad7,
+            "within_phq9_delta":  round(end_phq9 - start_phq9, 1),
+            "within_gad7_delta":  round(end_gad7 - start_gad7, 1),
+            "delta":              _float(getattr(last, "clinicalDelta", None), None) if getattr(last, "clinicalDelta", None) is not None else None,  # type: ignore[arg-type]
+            "indicators":         all_indicators,
+            "confidence":         max((_float(getattr(l, "confidence", 0.0), 0.0) for l in slogs), default=0.0),
+            "log_count":          len(slogs),
+        })
+    return trend
+
+
 async def build_user_dashboard(user_id: str, days: int = 30) -> dict:
     """
     Build a complete dashboard payload for one user.
@@ -912,6 +968,7 @@ async def build_user_dashboard(user_id: str, days: int = 30) -> dict:
         summaries,
         ratings,
         crisis_logs,
+        clinical_logs,
     ) = await asyncio.gather(
         prisma.session.find_many(
             where={"userId": user_id},
@@ -954,6 +1011,12 @@ async def build_user_dashboard(user_id: str, days: int = 30) -> dict:
             order={"createdAt": "desc"},
             take=30,
         )),
+        _empty_on_error(prisma.clinicalassessmentlog.find_many(
+            where={"userId": user_id},
+            order={"assessedAt": "asc"},
+            take=90,
+            include={"session": True},
+        )),
     )
 
     session_ids = [session.id for session in sessions]
@@ -964,6 +1027,21 @@ async def build_user_dashboard(user_id: str, days: int = 30) -> dict:
                 where={"sessionId": {"in": session_ids}},
                 order={"createdAt": "desc"},
                 take=80,
+            )
+        )
+
+    # Voice analytics — query messages that had voice input (voiceEmotion is set)
+    voice_messages: list[Any] = []
+    if session_ids:
+        voice_messages = await _empty_on_error(
+            prisma.message.find_many(
+                where={
+                    "sessionId": {"in": session_ids},
+                    "role": "USER",
+                    "voiceEmotion": {"not": None},
+                },
+                order={"createdAt": "desc"},
+                take=100,
             )
         )
 
@@ -1072,6 +1150,29 @@ async def build_user_dashboard(user_id: str, days: int = 30) -> dict:
         if _enum(getattr(c, "riskLevel", None), "").upper() in {"HIGH", "CRITICAL"}
     )
 
+    # ── Clinical assessment section (PHQ-9 / GAD-7) ─────────────────────────
+    # clinical_logs are sorted ascending (oldest first) so [-1] is the latest.
+    _window_clinical = _filter_window(clinical_logs, days, attr="assessedAt")
+    _latest_clinical = _window_clinical[-1] if _window_clinical else (clinical_logs[-1] if clinical_logs else None)
+    _clinical_trend = _build_clinical_trend(_window_clinical)
+    # Cross-session delta: first session's start_phq9 vs latest session's end_phq9.
+    # Only meaningful with 2+ sessions; for a single session use within-session delta
+    # only when multiple logs exist (otherwise both start and end are the same number).
+    _cross_delta: float | None = None
+    if len(_clinical_trend) >= 2:
+        _cross_delta = round(_clinical_trend[-1]["end_phq9"] - _clinical_trend[0]["start_phq9"], 1)
+    elif len(_clinical_trend) == 1 and _clinical_trend[0]["log_count"] > 1:
+        _cross_delta = _clinical_trend[0]["within_phq9_delta"]
+    clinical_section = {
+        "has_data": bool(_window_clinical),
+        "current_severity": _enum(getattr(_latest_clinical, "severity", None), "MINIMAL") if _latest_clinical else "MINIMAL",
+        "current_phq9": _float(getattr(_latest_clinical, "phq9Score", 0), 0.0) if _latest_clinical else 0.0,
+        "current_gad7": _float(getattr(_latest_clinical, "gad7Score", 0), 0.0) if _latest_clinical else 0.0,
+        "latest_delta": _cross_delta,
+        "improving": (_cross_delta is not None and _cross_delta < 0),
+        "trend": _clinical_trend,
+    }
+
     # Improvement analysis (long-term trend)
     improvement_analysis = _build_improvement_analysis(
         scores=mood_scores,
@@ -1098,6 +1199,32 @@ async def build_user_dashboard(user_id: str, days: int = 30) -> dict:
 
     # Within-session improvement delta from peak distress to final qualifying turn
     within_session_improvement = _build_within_session_improvement(sessions, snapshots, outcomes)
+
+    # Build voice insights from messages that had audio input
+    _voice_emotions = [getattr(m, "voiceEmotion", None) for m in voice_messages if getattr(m, "voiceEmotion", None)]
+    _voice_arousals = [_float(getattr(m, "voiceArousal", None)) for m in voice_messages if getattr(m, "voiceArousal", None) is not None]
+    _voice_valences = [_float(getattr(m, "voiceValence", None)) for m in voice_messages if getattr(m, "voiceValence", None) is not None]
+    _voice_confs = [_float(getattr(m, "voiceConfidence", None)) for m in voice_messages if getattr(m, "voiceConfidence", None) is not None]
+    _voice_distress_proxies = [_float(getattr(m, "voiceDistressProxy", None)) for m in voice_messages if getattr(m, "voiceDistressProxy", None) is not None]
+    _dominant_voice_emotion = Counter(_voice_emotions).most_common(1)[0][0] if _voice_emotions else None
+    voice_insights = {
+        "voice_used": bool(voice_messages),
+        "total_voice_messages": len(voice_messages),
+        "dominant_voice_emotion": _dominant_voice_emotion,
+        "avg_arousal": round(mean(_voice_arousals), 3) if _voice_arousals else None,
+        "avg_valence": round(mean(_voice_valences), 3) if _voice_valences else None,
+        "avg_confidence": round(mean(_voice_confs), 3) if _voice_confs else None,
+        "avg_acoustic_distress_proxy": round(mean(_voice_distress_proxies), 3) if _voice_distress_proxies else None,
+        "recent_voice_emotions": [
+            {
+                "emotion": getattr(m, "voiceEmotion", None),
+                "arousal": _float(getattr(m, "voiceArousal", None)),
+                "valence": _float(getattr(m, "voiceValence", None)),
+                "date": _iso(getattr(m, "createdAt", None)),
+            }
+            for m in voice_messages[:10]
+        ],
+    }
 
     dashboard = {
         "success": True,
@@ -1259,6 +1386,8 @@ async def build_user_dashboard(user_id: str, days: int = 30) -> dict:
             "high_risk_crisis_count": high_risk_crisis_count,
         },
         "suggestions": suggestions,
+        "clinical": clinical_section,
+        "voice_insights": voice_insights,
         "data_quality": {
             "mood_logs": len(mood_logs),
             "emotion_snapshots": len(snapshots),

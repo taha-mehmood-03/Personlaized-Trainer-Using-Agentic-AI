@@ -58,6 +58,7 @@ export function ChatInput({
   const audioMimeTypeRef = useRef('audio/webm')
   const transcriptRef = useRef('')
   const recordingFinalizedRef = useRef(false)
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const resetTextarea = () => {
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
@@ -126,6 +127,10 @@ export function ChatInput({
   }
 
   const finalizeRecording = (textOverride?: string) => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current)
+      silenceTimerRef.current = null
+    }
     if (recordingFinalizedRef.current) return
     recordingFinalizedRef.current = true
 
@@ -166,6 +171,10 @@ export function ChatInput({
 
   const toggleRecording = async () => {
     if (isRecording) {
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current)
+        silenceTimerRef.current = null
+      }
       stopRecording()
       return
     }
@@ -219,11 +228,17 @@ export function ChatInput({
           if (event.results[i].isFinal) finalTranscript += event.results[i][0].transcript
         }
 
-        if (!finalTranscript) return
+        if (!finalTranscript.trim()) return
         const trimmed = finalTranscript.trim()
         transcriptRef.current = [transcriptRef.current, trimmed].filter(Boolean).join(' ').trim()
-        setInput(trimmed)
-        finalizeRecording(transcriptRef.current)
+        setInput(transcriptRef.current)
+
+        // Debounce: wait 2 s of silence before sending.
+        // Resets on every new final result so multi-sentence speech accumulates naturally.
+        if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current)
+        silenceTimerRef.current = setTimeout(() => {
+          finalizeRecording(transcriptRef.current)
+        }, 2000)
       }
 
       recognition.start()
@@ -289,7 +304,7 @@ export function ChatInput({
                   ? 'bg-rose-600 text-white shadow-sm'
                   : isProcessingAudio
                     ? 'bg-amber-500 text-white'
-                    : 'bg-white text-slate-700 shadow-sm hover:bg-slate-100 disabled:opacity-50'
+                    : 'bg-teal-50 text-teal-600 border border-teal-200 shadow-sm hover:bg-teal-100 hover:border-teal-300 disabled:opacity-50'
               }`}
             >
               {isProcessingAudio ? (
@@ -306,7 +321,7 @@ export function ChatInput({
               onClick={handleSend}
               disabled={!input.trim() || isLoading || isProcessingAudio}
               title="Send"
-              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white shadow-sm transition-all hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-teal-500 to-cyan-600 text-white shadow-sm transition-all hover:from-teal-600 hover:to-cyan-700 disabled:cursor-not-allowed disabled:opacity-40"
             >
               {isLoading ? <Loader className="h-5 w-5 animate-spin" /> : <Send className="h-5 w-5" />}
             </button>

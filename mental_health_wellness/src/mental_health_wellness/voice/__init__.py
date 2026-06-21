@@ -333,16 +333,9 @@ def _validate_gemini_voice(parsed: dict[str, Any]) -> dict[str, Any]:
         sentiment = derived_sentiment
 
     confidence = _clamp(parsed.get("confidence", 0.0), 0.0)
-    # For confirmed Gemini audio results, apply a minimum confidence floor so
-    # downstream authority checks (_is_authoritative_voice_features) don't
-    # silently discard legitimate neutral/calm speech as a fallback stub.
-    if confidence == 0.0:
-        confidence = 0.1
     intensity = _clamp(parsed.get("intensity", 0.5), 0.5)
     if emotion in {"neutral", "joy"}:
         intensity = min(intensity, 0.45)
-    elif emotion in _NEGATIVE:
-        intensity = max(intensity, 0.5)
 
     arousal = _clamp(parsed.get("arousal", intensity), intensity)
     valence = _clamp(parsed.get("valence", 0.5), 0.5)

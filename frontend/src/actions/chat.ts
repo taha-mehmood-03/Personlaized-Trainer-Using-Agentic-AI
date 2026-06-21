@@ -81,10 +81,18 @@ export async function getLatestSession(
         return { messages: [], sessionId: null }
     }
 
-    const messages = (lastSession.messages ?? []).map((m) => ({
-        ...normalizeMessage(m as Message & Record<string, unknown>),
-        technique: m.technique ?? null,
-    }))
+    const seen = new Set<string>()
+    const messages = (lastSession.messages ?? [])
+        .map((m) => ({
+            ...normalizeMessage(m as Message & Record<string, unknown>),
+            technique: m.technique ?? null,
+        }))
+        .filter((m) => {
+            if (!m.id) return true
+            if (seen.has(m.id)) return false
+            seen.add(m.id)
+            return true
+        })
     return { messages, sessionId: messages.length ? lastSession.id : null }
 }
 
@@ -99,10 +107,18 @@ export async function getSessionMessages(
 
     if (!ok || !data?.messages) return []
 
-    return data.messages.map((m) => ({
-        ...normalizeMessage(m as Message & Record<string, unknown>),
-        technique: m.technique ?? null,
-    }))
+    const seenIds = new Set<string>()
+    return data.messages
+        .map((m) => ({
+            ...normalizeMessage(m as Message & Record<string, unknown>),
+            technique: m.technique ?? null,
+        }))
+        .filter((m) => {
+            if (!m.id) return true
+            if (seenIds.has(m.id)) return false
+            seenIds.add(m.id)
+            return true
+        })
 }
 
 export async function deleteSession(sessionId: string, userId?: string): Promise<boolean> {

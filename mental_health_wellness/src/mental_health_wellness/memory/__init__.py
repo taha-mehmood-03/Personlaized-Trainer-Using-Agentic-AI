@@ -13,6 +13,7 @@ import math
 import hashlib
 import logging
 import io
+import asyncio
 import contextlib
 from typing import Optional
 from datetime import datetime
@@ -90,6 +91,12 @@ class _LocalSentenceTransformerEmbeddings:
 
     def embed_query(self, text: str) -> list[float]:
         return self.embed_documents([text])[0]
+
+
+async def _embed_async(text: str) -> list[float]:
+    """Run embed_query in a thread-pool executor so it doesn't block the event loop."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _get_embeddings().embed_query, text)
 
 
 def _safe_user_id(user_id: str) -> str:
@@ -387,7 +394,7 @@ async def store_conversation_memory(
         return True
 
     try:
-        embedding = _get_embeddings().embed_query(user_message)
+        embedding = await _embed_async(user_message)
     except EmbeddingsUnavailable:
         logger.debug("Semantic memory skipped | reason=embedding_model_unavailable")
         return True
@@ -442,7 +449,7 @@ async def store_fact_embedding(user_id: str, fact_id: str, fact: str, category: 
     """Index a UserFact row in pgvector."""
     try:
         from .pgvector_store import upsert_embedding
-        embedding = _get_embeddings().embed_query(fact)
+        embedding = await _embed_async(fact)
 
         return await upsert_embedding(
             source_type="user_fact",
@@ -472,7 +479,7 @@ async def store_session_summary_embedding(
     try:
         from .pgvector_store import upsert_embedding
         content = f"{title}\n{summary}".strip()
-        embedding = _get_embeddings().embed_query(content)
+        embedding = await _embed_async(content)
 
         return await upsert_embedding(
             source_type="session_summary",
@@ -505,7 +512,7 @@ async def store_technique_embedding(technique) -> bool:
         ]).strip()
         if not text:
             return False
-        embedding = _get_embeddings().embed_query(text)
+        embedding = await _embed_async(text)
         return await upsert_embedding(
             source_type="technique",
             source_id=getattr(technique, "id", ""),

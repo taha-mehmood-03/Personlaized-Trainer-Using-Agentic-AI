@@ -135,10 +135,17 @@ def _clamp(value, default: float = 0.0) -> float:
         return default
 
 
-def _safe_list(value, allowed: set) -> list:
+def _safe_list(value, allowed: set, label: str = "") -> list:
     if not isinstance(value, list):
         return []
-    return [str(v).lower().strip() for v in value if str(v).lower().strip() in allowed][:4]
+    result = []
+    for v in value:
+        cleaned = str(v).lower().strip()
+        if cleaned in allowed:
+            result.append(cleaned)
+        elif cleaned:
+            print(f"[MOOD] _safe_list dropped unknown {label} value: '{cleaned}'")
+    return result[:4]
 
 
 def _derive_structured_tags(message: str) -> tuple[list, list, list, list]:
@@ -267,14 +274,15 @@ Return a JSON object with EXACTLY these fields:
 {{
   "emotion": <one of: anger|disgust|fear|joy|neutral|sadness|surprise|anxiety>,
   "primary_sub_emotion": <one value from ALLOWED PRIMARY/SUB-EMOTIONS above, the most specific label supported by evidence>,
-  "secondary_sub_emotions": [<up to 3 additional values from ALLOWED PRIMARY/SUB-EMOTIONS, derived from BOTH current message AND conversation history>],
+  "secondary_sub_emotions": [<up to 3 additional values from ALLOWED PRIMARY/SUB-EMOTIONS, derived from BOTH current message AND conversation history — MUST NOT repeat the primary_sub_emotion value>],
   "sentiment": <one of: positive|negative|neutral>,
   "intensity": <float 0.0-1.0 reflecting overall distress level across the conversation>,
   "confidence": <float 0.0-1.0, your confidence in this classification>,
-  "detected_symptoms": [<physical/cognitive signals visible across the conversation, e.g. sleep_difficulty|racing_thoughts|fatigue|numbness>],
-  "detected_behaviors": [<behavioral patterns, e.g. isolation|procrastination|rumination|people_pleasing|avoidance>],
-  "detected_contexts": [<situational contexts e.g. family_conflict|work_stress|relationship_conflict|academic_pressure|social_isolation>],
+  "detected_symptoms": [<MUST be one or more of these exact values — no others: {symptom_tags}>],
+  "detected_behaviors": [<MUST be one or more of these exact values — no others: {behavior_tags}>],
+  "detected_contexts": [<MUST be one or more of these exact values — no others: {context_tags}>],
   "emotion_scores": {{"anger": 0.0, "disgust": 0.0, "fear": 0.0, "joy": 0.0, "neutral": 0.0, "sadness": 0.0, "surprise": 0.0, "anxiety": 0.0}},
+  "requires_technique_series": <true if symptoms span BOTH a physical/somatic domain (chest_pain, body_tension, shortness_of_breath, racing_heart, dizziness) AND a cognitive/psychological domain (racing_thoughts, catastrophising, rumination, worry, performance_anxiety, sleep_difficulty) AND intensity >= 0.7; false otherwise>,
   "reasoning": <one sentence explaining your classification using context>
 }}
 
@@ -289,7 +297,10 @@ Rules:
 """
 
 _MOOD_SYSTEM_PROMPT = _MOOD_SYSTEM_PROMPT_TEMPLATE.format(
-    allowed_sub_emotions=_format_allowed_sub_emotions()
+    allowed_sub_emotions=_format_allowed_sub_emotions(),
+    symptom_tags="|".join(sorted(SYMPTOM_TAGS)),
+    behavior_tags="|".join(sorted(BEHAVIOR_TAGS)),
+    context_tags="|".join(sorted(CONTEXT_TAGS)),
 )
 
 
@@ -342,7 +353,7 @@ def _validate_gemini_result(parsed: dict, message: str) -> dict:
     secondary = [
         s.lower().strip()
         for s in (parsed.get("secondary_sub_emotions") or [])
-        if s and s.lower().strip() in SUB_EMOTIONS
+        if s and s.lower().strip() in SUB_EMOTIONS and s.lower().strip() != primary_sub
     ][:3]
 
     sentiment = str(parsed.get("sentiment", "neutral")).lower().strip()
@@ -359,9 +370,10 @@ def _validate_gemini_result(parsed: dict, message: str) -> dict:
     if not any(emotion_scores.values()):
         emotion_scores[emotion] = confidence
 
-    detected_symptoms = _safe_list(parsed.get("detected_symptoms"), SYMPTOM_TAGS)
-    detected_behaviors = _safe_list(parsed.get("detected_behaviors"), BEHAVIOR_TAGS)
-    detected_contexts = _safe_list(parsed.get("detected_contexts"), CONTEXT_TAGS)
+    detected_symptoms = _safe_list(parsed.get("detected_symptoms"), SYMPTOM_TAGS, "symptoms")
+    detected_behaviors = _safe_list(parsed.get("detected_behaviors"), BEHAVIOR_TAGS, "behaviors")
+    detected_contexts = _safe_list(parsed.get("detected_contexts"), CONTEXT_TAGS, "contexts")
+    requires_technique_series = bool(parsed.get("requires_technique_series", False))
 
     # Post-processing overrides
     if is_polite_acknowledgement(message):
@@ -384,6 +396,7 @@ def _validate_gemini_result(parsed: dict, message: str) -> dict:
         "detected_contexts": detected_contexts,
         "emotion_scores": emotion_scores,
         "emotion_reasoning": f"Gemini: {str(parsed.get('reasoning', ''))[:120]}",
+        "requires_technique_series": requires_technique_series,
     }
 
 

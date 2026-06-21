@@ -79,6 +79,11 @@ async def save_session(
     detected_contexts: list[str] | None = None,
     emotion_scores: dict | None = None,
     technique_offered_this_turn: bool = False,
+    voice_emotion: str | None = None,
+    voice_arousal: float | None = None,
+    voice_valence: float | None = None,
+    voice_confidence: float | None = None,
+    voice_distress_proxy: float | None = None,
 ) -> dict:
     """
     Save the conversation to the database.
@@ -180,6 +185,11 @@ async def save_session(
                 "detectedContexts": detected_contexts or [],
                 "emotionScores": prisma_json(emotion_scores or {}),
                 "retentionUntil": _retention_until(365),  # GAP-04
+                "voiceEmotion": voice_emotion,
+                "voiceArousal": voice_arousal,
+                "voiceValence": voice_valence,
+                "voiceConfidence": voice_confidence,
+                "voiceDistressProxy": voice_distress_proxy,
             }
         )
         

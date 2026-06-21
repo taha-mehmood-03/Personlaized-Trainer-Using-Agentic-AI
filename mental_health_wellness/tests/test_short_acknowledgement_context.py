@@ -1,7 +1,7 @@
 from langchain_core.messages import AIMessage, HumanMessage
 
 from mental_health_wellness.llm.llm_classifier import _normalize_smart_gate_result
-from mental_health_wellness.nodes.consent_parser import parse_consent_and_suppression
+from mental_health_wellness.pipeline.consent_parser import parse_consent_and_suppression
 from mental_health_wellness.nodes.conversation_context_resolver import resolve_conversation_context
 from mental_health_wellness.nodes.parallel_intake import _gate_calibrated_mood
 

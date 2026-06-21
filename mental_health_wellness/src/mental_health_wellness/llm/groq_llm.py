@@ -507,6 +507,29 @@ class GeminiLLMManager:
                 yield _AIChunk(content=msg)
                 return
             raise last_error
+
+        # All candidates were in cooldown — reset cooldowns and retry once with the first candidate.
+        if candidates:
+            print("[LLM] All candidates in cooldown; resetting cooldowns and retrying once.")
+            for c in candidates:
+                self._model_cooldowns.pop(c, None)
+            candidate = candidates[0]
+            try:
+                llm = self._get_gemini_llm(model=candidate)
+                llm = self._bind_llm(llm, max_tokens=max_tokens, temperature=temperature, response_format=response_format)
+                async for chunk in llm.astream(messages, config=config):
+                    yield chunk
+                return
+            except Exception as exc:
+                from langchain_core.messages import AIMessageChunk as _AIChunk
+                msg = (
+                    "I'm experiencing a brief technical pause — my response systems are "
+                    "temporarily at capacity. Give me a moment and try again. I'm still here for you. 💙"
+                )
+                print(f"[LLM] DEGRADED: Cooldown-reset retry also failed ({str(exc)[:80]}) — yielding graceful fallback")
+                yield _AIChunk(content=msg)
+                return
+
         raise RuntimeError("[LLM] Gemini stream failed: no available model/key candidates")
 
     def get_status(self) -> Dict[str, Any]:

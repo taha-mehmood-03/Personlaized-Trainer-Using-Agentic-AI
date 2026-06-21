@@ -225,6 +225,30 @@ async def analyze_mood(state: MentalHealthState) -> dict:
         detected_behaviors = mood_result.get("detected_behaviors", [])
         detected_contexts = mood_result.get("detected_contexts", [])
 
+        # v14.0: Merge with prior-turn symptoms so follow-up disclosures accumulate
+        # rather than replacing. Union deduplicates; LLM sees the full clinical picture.
+        prev_symptoms = list(state.get("detected_symptoms") or [])
+        prev_secondary = list(state.get("secondary_sub_emotions") or [])
+        prev_behaviors = list(state.get("detected_behaviors") or [])
+        prev_contexts = list(state.get("detected_contexts") or [])
+        merged_symptoms = list(set(prev_symptoms) | set(detected_symptoms))
+        merged_secondary = list(set(prev_secondary) | set(secondary_sub_emotions))
+        merged_behaviors = list(set(prev_behaviors) | set(detected_behaviors))
+        merged_contexts = list(set(prev_contexts) | set(detected_contexts))
+        followup_enriched = bool(
+            set(detected_symptoms) - set(prev_symptoms)
+            or set(secondary_sub_emotions) - set(prev_secondary)
+        )
+        detected_symptoms = merged_symptoms
+        secondary_sub_emotions = merged_secondary
+        detected_behaviors = merged_behaviors
+        detected_contexts = merged_contexts
+        if followup_enriched:
+            print(
+                f"[NODE:MOOD] v14.0 symptom merge: "
+                f"+{len(set(mood_result.get('detected_symptoms', [])) - set(prev_symptoms))} new symptom(s)"
+            )
+
         print(
             "\n[NODE:MOOD] Complete"
             f"\n  emotion={emotion.upper()} | primary_sub={primary_sub_emotion} | sentiment={sentiment}"
@@ -247,6 +271,8 @@ async def analyze_mood(state: MentalHealthState) -> dict:
             "detected_contexts": detected_contexts,
             "emotion_scores": mood_result.get("emotion_scores", {}),
             "emotion_reasoning": mood_result.get("emotion_reasoning", ""),
+            "requires_technique_series": bool(mood_result.get("requires_technique_series", False)),
+            "followup_sub_emotion_enriched": followup_enriched,
         }
 
     except Exception as e:

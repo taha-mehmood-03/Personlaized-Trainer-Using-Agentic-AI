@@ -47,14 +47,14 @@ from langgraph.graph import StateGraph, START, END
 
 from .state import MentalHealthState, get_initial_state
 from ..nodes.crisis_handler import handle_crisis
-from ..nodes.optimized_response_generator import generate_response
+from ..nodes.optimized_response_generator import generate_response, _build_complement_offer_line
 from ..nodes.parallel_intake import run_parallel_intake
 from ..nodes.parallel_persist import run_parallel_persist
 from ..nodes.analysis_and_planning import run_analysis_and_planning  # v6.0: fused
 from ..nodes.response_pipeline import run_response_pipeline          # v6.0: fused
 from ..nodes.conversation_context_resolver import commit_conversation_context, extract_last_question
 from ..db.client import ensure_user_exists_cached, create_new_session
-from ..llm.llm_classifier import llm_crisis_check, smart_pipeline_gate
+from ..llm.llm_classifier import llm_crisis_check, smart_pipeline_gate, deterministic_crisis_safety_net
 from ..utils.turn_signals import (
     has_negative_feedback_signal,
     has_positive_outcome_signal,
@@ -116,6 +116,7 @@ _session_context_store: dict[str, dict] = {}  # compact stage/context fields per
 
 _SESSION_CONTEXT_KEYS = (
     "conversation_stage",
+    "conversation_phase",
     "primary_concern",
     "concern_duration",
     "triggering_subject",
@@ -127,10 +128,13 @@ _SESSION_CONTEXT_KEYS = (
     "pending_recommended_technique",
     "pending_technique_reason",
     "pending_technique_created_at_turn",
+    "pending_complement_technique",   # queued series complement — survives to next turn
+    "pending_complement_signal",      # human-readable signal the complement targets
     "technique_candidates",
     "technique_area",
     "technique_plan_mode",
     "technique_series",
+    "alternative_techniques",   # complement queue — must survive to next turn for series delivery
     "preferred_techniques",
     "gate_confidence",
     "gate_context_flags",
@@ -172,7 +176,6 @@ _SESSION_CONTEXT_KEYS = (
     "emotion_reasoning",
     "turn_type",
     "turn_type_guess",
-    "technique_offered_this_turn",
     "pending_outcome_id",
     "previous_session_handoff",
     "exercise_consent",
@@ -182,6 +185,13 @@ _SESSION_CONTEXT_KEYS = (
     "context_sufficiency",
     "dialogue_solution_turn_count",
     "dialogue_support_mode",
+    # v14.0: recovery arc + crisis dedup fields (must persist across turns)
+    "session_disclosure_complete",
+    "reflection_questions_since_resolution",
+    "whatsapp_alert_sent",
+    # v14.1: clinical baseline — captured once per session for PHQ-9/GAD-7 delta computation
+    "session_start_clinical_score",
+    "session_start_gad7_score",
 )
 
 
@@ -240,6 +250,21 @@ def _remember_session_context(session_id: str, state: dict) -> None:
     previous = _session_context_store.get(session_id, {})
     updates = {key: state.get(key) for key in _SESSION_CONTEXT_KEYS if key in state}
     updates.update(commit_conversation_context(state, previous))
+
+    # One-shot consumption of the complement queue: once the complement technique has
+    # been delivered this turn, drop it from the persisted queue so a later "yes" does
+    # not re-offer it forever. Mirrors the planner's recovery-guard clear. Alternatives
+    # still persist through the immediate-delivery + preview turns (which keep their own
+    # response_task), so the series stays exactly two techniques.
+    _gate_flags_now = state.get("gate_context_flags") or []
+    _complement_consumed = (
+        state.get("response_task") == "offer_complement_technique"
+        or state.get("intent") in {"reject_technique", "technique_not_helpful"}
+        or "reject_technique" in _gate_flags_now
+        or "technique_rejection" in _gate_flags_now
+    )
+    if state.get("response_task") == "offer_complement_technique":
+        updates["alternative_techniques"] = []
 
     def _as_string_list(value) -> list[str]:
         if isinstance(value, list):
@@ -368,6 +393,17 @@ def _remember_session_context(session_id: str, state: dict) -> None:
                 preferred.append(preferred_candidate)
         updates["preferred_techniques"] = preferred[-5:]
 
+    # Eagerly capture clinical baseline so subsequent bypass turns can read it.
+    # session_saver computes this in the background (too late for the next turn);
+    # we mirror the same logic here so it lands in the store synchronously.
+    if not previous.get("session_start_clinical_score"):
+        _raw_phq = state.get("clinical_raw_phq9") or state.get("clinical_phq9_score", 0)
+        _raw_gad = state.get("clinical_raw_gad7") or state.get("clinical_gad7_score", 0)
+        if _raw_phq and float(_raw_phq) > 0:
+            updates["session_start_clinical_score"] = float(_raw_phq)
+            if _raw_gad and float(_raw_gad) > 0:
+                updates["session_start_gad7_score"] = float(_raw_gad)
+
     compact = dict(previous)
     clearable = {"last_assistant_question", "expected_answer_type"}
     for key, value in updates.items():
@@ -375,6 +411,12 @@ def _remember_session_context(session_id: str, state: dict) -> None:
             compact[key] = value
         elif value not in (None, "", []):
             compact[key] = value
+    # Explicitly drop the queued complement once it's delivered or rejected. Falsy
+    # values are skipped by the merge above, so we pop here to actually clear it.
+    if _complement_consumed:
+        compact.pop("pending_complement_technique", None)
+        compact.pop("pending_complement_signal", None)
+        compact.pop("alternative_techniques", None)
     _session_context_store[session_id] = compact
 
 
@@ -1527,8 +1569,10 @@ async def _crisis_gate_response(
 
 
 
-async def _background_extract_facts(user_id: str, message: str, session_id: str) -> None:
+async def _background_extract_facts(user_id: str, message: str, session_id: str, anonymous_mode: bool = False) -> None:
     """Fire-and-forget wrapper for fact extraction on bypass routes."""
+    if anonymous_mode:
+        return
     try:
         from ..memory.explicit_facts import extract_and_save_facts
         await extract_and_save_facts(user_id, message, session_id)
@@ -1539,7 +1583,7 @@ async def _background_extract_facts(user_id: str, message: str, session_id: str)
 async def _background_record_technique_feedback(state: dict) -> None:
     """Fire-and-forget personalization write for explicit technique feedback."""
     try:
-        from ..nodes.outcome_tracker_node import record_explicit_technique_feedback
+        from ..pipeline.outcome_tracker_node import record_explicit_technique_feedback
         await record_explicit_technique_feedback(state)
     except Exception as e:
         print(f"[PERSIST] Positive technique feedback update failed (non-fatal): {str(e)[:100]}")
@@ -1554,6 +1598,7 @@ async def _execute_gate_route(
     start_time: float,
     voice_features: Optional[dict] = None,
     audio_file_path: Optional[str] = None,
+    anonymous_mode: bool = False,
 ) -> Optional[dict]:
     """
     Dispatcher: maps the gate route to the right bypass handler.
@@ -1603,7 +1648,7 @@ async def _execute_gate_route(
         # Fire-and-forget fact extraction even on bypass — LLM decides if there's a fact (skip if trivial/short)
         if not _env_flag("SENTIMIND_DISABLE_BACKGROUND_PERSIST_FOR_TESTS"):
             if len(message.split()) >= 8:
-                asyncio.create_task(_background_extract_facts(user_id, message, actual_session_id))
+                asyncio.create_task(_background_extract_facts(user_id, message, actual_session_id, anonymous_mode))
         print(f"[GATE-ROUTE] Chitchat bypass — LLM decision trusted directly (conf={conf:.0%})")
         reply  = await _fast_casual_response(message, prev_messages)
         result = _wrap_bypass_result(reply, actual_session_id, "gate:chitchat_bypass", start_time)
@@ -1611,7 +1656,7 @@ async def _execute_gate_route(
     elif route == "memory_query":
         if not _env_flag("SENTIMIND_DISABLE_BACKGROUND_PERSIST_FOR_TESTS"):
             if len(message.split()) >= 8:
-                asyncio.create_task(_background_extract_facts(user_id, message, actual_session_id))
+                asyncio.create_task(_background_extract_facts(user_id, message, actual_session_id, anonymous_mode))
         print(f"[GATE-ROUTE] Memory query bypass — LLM trusted (conf={conf:.0%})")
         result = await _memory_query_response(
             message, user_id, actual_session_id, prev_messages, start_time
@@ -1656,7 +1701,7 @@ async def _execute_gate_route(
         flags = gate_result.get("context_flags") or []
         if "reject_technique" in flags or "technique_rejection" in flags:
             if not _env_flag("SENTIMIND_DISABLE_BACKGROUND_PERSIST_FOR_TESTS"):
-                asyncio.create_task(_background_extract_facts(user_id, message, actual_session_id))
+                asyncio.create_task(_background_extract_facts(user_id, message, actual_session_id, anonymous_mode))
             print(f"[GATE-ROUTE] Technique rejection bypass (conf={conf:.0%})")
             result = await _technique_rejection_response(
                 message, actual_session_id, prev_messages, start_time
@@ -1682,7 +1727,7 @@ async def _execute_gate_route(
 
     elif route == "positive_feedback":
         if not _env_flag("SENTIMIND_DISABLE_BACKGROUND_PERSIST_FOR_TESTS"):
-            asyncio.create_task(_background_extract_facts(user_id, message, actual_session_id))
+            asyncio.create_task(_background_extract_facts(user_id, message, actual_session_id, anonymous_mode))
         print(f"[GATE-ROUTE] Positive feedback bypass (conf={conf:.0%})")
         result = await _positive_feedback_response(
             message, actual_session_id, prev_messages, start_time
@@ -1707,7 +1752,7 @@ async def _execute_gate_route(
 
     elif route == "rejection":
         if not _env_flag("SENTIMIND_DISABLE_BACKGROUND_PERSIST_FOR_TESTS"):
-            asyncio.create_task(_background_extract_facts(user_id, message, actual_session_id))
+            asyncio.create_task(_background_extract_facts(user_id, message, actual_session_id, anonymous_mode))
         print(f"[GATE-ROUTE] Rejection bypass — LLM trusted (conf={conf:.0%})")
         result = await _rejection_response(
             message, actual_session_id, prev_messages, start_time
@@ -1731,6 +1776,14 @@ async def _execute_gate_route(
             and "reject_technique" not in flags
             and result.get("recommended_technique")
         ):
+            _alternatives = (
+                result.get("alternative_techniques")
+                or previous_context.get("alternative_techniques")
+                or []
+            )
+            _accept_task = "offer_complement_technique" if _alternatives else "continue_active_technique"
+            if _accept_task == "offer_complement_technique":
+                print(f"[ACCEPT] Alternatives found → transitioning to offer_complement_technique")
             result.update({
                 "intent": "accept_technique",
                 "conversation_stage": "FOLLOW_UP",
@@ -1739,9 +1792,10 @@ async def _execute_gate_route(
                 "latest_recommended_technique": result.get("recommended_technique"),
                 "active_technique": {**result.get("recommended_technique", {}), "status": "active"} if result.get("recommended_technique") else None,
                 "gate_context_flags": flags or ["accept_technique"],
-                "response_task": "continue_active_technique",
+                "response_task": _accept_task,
                 "exercise_consent": "allowed",
                 "solution_preference": "exercise_requested",
+                "alternative_techniques": _alternatives if _accept_task == "offer_complement_technique" else result.get("alternative_techniques", []),
             })
         elif route == "rejection" or (
             route == "technique_follow_up"
@@ -1774,12 +1828,14 @@ async def _execute_gate_route(
             result.update({
                 "intent": "positive_feedback",
                 "conversation_stage": "RECOVERY",
+                "conversation_phase": "recovery",
                 "conversation_strategy": "encourage_reflection",
                 "needs_technique": False,
                 "latest_recommended_technique": previous_context.get("latest_recommended_technique"),
                 "active_technique": previous_context.get("active_technique"),
                 "gate_context_flags": flags or ["positive_feedback"],
                 "response_task": "positive_feedback",
+                "reflection_questions_since_resolution": 0,
             })
             feedback_state = {
                 **result,
@@ -1903,22 +1959,41 @@ def _route_after_analysis_and_planning(state: MentalHealthState) -> str:
 
 def _route_after_response_pipeline(state: MentalHealthState) -> str:
     """
-    Crisis Detection Router  runs after response_pipeline (fused technique + role).
-    Checks fused emotion intensity for high-distress routing.
+    Crisis routing after response_pipeline (fused technique + role).
+
+    Crisis is CONTENT-gated ONLY: it may be entered solely from a genuine
+    self-harm / suicidal signal (deterministic safety net or an upstream
+    content pre-screen). Emotional intensity or distress alone must NEVER
+    route to the crisis protocol.
     """
     intensity = state.get("fused_intensity", state.get("intensity", 0.5))
     emotion = state.get("fused_emotion", state.get("emotion", "neutral"))
-    crisis_detected = state.get("crisis_detected", False)
+    crisis_detected = bool(state.get("crisis_detected", False))
 
-    if crisis_detected:
-        print(f"[ROUTER] Crisis detected  routing to crisis_handler")
-        return "crisis"
-    elif intensity >= 0.8 and emotion in ["sadness", "fear", "anger"]:
-        print(f"[ROUTER] High intensity distress route (emotion: {emotion}, intensity: {intensity:.0%})")
-        return "crisis"
-    else:
+    if not crisis_detected:
         print(f"[ROUTER] Normal route (emotion: {emotion}, intensity: {intensity:.0%})")
         return "response"
+
+    crisis_level = str(state.get("crisis_level", "low")).lower()
+    messages = state.get("messages", [])
+    last_user = messages[-1].content if messages else ""
+    # A crisis flag is honored only when backed by an actual self-harm/suicidal
+    # CONTENT signal — either a content pre-screen (gate/deterministic/LLM) that
+    # produced a real risk level, or the deterministic safety net matching the
+    # raw message. This guarantees intensity/distress can never manufacture a crisis.
+    content_signal = (
+        bool(state.get("crisis_pre_screened")) and crisis_level in {"medium", "high"}
+    ) or deterministic_crisis_safety_net(last_user).get("crisis_detected", False)
+
+    if content_signal:
+        print(f"[ROUTER] Crisis (content-based self-harm signal, level={crisis_level}) — routing to crisis_handler")
+        return "crisis"
+
+    print(
+        f"[ROUTER] crisis flag present but NO self-harm content "
+        f"(emotion={emotion}, intensity={intensity:.0%}) — distress is not a crisis; routing normal"
+    )
+    return "response"
 
 
 # ============================================
@@ -2079,6 +2154,7 @@ def _build_result_dict(result: dict, actual_session_id: str, node_trace: list, p
         "tools_used": tools_used,
         "node_trace": node_trace,
         "recommended_technique": result.get("recommended_technique", {}),
+        "technique_offered_this_turn": result.get("technique_offered_this_turn", False),
         "recommended_techniques_by_category": recommended_techniques_by_category,
         "alternative_techniques": result.get("alternative_techniques", []),
         "technique_candidates": result.get("technique_candidates", []),
@@ -2130,6 +2206,15 @@ def _build_result_dict(result: dict, actual_session_id: str, node_trace: list, p
         "transcription": result.get("transcription", ""),
         "latency_trace": result.get("latency_trace", []),
         "latency_summary": result.get("latency_summary", {}),
+        # Clinical scoring fields (PHQ-9 / GAD-7) — included so tests and the
+        # frontend can observe severity changes without hitting the dashboard API.
+        "clinical_severity":   result.get("clinical_severity"),
+        "clinical_phq9_score": result.get("clinical_phq9_score"),
+        "clinical_gad7_score": result.get("clinical_gad7_score"),
+        "clinical_raw_phq9":   result.get("clinical_raw_phq9"),
+        "clinical_raw_gad7":   result.get("clinical_raw_gad7"),
+        "clinical_confidence": result.get("clinical_confidence"),
+        "clinical_delta":      result.get("clinical_delta"),
     }
 
 
@@ -2262,7 +2347,7 @@ async def _fetch_user_context_for_gate(uid: str, session_id: Optional[str] = Non
         
         facts, summaries = await asyncio.gather(
             get_user_facts(uid),
-            get_session_summaries(uid),
+            get_session_summaries(uid, exclude_session_id=session_id),
             return_exceptions=True
         )
         
@@ -2447,6 +2532,7 @@ async def chat_with_agent(
             gate_result, message, user_id, actual_session_id, prev_messages, start_time,
             voice_features=voice_features,
             audio_file_path=audio_file_path,
+            anonymous_mode=_anonymous_mode,
         )
         print(f"[LATENCY] gate_route_dispatch={_elapsed_s(stage_start):.3f}s")
         _latency_mark(
@@ -2469,6 +2555,63 @@ async def chat_with_agent(
             bypass_result["latency_trace"] = latency_trace
             bypass_result["latency_summary"] = _latency_summary(latency_trace, start_time)
             print(f"[GATE] Bypass replied in {proc_time}ms | trace={bypass_result.get('node_trace')}")
+            # Bypass routes (positive_feedback, chitchat, etc.) skip the full pipeline
+            # and therefore never reach the persist block below. Inject the fields that
+            # session_saver requires and fire persist here so messages are always stored.
+            bypass_result.setdefault("user_id", user_id)
+            bypass_result.setdefault("session_id", actual_session_id)
+            _bypass_messages = list(prev_messages) + [HumanMessage(content=message)]
+            bypass_result.setdefault("messages", _bypass_messages)
+            bypass_result.setdefault("final_response", bypass_result.get("response", ""))
+            # Inject clinical state so session_saver can write the closing snapshot.
+            # These fields live in the clinical session cache and session context store,
+            # neither of which is available in the bypass result dict.
+            _bypass_session_ctx = _load_session_context_state(actual_session_id)
+            bypass_result.setdefault("session_start_clinical_score", _bypass_session_ctx.get("session_start_clinical_score"))
+            bypass_result.setdefault("session_start_gad7_score", _bypass_session_ctx.get("session_start_gad7_score"))
+            try:
+                from ..nodes.analysis_and_planning import _clinical_session_cache
+                _cached_clin = _clinical_session_cache.get(actual_session_id, {}).get("result", {})
+                if _cached_clin:
+                    bypass_result.setdefault("clinical_severity",   _cached_clin.get("severity", "minimal"))
+                    bypass_result.setdefault("clinical_phq9_score", _cached_clin.get("phq9_total", 0))
+                    bypass_result.setdefault("clinical_gad7_score", _cached_clin.get("gad7_total", 0))
+                    bypass_result.setdefault("clinical_raw_phq9",   _cached_clin.get("current_phq9_total", _cached_clin.get("phq9_total", 0)))
+                    bypass_result.setdefault("clinical_raw_gad7",   _cached_clin.get("current_gad7_total", _cached_clin.get("gad7_total", 0)))
+                    bypass_result.setdefault("clinical_confidence", _cached_clin.get("confidence", _cached_clin.get("clinical_confidence", 0.0)))
+                    bypass_result.setdefault("clinical_delta",      _cached_clin.get("clinical_delta"))
+                    bypass_result.setdefault("clinical_indicators", _cached_clin.get("clinical_indicators", []))
+            except Exception as _clin_inj_err:
+                print(f"[GATE] [WARN] Clinical state injection skipped: {_clin_inj_err}")
+            if not _env_flag("SENTIMIND_DISABLE_BACKGROUND_PERSIST_FOR_TESTS"):
+                try:
+                    asyncio.create_task(_background_persist(bypass_result))
+                except Exception as _bg_err:
+                    print(f"[GATE] [WARN] Bypass persist scheduling failed: {_bg_err}")
+                # For positive_feedback bypass, also refresh the clinical cache so the
+                # NEXT full-pipeline turn reads updated scores instead of stale ones.
+                _bypass_route = bypass_result.get("gate_route", "") or gate_result.get("route", "")
+                if "positive_feedback" in _bypass_route:
+                    try:
+                        from ..nodes.analysis_and_planning import _refresh_clinical_cache, _clinical_session_cache
+                        _session_ctx_for_clinical = _load_session_context_state(actual_session_id)
+                        _recent_ctx_str = "\n".join(
+                            f"{'User' if getattr(m, 'type', '') == 'human' else 'Assistant'}: "
+                            f"{str(getattr(m, 'content', ''))[:150]}"
+                            for m in prev_messages[-5:] if getattr(m, "content", "")
+                        )
+                        asyncio.create_task(_refresh_clinical_cache(
+                            session_id=actual_session_id,
+                            user_id=user_id,
+                            message=message,
+                            recent_context=_recent_ctx_str,
+                            emotion="neutral",
+                            intensity=0.3,
+                            emotional_trend="stable",
+                            session_start_score=_session_ctx_for_clinical.get("session_start_clinical_score"),
+                        ))
+                    except Exception as _clin_err:
+                        print(f"[GATE] [WARN] Clinical cache refresh skipped: {_clin_err}")
             return bypass_result
         #  THERAPEUTIC / CRISIS: fall through to full graph 
         gate_route = gate_result.get("route", "therapeutic")
@@ -2499,12 +2642,24 @@ async def chat_with_agent(
             "source": "smart_gate",   # AUTHORITATIVE — planner skips duplicate LLM call
         }
 
+        # Load anonymous mode flag so downstream nodes can skip long-term storage.
+        _anonymous_mode = False
+        try:
+            from ..api.helpers import _read_profile_setting_overrides
+            from ..db.client import get_prisma_client as _get_prisma_for_anon
+            _anon_prisma = await _get_prisma_for_anon()
+            _prefs = await _read_profile_setting_overrides(_anon_prisma, user_id)
+            _anonymous_mode = bool(_prefs.get("anonymousMode", False))
+        except Exception:
+            pass
+
         input_state = {
             **session_context_state,
             "messages": prev_messages_full + [HumanMessage(content=message)],
             "message": message,
             "user_id": user_id,
             "session_id": actual_session_id,
+            "anonymous_mode": _anonymous_mode,
             "tools_used": [],
             **_gate_state_fields(gate_result),
             "prefetched_intent": gate_prefetched_intent,  #  skips duplicate LLM call
@@ -2646,7 +2801,21 @@ async def _background_persist(state: dict):
     The user already has their response  this just saves to DB.
     """
     try:
-        await run_parallel_persist(state)
+        updates = await run_parallel_persist(state)
+        # session_saver may compute session_start_clinical_score on the first clinical turn.
+        # Propagate it back to the session context store so subsequent bypass turns can read it
+        # for the closing clinical snapshot (the "After Therapy" score).
+        _sid = state.get("session_id")
+        if _sid and isinstance(updates, dict):
+            _start_phq = updates.get("session_start_clinical_score")
+            _start_gad = updates.get("session_start_gad7_score")
+            if _start_phq is not None:
+                _ctx = _session_context_store.setdefault(_sid, {})
+                if _ctx.get("session_start_clinical_score") is None:
+                    _ctx["session_start_clinical_score"] = _start_phq
+                    if _start_gad is not None:
+                        _ctx["session_start_gad7_score"] = _start_gad
+                    print(f"[PERSIST] Clinical baseline propagated to session context: PHQ-9={_start_phq}, GAD-7={_start_gad}")
         print("[PERSIST] [OK] Background persist complete")
     except Exception as e:
         print(f"[PERSIST] [WARN] Background persist error: {e}")
@@ -2926,6 +3095,16 @@ async def chat_with_agent_streaming(
                 for i, word in enumerate(words):
                     await token_queue.put({"type": "token", "content": word if i == 0 else " " + word})
                     await asyncio.sleep(0.008)
+            elif final_state.get("complement_offer_appended"):
+                # The LLM token stream finished without the queued series complement.
+                # generate_response appended it to final_response — stream it now so the
+                # user actually sees the second exercise offered (was silently dropped before).
+                _offer_line = _build_complement_offer_line(
+                    final_state.get("pending_complement_technique"),
+                    final_state.get("pending_complement_signal"),
+                )
+                if _offer_line:
+                    await token_queue.put({"type": "token", "content": "\n\n" + _offer_line})
 
             processing_time = int((time.time() - start_time) * 1000)
             _latency_mark(latency_trace, "stream.total.worker", start_time, route=gate_route, session_id=actual_session_id)

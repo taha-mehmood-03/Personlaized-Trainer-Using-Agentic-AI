@@ -50,6 +50,159 @@ SentiMind is a full-stack Final Year Project combining a Next.js frontend, FastA
 - [Operational Notes](#operational-notes)
 - [Credits](#credits)
 
+## FYP Objectives & Implementation
+
+This project addresses three core Final Year Project objectives. Each is traced directly to its implementation.
+
+---
+
+### Objective 1 — Detect and Interpret Users' Emotional States through Multimodal Fusion
+
+> *"To detect and interpret users' emotional states by analyzing users' text and speech through multimodal fusion techniques."*
+
+**Status: Implemented**
+
+#### Text Emotion Analysis
+
+Every text message is processed by the mood analyzer (`nodes/mood_analyzer_node.py`) using **Gemini 2.0**, which classifies core emotion, intensity, confidence, primary and secondary sub-emotions (e.g. `future_threat`, `self_criticism`), detected symptoms, behaviors, and situational contexts. The gate (`llm/llm_classifier.py`) performs an emotional register pre-check before the full graph runs.
+
+#### Voice / Speech Analysis — Two-Layer Pipeline
+
+**Layer 1 — Gemini Audio** (`voice/__init__.py`): Gemini's multimodal API transcribes audio and holistically classifies emotion from vocal delivery — tone, pace, hesitation, energy, and strain — producing arousal, valence, a composite distress index, and pause density.
+
+**Layer 2 — Real DSP Acoustic Features** (`voice/acoustic_features.py`): Independently computed using librosa and parselmouth/Praat with no API call or cost:
+
+| Feature | Library | What it measures |
+|---|---|---|
+| MFCCs (13-dim) | librosa | Spectral envelope — voice texture |
+| RMS, spectral flux | librosa | Energy and timbre change |
+| Pause density | librosa | Real silence ratio via energy-based VAD |
+| Pitch F0 mean/std | parselmouth/Praat | Fundamental frequency variation |
+| Jitter | parselmouth/Praat | Cycle-to-cycle pitch perturbation |
+| Shimmer | parselmouth/Praat | Amplitude perturbation |
+| HNR | parselmouth/Praat | Harmonics-to-noise ratio (voice quality) |
+| `acoustic_distress_proxy` | Combined | Weighted composite of jitter, shimmer, pitch variance, HNR |
+
+DSP libraries are warm-started at server boot via `preload_all_voice_models()` to eliminate the first-request cold-import penalty (~2–5 s on Windows from numba JIT and Praat native library loading).
+
+#### Multimodal Fusion (`nodes/emotion_fusion_node.py`)
+
+| Path | Condition | Behaviour |
+|---|---|---|
+| **Voice-authoritative** | `extraction_method = gemini_audio` + therapeutic/crisis route | Gemini audio emotion is ground truth; text is secondary. Acoustic override rules apply as safety net. |
+| **Text-only** | No voice data | Full text pipeline: normalization, hedge-word reduction, passive ideation check, gate caps, distress anchor guard |
+| **3-way blend** | Legacy fallback | 50 % text · 30 % voice label · 20 % acoustic proxy |
+
+**Acoustic override rules** prevent a calm text label from overriding clear audio distress:
+
+- `distress_index > 0.65` + text = neutral/joy → emotion overridden to sadness
+- `arousal > 0.75` + text = neutral/joy → emotion overridden to anxiety
+- `pause_density > 0.40` + low intensity → intensity boosted
+
+**Distress anchoring** (`utils/distress_anchor.py`) ensures short follow-up messages do not collapse the recorded distress level. `peak_distress_intensity` is tracked session-wide. Progressive decay (`0.85 / 0.75 / 0.65`) applies across consecutive contextual turns; active-thread floor held at 0.35. Possible masking (`possible_masking = True`) is set when high `distress_index` accompanies "I'm fine" language.
+
+**Output fields forwarded to all downstream nodes:** `fused_emotion` · `fused_intensity` · `fusion_confidence` · `possible_masking` · `voice_text_conflict` · `primary_sub_emotion` · `secondary_sub_emotions` · `detected_symptoms` · `detected_behaviors` · `detected_contexts`
+
+---
+
+### Objective 2 — Suggest and Compose Personalized Mental Health Exercises
+
+> *"To suggest and compose personalized mental health exercises based on users' current state, history, and feedback."*
+
+**Status: Implemented**
+
+#### Technique Selection (`nodes/technique_selector_node.py`)
+
+Techniques are selected by **semantic vector search** (pgvector) against the Technique table. The search query is built from fused emotion, intensity, sub-emotions, symptoms, behaviors, contexts, cognitive distortion type, and active thread context. The top-8 candidates are then:
+
+1. Filtered to remove the previously rejected technique (session-scoped)
+2. Filtered against suppressed topic labels — checked in name, description, **and category**
+3. Reranked by user goal (`calm_body_now` boosts breathing/grounding; `sleep_better` boosts mindfulness; `immediate_regulation_request` forces breathing/grounding shortlist only)
+
+Consent gate runs before any DB call: `denied_soft` (temporary session refusal) or `denied_hard` (permanent — persisted to `UserPreference.communicationStyle`) blocks the entire technique path.
+
+#### History and Feedback Integration
+
+| Mechanism | Where | Effect |
+|---|---|---|
+| `TechniqueOutcome` | `nodes/outcome_tracker_node.py` | Records `intensityBefore` (uses `peak_distress_intensity` as baseline, not the attenuated follow-up reading), `emotionBefore`, `intensityAfter`, `effectiveness`, `followThrough`, `confidence`. Cross-session resolution falls back to `TechniqueOutcome.intensityBefore` when the message record has no stored intensity. |
+| `UserTechniqueRating` | `schema.prisma` | Explicit 1–5 user ratings with completion flag |
+| `PsychProfile` | `outcome_tracker_node.py` | `techniqueAccRate` via EMA (α=0.3); `copingStyle` = proactive / avoidant / mixed; `topDistortions` lifetime accumulation |
+| `UserTechniquePreference` | `consent_parser.py` | `denied_hard` persisted to DB; category suppression applied to selector filter on all future sessions |
+
+#### Personalization at Response Generation
+
+The response generator (`nodes/optimized_response_generator.py`) **rewrites every technique step** using the user's specific disclosed context (exam pressure, relationship conflict, sleep anxiety, etc.) rather than the generic DB text. The "why it helps you right now" field is composed from the fused emotion, sub-emotion, and situation. A `question_budget` system ensures the technique is delivered **before** any follow-up question (action-first principle).
+
+#### Outcome-Aware Flow
+
+```
+Technique delivered
+  → pending TechniqueOutcome created (intensityBefore = peak_distress_intensity)
+  → user reacts in a later turn
+  → outcome_tracker resolves: effectiveness, follow-through, confidence
+  → PsychProfile.techniqueAccRate updated via EMA
+  → rejected technique excluded from next session
+  → denied_hard categories excluded from all future sessions
+```
+
+---
+
+### Objective 3 — Validate through Clinical Tools and Ensure Compliance
+
+> *"To validate the system through controlled trials with mental health professionals, ensuring consistency with clinical tools and compliance with HIPAA and GDPR standards."*
+
+**Status: Framework Implemented — Clinical Scoring Deferred**
+
+#### Clinical Tool Integration (PHQ-9 / GAD-7)
+
+The Prisma schema includes a `ClinicalAssessmentLog` table with `phq9Score`, `gad7Score`, `severity`, `assessmentType`, and a `retentionUntil` field. The `Technique` table includes clinical gating fields: `minPhq9`, `maxPhq9`, `safeAtSeverity[]`, and `contraindicatedFlags[]` to restrict techniques to specific severity bands.
+
+**Current runtime status:** The LLM-based PHQ-9/GAD-7 scoring call was removed in v11.1 for latency reasons (`analysis_and_planning.py`). The pipeline always returns `clinical_severity = "minimal"` with zero scores. The schema and gating fields remain intact; re-enabling requires restoring the async clinical severity call. Technique contraindication filtering activates automatically once scoring is restored.
+
+#### Consent Management (GDPR Article 7 / HIPAA Authorization)
+
+Eight consent scopes are tracked per user in the `ConsentRecord` table:
+
+`WELLNESS_CHAT` · `MOOD_ANALYTICS` · `PERSONALIZATION` · `CRISIS_SAFETY` · `CRISIS_LOCATION` · `EMERGENCY_CONTACT_ALERTS` · `VOICE_ANALYSIS` · `RESEARCH_EXPORT`
+
+Each record stores: `granted` boolean · `legalBasis` (CONSENT / CONTRACT / HEALTH_CARE / VITAL_INTERESTS / LEGITIMATE_INTERESTS) · `policyVersion` · `noticeVersion` · timestamp. Crisis location alerts and emergency contact alerts both gate on consent before dispatching. Consent withdrawal is tracked via `DataSubjectRequest` with a `RECEIVED → IN_PROGRESS → COMPLETED` status lifecycle.
+
+#### Data Rights (GDPR Articles 17, 20)
+
+| Right | Implementation |
+|---|---|
+| Right to access | `GET /api/user/{user_id}/data-export` |
+| Right to erasure | `DELETE /api/user/{user_id}/data` · `User.deletedAt` soft-delete · cascade session/message delete |
+| Right to portability | Data export route returns structured JSON |
+| Right to rectification | `DataSubjectRequest` type `RECTIFICATION` tracked |
+| Data retention | `DataRetentionPolicy` table maps `dataClass` (SENSITIVE / PERSONAL / PHI) + `resourceType` → `retentionDays` + `legalBasis`; `CrisisLog.retentionUntil` field controls PHI deletion schedule |
+
+#### Audit Logging (HIPAA § 164.312 / GDPR Article 30)
+
+All significant data operations are recorded asynchronously to the `AuditEvent` table via `schedule_audit_event()` (`security/compliance.py`). Events: `AUTH_LOGIN` · `AUTH_SIGNUP` · `DATA_ACCESS` · `DATA_EXPORT` · `DATA_ERASURE` · `CONSENT_GRANTED` · `CONSENT_WITHDRAWN` · `SESSION_DELETE` · `SECURITY_EVENT`. All user identifiers are pseudonymized via `stable_hash()` before logging — raw `user_id` values never appear in audit records.
+
+#### Crisis Safety Records
+
+`CrisisLog` captures every crisis event with `riskLevel` (LOW / MEDIUM / HIGH), `triggeredKeywords`, `actionTaken`, `resourcesProvided`, `humanHandoffRequested`, `sensitivity = PHI`, and `retentionUntil`. Twilio integration dispatches SMS/WhatsApp alerts to Pakistan emergency contacts and trusted contacts.
+
+#### Implementation Status Summary
+
+| Area | State | Notes |
+|---|---|---|
+| Multimodal emotion detection | ✅ Implemented | Gemini + DSP acoustic; distress anchor; masking detection |
+| Personalized technique suggestion | ✅ Implemented | Semantic search; outcome tracking; EMA profile |
+| PHQ-9/GAD-7 runtime scoring | ⚠️ Deferred | Schema + gating fields present; LLM call removed in v11.1 for latency |
+| Technique contraindication filtering | ⚠️ Inactive | Depends on PHQ-9/GAD-7; activates automatically when scoring is restored |
+| Controlled trials with clinicians | ⚠️ Planned | Infrastructure ready (outcomes, ratings, audit logs); formal trial not yet run |
+| Consent recording | ✅ Implemented | 8 scopes; legal basis; withdrawal route |
+| Data export / erasure | ✅ Implemented | Routes registered; DSR table tracks request lifecycle |
+| Audit logging | ✅ Implemented | Pseudonymized, async, 9 event types |
+| Crisis records | ✅ Implemented | CrisisLog + Twilio SMS/WhatsApp |
+| Field-level encryption at rest | ⚠️ Not implemented | Schema marks PHI sensitivity; no column-level encryption applied |
+
+---
+
 ## Architecture Overview
 
 SentiMind has two orchestration layers before a user receives a reply:
@@ -62,12 +215,12 @@ The pre-graph gate decides whether the message can be handled by a fast bypass r
 ```mermaid
 flowchart TB
     %% Class Definitions
-    classDef client fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B,rx:6px,ry:6px;
-    classDef backend fill:#FDF4FF,stroke:#D946EF,stroke-width:2px,color:#701A75,rx:6px,ry:6px;
-    classDef agent fill:#F0FDFA,stroke:#0D9488,stroke-width:2px,color:#115E59,rx:6px,ry:6px;
-    classDef data fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#065F46,rx:6px,ry:6px;
-    classDef providers fill:#FFF7ED,stroke:#F97316,stroke-width:2px,color:#9A3412,rx:6px,ry:6px;
-    classDef user fill:#FFF1F2,stroke:#F43F5E,stroke-width:2px,color:#881337,rx:20px,ry:20px;
+    classDef client fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B;
+    classDef backend fill:#FDF4FF,stroke:#D946EF,stroke-width:2px,color:#701A75;
+    classDef agent fill:#F0FDFA,stroke:#0D9488,stroke-width:2px,color:#115E59;
+    classDef data fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#065F46;
+    classDef providers fill:#FFF7ED,stroke:#F97316,stroke-width:2px,color:#9A3412;
+    classDef user fill:#FFF1F2,stroke:#F43F5E,stroke-width:2px,color:#881337;
 
     User["👤 User Interface"]:::user
 
@@ -134,11 +287,11 @@ flowchart TB
 
 ```mermaid
 flowchart TD
-    classDef step fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B,rx:8px,ry:8px;
+    classDef step fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B;
     classDef decision fill:#FEF3C7,stroke:#D97706,stroke-width:2px,color:#78350F;
-    classDef bypass fill:#F0F9FF,stroke:#0284C7,stroke-width:2px,color:#075985,rx:8px,ry:8px;
-    classDef run fill:#F0FDFA,stroke:#0D9488,stroke-width:2px,color:#115E59,rx:8px,ry:8px;
-    classDef final fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#065F46,rx:8px,ry:8px;
+    classDef bypass fill:#F0F9FF,stroke:#0284C7,stroke-width:2px,color:#075985;
+    classDef run fill:#F0FDFA,stroke:#0D9488,stroke-width:2px,color:#115E59;
+    classDef final fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#065F46;
 
     A["📥 Incoming Request (Text/Audio)"]:::step
     B["🔄 Load Previous Messages (In-Memory Store & DB Fallback)"]:::step
@@ -179,11 +332,11 @@ Main modules:
 
 ```mermaid
 flowchart TD
-    classDef step fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B,rx:6px,ry:6px;
-    classDef parallel fill:#FDF4FF,stroke:#D946EF,stroke-width:2px,color:#701A75,rx:6px,ry:6px;
+    classDef step fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B;
+    classDef parallel fill:#FDF4FF,stroke:#D946EF,stroke-width:2px,color:#701A75;
     classDef decision fill:#FEF3C7,stroke:#D97706,stroke-width:2px,color:#78350F;
-    classDef bypass fill:#F0F9FF,stroke:#0284C7,stroke-width:2px,color:#075985,rx:6px,ry:6px;
-    classDef graph fill:#F0FDFA,stroke:#0D9488,stroke-width:2px,color:#115E59,rx:6px,ry:6px;
+    classDef bypass fill:#F0F9FF,stroke:#0284C7,stroke-width:2px,color:#075985;
+    classDef graph fill:#F0FDFA,stroke:#0D9488,stroke-width:2px,color:#115E59;
 
     Start["📥 Latest User Message"]:::step
     LoadHistory["📜 Load Recent Message History (In-Memory / DB Fallback)"]:::step
@@ -304,11 +457,11 @@ The bypass dispatcher in `_execute_gate_route()` can answer without running the 
 ```mermaid
 flowchart TD
     %% Class Definitions
-    classDef step fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B,rx:6px,ry:6px;
+    classDef step fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B;
     classDef decision fill:#FEF3C7,stroke:#D97706,stroke-width:2px,color:#78350F;
-    classDef bypass fill:#F0F9FF,stroke:#0284C7,stroke-width:2px,color:#075985,rx:6px,ry:6px;
-    classDef graph fill:#F0FDFA,stroke:#0D9488,stroke-width:2px,color:#115E59,rx:6px,ry:6px;
-    classDef persist fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#065F46,rx:6px,ry:6px;
+    classDef bypass fill:#F0F9FF,stroke:#0284C7,stroke-width:2px,color:#075985;
+    classDef graph fill:#F0FDFA,stroke:#0D9488,stroke-width:2px,color:#115E59;
+    classDef persist fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#065F46;
 
     GateResult["🚦 Gate Result"]:::step
     ConsentBlock{"❓ Prior listen-only or exercise refusal blocks technique?"}:::decision
@@ -380,10 +533,10 @@ When bypass is not used, the gate builds the graph state with:
 ```mermaid
 flowchart TD
     %% Class Definitions
-    classDef startend fill:#F5F5F7,stroke:#6C7A89,stroke-width:2px,color:#333,rx:20px,ry:20px;
-    classDef node fill:#F0FDFA,stroke:#0D9488,stroke-width:2px,color:#115E59,rx:8px,ry:8px;
+    classDef startend fill:#F5F5F7,stroke:#6C7A89,stroke-width:2px,color:#333;
+    classDef node fill:#F0FDFA,stroke:#0D9488,stroke-width:2px,color:#115E59;
     classDef decision fill:#FEF3C7,stroke:#D97706,stroke-width:2px,color:#78350F;
-    classDef crisis fill:#FEF2F2,stroke:#DC2626,stroke-width:2px,color:#991B1B,rx:8px,ry:8px;
+    classDef crisis fill:#FEF2F2,stroke:#DC2626,stroke-width:2px,color:#991B1B;
 
     Start([🏁 Graph Start]):::startend
     Intake["🔀 Node 1: run_parallel_intake"]:::node
@@ -423,9 +576,9 @@ Inline work:
 ```mermaid
 flowchart LR
     %% Class Definitions
-    classDef state fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B,rx:6px,ry:6px;
-    classDef node fill:#F0FDFA,stroke:#0D9488,stroke-width:2px,color:#115E59,rx:6px,ry:6px;
-    classDef merge fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#065F46,rx:6px,ry:6px;
+    classDef state fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B;
+    classDef node fill:#F0FDFA,stroke:#0D9488,stroke-width:2px,color:#115E59;
+    classDef merge fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#065F46;
 
     State["📥 Initial Graph State"]:::state
     
@@ -475,9 +628,9 @@ Inline subnodes:
 ```mermaid
 flowchart TD
     %% Class Definitions
-    classDef state fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B,rx:6px,ry:6px;
-    classDef subnode fill:#FDF4FF,stroke:#D946EF,stroke-width:2px,color:#701A75,rx:6px,ry:6px;
-    classDef output fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#065F46,rx:6px,ry:6px;
+    classDef state fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B;
+    classDef subnode fill:#FDF4FF,stroke:#D946EF,stroke-width:2px,color:#701A75;
+    classDef output fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#065F46;
 
     IntakeState["📥 Intake State"]:::state
     
@@ -552,9 +705,9 @@ Inline subnodes:
 ```mermaid
 flowchart LR
     %% Class Definitions
-    classDef state fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B,rx:6px,ry:6px;
-    classDef subnode fill:#FDF4FF,stroke:#D946EF,stroke-width:2px,color:#701A75,rx:6px,ry:6px;
-    classDef output fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#065F46,rx:6px,ry:6px;
+    classDef state fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B;
+    classDef subnode fill:#FDF4FF,stroke:#D946EF,stroke-width:2px,color:#701A75;
+    classDef output fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#065F46;
 
     Planned["📥 Planned State"]:::state
     
@@ -640,9 +793,9 @@ Primary module:
 ```mermaid
 flowchart TD
     %% Class Definitions
-    classDef input fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B,rx:6px,ry:6px;
-    classDef task fill:#FDF4FF,stroke:#D946EF,stroke-width:2px,color:#701A75,rx:6px,ry:6px;
-    classDef db fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#065F46,rx:6px,ry:6px;
+    classDef input fill:#EEF2FF,stroke:#6366F1,stroke-width:2px,color:#1E1B4B;
+    classDef task fill:#FDF4FF,stroke:#D946EF,stroke-width:2px,color:#701A75;
+    classDef db fill:#ECFDF5,stroke:#059669,stroke-width:2px,color:#065F46;
 
     FinalState["📥 Frozen Final State (Response Sent!)"]:::input
     
@@ -738,10 +891,10 @@ The agent is intentionally compact: five graph nodes with conditional routing be
 ```mermaid
 flowchart TD
     %% Class Definitions
-    classDef startend fill:#F5F5F7,stroke:#6C7A89,stroke-width:2px,color:#333,rx:20px,ry:20px;
-    classDef node fill:#F0FDFA,stroke:#0D9488,stroke-width:2px,color:#115E59,rx:8px,ry:8px;
+    classDef startend fill:#F5F5F7,stroke:#6C7A89,stroke-width:2px,color:#333;
+    classDef node fill:#F0FDFA,stroke:#0D9488,stroke-width:2px,color:#115E59;
     classDef decision fill:#FEF3C7,stroke:#D97706,stroke-width:2px,color:#78350F;
-    classDef crisis fill:#FEF2F2,stroke:#DC2626,stroke-width:2px,color:#991B1B,rx:8px,ry:8px;
+    classDef crisis fill:#FEF2F2,stroke:#DC2626,stroke-width:2px,color:#991B1B;
 
     Start([🏁 Start]):::startend
     Intake["🔀 run_parallel_intake"]:::node
@@ -971,6 +1124,34 @@ flowchart TD
 **Persisted fusion metadata:** text/voice mismatch · possible masking · fusion confidence · transcription confidence · voice feature snapshot · conversation phase · response strategy
 
 The response prompt is instructed to acknowledge uncertainty carefully and never assert that the user feels something different from what they said.
+
+### Voice Signal Pipeline Detail
+
+```
+Audio upload
+  └─▶ Gemini transcription + holistic audio emotion (tone, pace, pauses, energy, strain, hesitation)
+  └─▶ DSP acoustic feature extraction  — voice/acoustic_features.py
+        ├── librosa  : MFCCs (13-dim vector), RMS loudness, spectral flux, pause density (real VAD)
+        └── parselmouth/Praat : pitch F0 mean/std, jitter, shimmer, HNR (voice quality)
+  └─▶ Composite distress index  =  weighted blend of Gemini + acoustic features
+  └─▶ Emotion fusion node  —  merges Gemini audio emotion with text emotion
+```
+
+**Server startup warm-up (`preload_all_voice_models`):**
+Called by `organized_lifespan` at FastAPI startup. Runs a dummy `librosa.feature.mfcc()` call to trigger numba JIT compilation and a dummy `parselmouth.Sound()` to initialise the Praat native library — eliminating a ~2–5 s cold-import penalty on Windows for the first real voice request. If either library is unavailable the pipeline degrades gracefully to Gemini-only analysis.
+
+**Acoustic feature output fields:**
+
+| Field | Source |
+|---|---|
+| `mfcc_vector` | librosa — 13 MFCC coefficients |
+| `pause_density` | librosa — real silence ratio via energy VAD |
+| `distress_index` | weighted composite (Gemini + acoustic) |
+| `pitch_mean`, `pitch_std` | parselmouth — fundamental frequency F0 |
+| `jitter` | parselmouth — cycle-to-cycle pitch perturbation |
+| `shimmer` | parselmouth — amplitude perturbation |
+| `hnr` | parselmouth — harmonics-to-noise ratio |
+| `speech_rate`, `spectral_flux` | librosa — rhythm and spectral change |
 
 ## Crisis Safety
 
@@ -1370,6 +1551,14 @@ Frontend variables commonly required:
 - `NEXT_PUBLIC_API_BASE_URL`
 - `NEXT_PUBLIC_SUPABASE_URL`
 - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+
+Optional backend feature flags:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `SENTIMIND_BACKGROUND_TREND` | `1` | `1` = run trend DB query in background; `0` = inline blocking call |
+| `SENTIMIND_INLINE_DISTORTION` | `0` | `1` = run cognitive distortion LLM inline; `0` = background/profile path |
+| `SENTIMIND_INLINE_ACTIVATION` | `0` | `1` = run behavioral activation sub-node inline; `0` = skip (default off) |
 
 Keep secrets out of source control. Use local `.env` files or deployment provider secret stores.
 

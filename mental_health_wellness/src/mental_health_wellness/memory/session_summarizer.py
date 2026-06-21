@@ -160,9 +160,15 @@ Return ONLY valid JSON: {{"title": "...", "summary": "..."}}"""
         print(f"[MEMORY:SUMMARIES]  summarize_session failed (non-fatal): {str(e)[:150]}")
 
 
-async def get_session_summaries(user_id: str) -> str:
+async def get_session_summaries(user_id: str, exclude_session_id: str | None = None) -> str:
     """
     Retrieve past session summaries for a user, formatted for prompt injection.
+
+    Args:
+        user_id: The user whose summaries to load.
+        exclude_session_id: If provided, summaries from this session are excluded.
+                            Pass the current session_id to prevent the active session
+                            from contaminating its own gate/context with its own history.
 
     Returns:
         Formatted string of past sessions, or empty string.
@@ -171,8 +177,12 @@ async def get_session_summaries(user_id: str) -> str:
         from ..db.client import get_prisma_client
         prisma = await get_prisma_client()
 
+        where: dict = {"userId": user_id}
+        if exclude_session_id:
+            where["sessionId"] = {"not": exclude_session_id}
+
         summaries = await prisma.sessionsummary.find_many(
-            where={"userId": user_id},
+            where=where,
             order={"createdAt": "desc"},
             take=MAX_SUMMARIES
         )

@@ -24,13 +24,71 @@ WHY THIS IS SAFE:
 import asyncio
 import os
 import re
+import time as _time
 from ..agent.state import MentalHealthState
-from .emotion_fusion_node import fuse_emotions
+from ..pipeline.emotion_fusion_node import fuse_emotions
 from .conversation_context_resolver import resolve_conversation_context
-from .conversation_planner_node import conversation_planner_node
-from .behavioral_activation_node import activate_behavioral_intervention
-from .consent_parser import parse_consent_and_suppression
+from ..pipeline.conversation_planner_node import conversation_planner_node
+from ..pipeline.behavioral_activation_node import activate_behavioral_intervention
+from ..pipeline.consent_parser import parse_consent_and_suppression
 from ..utils.turn_lifecycle import refine_turn_type
+
+# v14.1: Clinical assessment background-task cache
+# Stores the last computed PHQ-9/GAD-7 result per session so the response path
+# reads the previous turn's result (zero blocking latency) while the current
+# turn's assessment runs in the background.
+_clinical_session_cache: dict[str, dict] = {}
+
+# Routes where clinical assessment is not clinically meaningful
+_CLINICAL_SKIP_ROUTES = {"chitchat", "memory_query", "technique_follow_up"}
+
+
+def _minimal_clinical_defaults() -> dict:
+    return {
+        "severity": "minimal", "phq9_total": 0, "gad7_total": 0,
+        "clinical_indicators": [], "clinical_confidence": 0.0,
+        "clinical_phq9_score": 0, "clinical_gad7_score": 0, "clinical_delta": None,
+    }
+
+
+async def _refresh_clinical_cache(
+    session_id: str,
+    user_id: str,
+    message: str,
+    recent_context: str,
+    emotion: str,
+    intensity: float,
+    emotional_trend: str,
+    session_start_score: float | None,
+) -> None:
+    """Fire-and-forget: runs after the response path, updates cache for the next turn."""
+    try:
+        from ..llm.llm_classifier import clinical_severity_check
+        from ..services.clinical_aggregator import aggregate_clinical_assessment
+
+        raw = await clinical_severity_check(
+            message=message,
+            recent_context=recent_context,
+            emotion=emotion,
+            intensity=intensity,
+            emotional_trend=emotional_trend,
+        )
+        aggregated = await aggregate_clinical_assessment(
+            user_id=user_id,
+            current=raw,
+            session_start_score=session_start_score,
+        )
+        _clinical_session_cache[session_id] = {
+            "result": aggregated,
+            "timestamp": _time.time(),
+        }
+        print(
+            f"[CLINICAL_BG] Cache updated: {aggregated.get('severity', '?').upper()} "
+            f"PHQ={aggregated.get('phq9_total', 0)} GAD={aggregated.get('gad7_total', 0)} "
+            f"delta={aggregated.get('clinical_delta')}"
+        )
+    except Exception as e:
+        print(f"[CLINICAL_BG] Background refresh failed (non-fatal): {str(e)[:80]}")
 
 
 _ACCEPTANCE_RE = re.compile(
@@ -281,7 +339,7 @@ async def run_analysis_and_planning(state: MentalHealthState) -> dict:
     cached_trend_result = None
     if background_trend and not inline_distortion:
         try:
-            from .trend_analyzer_node import get_cached_trend_snapshot
+            from ..pipeline.trend_analyzer_node import get_cached_trend_snapshot
             cached_trend_result = get_cached_trend_snapshot(state_after_fusion)
             merged.update(cached_trend_result)
             print(f"[ANALYSIS_AND_PLANNING]   Trend using {cached_trend_result.get('trend_source', 'cache')} snapshot "
@@ -291,18 +349,50 @@ async def run_analysis_and_planning(state: MentalHealthState) -> dict:
             cached_trend_result = {"emotional_trend": "stable", "trend_window": []}
             merged.update(cached_trend_result)
 
-    # Clinical severity check REMOVED (v11.1 latency optimisation).
-    # Always use safe minimal defaults — zero LLM cost, no DB write.
-    # Technique selector and response generator receive these fields but
-    # 'minimal' / 0 scores mean no contraindication filtering is applied.
+    # v14.1: Clinical assessment — background-task pattern (zero response-path latency).
+    # The CURRENT turn uses the PREVIOUS turn's cached PHQ-9/GAD-7 result (1-turn lag
+    # is clinically acceptable — PHQ-9/GAD-7 reflects persistent conditions, not
+    # moment-to-moment changes). The background task updates the cache for the NEXT turn.
+    _gate_route = merged.get("gate_route", state_after_fusion.get("gate_route", "therapeutic"))
+    _session_id = state.get("session_id", "")
+    _cached_clinical = _clinical_session_cache.get(_session_id, {}).get(
+        "result", _minimal_clinical_defaults()
+    )
+    if _gate_route not in _CLINICAL_SKIP_ROUTES and _session_id:
+        # Fire background refresh — non-blocking, completes after response is sent
+        _msgs = state.get("messages", [])
+        _recent_ctx = "\n".join(
+            f"{'User' if getattr(m, 'type', '') == 'human' else 'Assistant'}: "
+            f"{str(getattr(m, 'content', ''))[:150]}"
+            for m in _msgs[-5:-1] if getattr(m, "content", "")
+        )
+        asyncio.create_task(_refresh_clinical_cache(
+            session_id=_session_id,
+            user_id=state.get("user_id", ""),
+            message=_msgs[-1].content if _msgs else "",
+            recent_context=_recent_ctx,
+            emotion=merged.get("fused_emotion", "neutral"),
+            intensity=float(merged.get("fused_intensity", 0.5)),
+            emotional_trend=merged.get("emotional_trend", "stable"),
+            session_start_score=state.get("session_start_clinical_score"),
+        ))
+
     merged.update({
-        "clinical_severity":   "minimal",
-        "clinical_phq9_score": 0,
-        "clinical_gad7_score": 0,
-        "clinical_indicators": [],
-        "clinical_confidence": 0.0,
+        "clinical_severity":   _cached_clinical.get("severity", "minimal"),
+        "clinical_phq9_score": _cached_clinical.get("phq9_total", 0),
+        "clinical_gad7_score": _cached_clinical.get("gad7_total", 0),
+        # Raw (non-aggregated) scores for this turn — can decrease as user improves
+        "clinical_raw_phq9":   _cached_clinical.get("current_phq9_total", _cached_clinical.get("phq9_total", 0)),
+        "clinical_raw_gad7":   _cached_clinical.get("current_gad7_total", _cached_clinical.get("gad7_total", 0)),
+        "clinical_indicators": _cached_clinical.get("clinical_indicators", []),
+        "clinical_confidence": _cached_clinical.get("confidence", _cached_clinical.get("clinical_confidence", 0.0)),
+        "clinical_delta":      _cached_clinical.get("clinical_delta"),
     })
-    print("[ANALYSIS_AND_PLANNING]   Clinical severity → minimal (deterministic default, no LLM)")
+    print(
+        f"[ANALYSIS_AND_PLANNING]   Clinical: {merged['clinical_severity'].upper()} "
+        f"(PHQ={merged['clinical_phq9_score']}, GAD={merged['clinical_gad7_score']}, "
+        f"cached={'yes' if _session_id in _clinical_session_cache else 'no (first turn)'})"
+    )
 
 
     if inline_distortion:
@@ -323,7 +413,7 @@ async def run_analysis_and_planning(state: MentalHealthState) -> dict:
         print("[ANALYSIS_AND_PLANNING]   Distortion detection moved to background/profile path")
         if background_trend:
             try:
-                from .trend_analyzer_node import refresh_emotional_trend_cache
+                from ..pipeline.trend_analyzer_node import refresh_emotional_trend_cache
 
                 asyncio.create_task(refresh_emotional_trend_cache(state_after_fusion))
                 if cached_trend_result is None:
@@ -334,7 +424,7 @@ async def run_analysis_and_planning(state: MentalHealthState) -> dict:
                 merged.update({"emotional_trend": "stable", "trend_window": []})
         else:
             try:
-                from .trend_analyzer_node import analyze_emotional_trends
+                from ..pipeline.trend_analyzer_node import analyze_emotional_trends
                 trend_result = await analyze_emotional_trends(state_after_fusion)
                 merged.update(trend_result)
             except Exception as e:

@@ -10,7 +10,7 @@ from mental_health_wellness.tools.technique_tools import (
     recommend_technique,
 )
 from mental_health_wellness.techniques.emotion_metadata import score_technique_match
-from mental_health_wellness.nodes.technique_selector_node import select_technique
+from mental_health_wellness.pipeline.technique_selector_node import select_technique
 
 
 def test_semantic_tier_bonus():
@@ -233,7 +233,7 @@ async def test_select_technique_context_sufficiency_gate():
             
     mock_tool = MockTool()
     
-    with patch("mental_health_wellness.nodes.technique_selector_node.recommend_technique", new=mock_tool):
+    with patch("mental_health_wellness.pipeline.technique_selector_node.recommend_technique", new=mock_tool):
         # Bypassed by high context sufficiency (0.75 >= 0.65)
         state = {
             "needs_technique": True,

@@ -13,8 +13,8 @@ now runs after this fused node (same logic, same state keys).
 """
 
 from ..agent.state import MentalHealthState
-from .technique_selector_node import select_technique
-from .role_selector import select_agent_role
+from ..pipeline.technique_selector_node import select_technique
+from ..pipeline.role_selector import select_agent_role
 
 
 async def run_response_pipeline(state: MentalHealthState) -> dict:

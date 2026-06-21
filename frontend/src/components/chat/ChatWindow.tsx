@@ -36,9 +36,9 @@ function ChatWindowComponent({
   }, [messages.length, isLoading])
 
   return (
-    <div className="custom-scrollbar flex-1 overflow-y-auto bg-slate-50 px-4 py-6">
+    <div className="custom-scrollbar flex-1 overflow-y-auto bg-slate-50 px-4 py-6 md:px-6 md:py-8">
       <div className="mx-auto flex max-w-4xl flex-col gap-4">
-        <div className="mb-2 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="mb-2 rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-[#1a1a1a]">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <p className="text-xs font-semibold uppercase tracking-wider text-slate-400">Session focus</p>
@@ -62,15 +62,15 @@ function ChatWindowComponent({
         </div>
 
         {messages.map((message, index) => (
-          <MessageBubble key={`${message.role}-${index}`} message={message} />
+          <MessageBubble key={message.id ?? `${message.role}-${index}`} message={message} />
         ))}
 
-        {(showTypingIndicator || isLoading) && (
+        {!messages.some(m => m._streaming) && (showTypingIndicator || isLoading) && (
           <div className="mb-2 flex w-full animate-slide-up items-end gap-3">
             <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white shadow-sm">
               <Sparkles className="h-4 w-4" />
             </div>
-            <TypingIndicator message={showTypingIndicator ? 'Thinking' : 'Processing'} />
+            <TypingIndicator message="Thinking" />
           </div>
         )}
 

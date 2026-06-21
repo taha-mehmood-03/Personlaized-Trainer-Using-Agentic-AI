@@ -20,15 +20,15 @@
 
 html[data-theme='dark'] {
   color-scheme: dark;
-  --app-bg: #07111f;
-  --app-bg-soft: #0a1c2a;
-  --app-surface: #0f1a2a;
-  --app-surface-muted: #162235;
-  --app-border: #27384d;
-  --app-border-soft: #1e2d40;
+  --app-bg: #000000;
+  --app-bg-soft: #080808;
+  --app-surface: #111111;
+  --app-surface-muted: #1a1a1a;
+  --app-border: #2e2e2e;
+  --app-border-soft: #242424;
   --app-text: #f1f5f9;
-  --app-text-muted: #b7c4d6;
-  --app-text-faint: #8292a8;
+  --app-text-muted: #a8b3c4;
+  --app-text-faint: #6b7a8d;
   --app-focus: #22d3ee;
   --app-brand: #22d3ee;
   --app-accent: #34d399;
@@ -92,11 +92,11 @@ button, a, input, textarea, select {
 }
 
 html[data-theme='dark'] .custom-scrollbar::-webkit-scrollbar-thumb {
-  background-color: #334155;
+  background-color: #333333;
 }
 
 html[data-theme='dark'] .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background-color: #475569;
+  background-color: #444444;
 }
 
 @layer utilities {
@@ -182,7 +182,7 @@ html[data-theme='dark'] .shadow-2xl {
 html[data-theme='dark'] .hover\:bg-slate-50:hover,
 html[data-theme='dark'] .hover\:bg-slate-100:hover,
 html[data-theme='dark'] .hover\:bg-slate-200:hover {
-  background-color: #17253a;
+  background-color: #1f1f1f;
 }
 
 html[data-theme='dark'] .hover\:text-slate-950:hover,
@@ -279,4 +279,39 @@ html[data-theme='dark'] option {
   line-height: 1.7;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* Chat bubble contrast in pure-black dark mode */
+html[data-theme='dark'] .bg-slate-900 {
+  background-color: #1e1e1e;
+}
+
+html[data-theme='dark'] .bg-slate-950 {
+  background-color: #141414;
+}
+
+html[data-theme='dark'] .border-slate-200\/80 {
+  border-color: #2e2e2e;
+}
+
+/* ── Gradient dark mode: override Tailwind gradient stop CSS vars ──────────── */
+html[data-theme='dark'] .from-white {
+  --tw-gradient-from: #111111;
+  --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to, transparent);
+}
+
+html[data-theme='dark'] .from-slate-50 {
+  --tw-gradient-from: #1a1a1a;
+  --tw-gradient-stops: var(--tw-gradient-from), var(--tw-gradient-to, transparent);
+}
+
+html[data-theme='dark'] .to-slate-50,
+html[data-theme='dark'] .to-slate-100,
+html[data-theme='dark'] .to-emerald-50,
+html[data-theme='dark'] .to-amber-50,
+html[data-theme='dark'] .to-sky-50,
+html[data-theme='dark'] .to-cyan-50,
+html[data-theme='dark'] .to-rose-50,
+html[data-theme='dark'] .to-blue-50 {
+  --tw-gradient-to: #1a1a1a;
 }

@@ -326,7 +326,7 @@ def _detect_user_act(
         return "reject_technique", "reject_technique", flags + ["reject_technique", "technique_rejection"], "latest_recommended_technique", "handle_technique_rejection"
     if state.get("gate_route") == "positive_feedback" or "positive_feedback" in gate_flags:
         return "positive_feedback", "positive_feedback", flags + ["positive_feedback"], "latest_recommended_technique", "positive_feedback"
-    if "accept_technique" in gate_flags:
+    if "accept_technique" in gate_flags and not prior_steps_given:
         return "accept_technique", "accept_technique", flags + ["accept_technique"], "latest_recommended_technique", "continue_active_technique"
     if "memory_query" in gate_flags or "technique_name_query" in gate_flags:
         return "memory_query", "memory_query", flags + ["memory_query", "technique_name_query", "refers_to_previous_technique"], "technique", "answer_memory_query"
@@ -493,6 +493,11 @@ def _has_enough_context_for_next_step(slot_updates: dict, current: str) -> bool:
     if filled >= RICH_CONTEXT_MIN_SLOTS:
         return True
     if word_count >= RICH_CONTEXT_MIN_WORDS_WITH_FORMULATION and has_formulation and has_situation:
+        return True
+    # Intermediate path: moderate richness — 25+ words with 2+ slots and any formulation or
+    # situation signal. Bridges the gap between the conservative 4-slot check and the planner's
+    # richer fast-paths so the resolver doesn't prematurely ask a context question.
+    if word_count >= 25 and filled >= 2 and (has_formulation or has_situation):
         return True
     return False
 

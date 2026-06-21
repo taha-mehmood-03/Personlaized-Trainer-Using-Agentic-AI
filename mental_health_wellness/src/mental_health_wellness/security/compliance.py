@@ -9,16 +9,20 @@ They do not by themselves certify legal compliance.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
 from fastapi import HTTPException, Request
+
+_breach_logger = logging.getLogger("sentimind.breach")
 
 
 DEFAULT_ALLOWED_ORIGINS = [
@@ -326,6 +330,27 @@ async def ensure_compliance_schema(prisma) -> None:
         DO NOTHING
         """,
     )
+    await _execute(
+        prisma,
+        """
+        CREATE TABLE IF NOT EXISTS "ProactiveNotification" (
+            id TEXT PRIMARY KEY,
+            "userId" TEXT NOT NULL,
+            "alertType" TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            severity TEXT NOT NULL DEFAULT 'medium',
+            "isRead" BOOLEAN NOT NULL DEFAULT FALSE,
+            "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+        """,
+    )
+    await _execute(
+        prisma,
+        """
+        CREATE INDEX IF NOT EXISTS "ProactiveNotification_user_idx"
+        ON "ProactiveNotification" ("userId", "createdAt")
+        """,
+    )
     _compliance_schema_ready = True
 
 
@@ -559,6 +584,211 @@ async def create_data_subject_request(
         )
         """,
     )
+
+
+_BREACH_THRESHOLDS = {
+    "mass_export": {"window_minutes": 60, "count": 5},
+    "rapid_access": {"window_minutes": 5, "count": 50},
+    "brute_force": {"window_minutes": 10, "count": 15},
+    "bulk_delete": {"window_minutes": 30, "count": 3},
+}
+
+
+async def scan_for_breach_indicators(prisma) -> list[dict[str, Any]]:
+    """
+    Scan recent AuditEvent rows for suspicious patterns.
+
+    Checks four rule categories:
+      - mass_export:   5+ DATA_EXPORT events in 60 min from same actor
+      - rapid_access:  50+ DATA_ACCESS events in 5 min from same actor
+      - brute_force:   15+ AUTH_LOGIN FAILURE events in 10 min from same IP
+      - bulk_delete:   3+ DATA_ERASURE events in 30 min from same actor
+
+    Returns a list of incident dicts (empty when nothing suspicious found).
+    Each incident has: rule, actor_hash, ip_hash, event_count, window_start.
+    """
+    if not compliance_mode_enabled():
+        return []
+
+    incidents: list[dict[str, Any]] = []
+    now = utc_now()
+
+    try:
+        await ensure_compliance_schema(prisma)
+
+        for rule, cfg in _BREACH_THRESHOLDS.items():
+            window_start = now - timedelta(minutes=cfg["window_minutes"])
+            window_iso = window_start.isoformat()
+
+            if rule == "brute_force":
+                rows = await _query(
+                    prisma,
+                    f"""
+                    SELECT "ipHash", COUNT(*) AS cnt
+                    FROM "AuditEvent"
+                    WHERE "eventType" = 'AUTH_LOGIN'
+                      AND status = 'FAILURE'
+                      AND "createdAt" >= {_quote(window_iso)}::timestamptz
+                    GROUP BY "ipHash"
+                    HAVING COUNT(*) >= {cfg['count']}
+                    """,
+                )
+                for row in rows or []:
+                    r = dict(row)
+                    incidents.append({
+                        "rule": rule,
+                        "actor_hash": None,
+                        "ip_hash": r.get("ipHash"),
+                        "event_count": int(r.get("cnt", 0)),
+                        "window_start": window_iso,
+                    })
+            else:
+                event_type_map = {
+                    "mass_export": "DATA_EXPORT",
+                    "rapid_access": "DATA_ACCESS",
+                    "bulk_delete": "DATA_ERASURE",
+                }
+                event_type = event_type_map[rule]
+                rows = await _query(
+                    prisma,
+                    f"""
+                    SELECT "actorUserIdHash", COUNT(*) AS cnt
+                    FROM "AuditEvent"
+                    WHERE "eventType" = {_quote(event_type)}
+                      AND "createdAt" >= {_quote(window_iso)}::timestamptz
+                    GROUP BY "actorUserIdHash"
+                    HAVING COUNT(*) >= {cfg['count']}
+                    """,
+                )
+                for row in rows or []:
+                    r = dict(row)
+                    incidents.append({
+                        "rule": rule,
+                        "actor_hash": r.get("actorUserIdHash"),
+                        "ip_hash": None,
+                        "event_count": int(r.get("cnt", 0)),
+                        "window_start": window_iso,
+                    })
+
+        if incidents:
+            for inc in incidents:
+                _breach_logger.warning(
+                    "BREACH INDICATOR | rule=%s actor=%s ip=%s count=%d window_start=%s",
+                    inc["rule"],
+                    inc.get("actor_hash", "N/A"),
+                    inc.get("ip_hash", "N/A"),
+                    inc["event_count"],
+                    inc["window_start"],
+                )
+    except Exception as exc:
+        _breach_logger.error("Breach scan failed: %s", exc)
+
+    return incidents
+
+
+async def enforce_data_retention(prisma) -> dict[str, int]:
+    """
+    Delete rows whose retentionUntil timestamp has passed.
+
+    Covers: Message, MoodLog, SessionSummary, UserFact, CrisisLog,
+            ClinicalAssessmentLog, AuditEvent (>2 years old).
+
+    Returns a dict of table → rows_deleted for logging.
+    """
+    if not compliance_mode_enabled():
+        return {}
+
+    deleted: dict[str, int] = {}
+    now_iso = utc_now().isoformat()
+    two_years_ago = (utc_now() - timedelta(days=730)).isoformat()
+
+    cleanup_targets = [
+        ("Message", '"retentionUntil"'),
+        ("MoodLog", '"retentionUntil"'),
+        ("SessionSummary", '"retentionUntil"'),
+        ("UserFact", '"retentionUntil"'),
+        ("CrisisLog", '"retentionUntil"'),
+        ("ClinicalAssessmentLog", '"retentionUntil"'),
+    ]
+
+    try:
+        await ensure_compliance_schema(prisma)
+
+        for table, col in cleanup_targets:
+            try:
+                result = await _query(
+                    prisma,
+                    f"""
+                    WITH deleted AS (
+                        DELETE FROM {_quote(table)}
+                        WHERE {col} IS NOT NULL
+                          AND {col} < {_quote(now_iso)}::timestamptz
+                        RETURNING id
+                    )
+                    SELECT COUNT(*) AS cnt FROM deleted
+                    """,
+                )
+                count = int((dict(result[0]) if result else {}).get("cnt", 0))
+                if count:
+                    deleted[table] = count
+                    _breach_logger.info("Retention cleanup | table=%s rows_deleted=%d", table, count)
+            except Exception:
+                continue
+
+        # Purge AuditEvent rows older than 2 years (keep recent for breach detection)
+        try:
+            result = await _query(
+                prisma,
+                f"""
+                WITH deleted AS (
+                    DELETE FROM "AuditEvent"
+                    WHERE "createdAt" < {_quote(two_years_ago)}::timestamptz
+                    RETURNING id
+                )
+                SELECT COUNT(*) AS cnt FROM deleted
+                """,
+            )
+            count = int((dict(result[0]) if result else {}).get("cnt", 0))
+            if count:
+                deleted["AuditEvent"] = count
+                _breach_logger.info("Retention cleanup | table=AuditEvent rows_deleted=%d", count)
+        except Exception:
+            pass
+
+    except Exception as exc:
+        _breach_logger.error("Retention enforcement failed: %s", exc)
+
+    return deleted
+
+
+async def run_compliance_background_jobs(prisma) -> None:
+    """
+    Run breach detection and data retention enforcement as a periodic background task.
+    Call this once from the lifespan startup — it loops every 6 hours.
+    """
+    interval_seconds = int(os.getenv("SENTIMIND_COMPLIANCE_JOB_INTERVAL_S", str(6 * 3600)))
+
+    async def _loop() -> None:
+        while True:
+            try:
+                await asyncio.sleep(interval_seconds)
+                _breach_logger.info("Compliance jobs starting (interval=%ds)", interval_seconds)
+                incidents = await scan_for_breach_indicators(prisma)
+                if incidents:
+                    _breach_logger.warning("Breach scan complete | %d indicator(s) found", len(incidents))
+                else:
+                    _breach_logger.info("Breach scan complete | no indicators")
+                deleted = await enforce_data_retention(prisma)
+                if deleted:
+                    _breach_logger.info("Retention sweep complete | %s", deleted)
+                else:
+                    _breach_logger.info("Retention sweep complete | nothing to purge")
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                _breach_logger.error("Compliance background job error: %s", exc)
+
+    asyncio.create_task(_loop())
 
 
 async def fetch_compliance_records(prisma, *, user_id: str) -> dict[str, Any]:

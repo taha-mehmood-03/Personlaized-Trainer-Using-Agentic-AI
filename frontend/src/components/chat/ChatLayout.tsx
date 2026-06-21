@@ -261,8 +261,8 @@ export function ChatLayout({
           </aside>
         )}
 
-        <section className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-          <div className="flex shrink-0 items-center gap-2 border-b border-slate-200 bg-white px-3">
+        <section className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm dark:border-slate-800 dark:bg-[#111111]">
+          <div className="flex shrink-0 items-center gap-2 border-b border-slate-200 bg-white px-3 dark:border-slate-800 dark:bg-[#111111]">
             <button
               onClick={() => setSidebarOpen((open) => !open)}
               className="hidden rounded-xl p-2 text-slate-600 transition-colors hover:bg-slate-100 lg:inline-flex"

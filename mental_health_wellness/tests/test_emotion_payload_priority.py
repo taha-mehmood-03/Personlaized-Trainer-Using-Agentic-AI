@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from mental_health_wellness.api.app import _emotion_payload_from_result
+from mental_health_wellness.api.helpers import _emotion_payload_from_result
 
 
 def test_emotion_payload_prefers_fused_emotion_over_raw_mood():

@@ -42,6 +42,10 @@ def get_cached_trend_snapshot(state: MentalHealthState) -> dict:
     session_id = state.get("session_id", "")
     current_point = _current_trend_point(state)
 
+    # v14.0: positive_feedback is LLM intent — always "improving" regardless of slope
+    if state.get("gate_route") == "positive_feedback":
+        return {"emotional_trend": "improving", "trend_window": [current_point], "trend_source": "positive_feedback_override"}
+
     if not session_id:
         return {"emotional_trend": "stable", "trend_window": [current_point]}
 
@@ -102,6 +106,16 @@ async def analyze_emotional_trends(state: MentalHealthState) -> dict:
     current_intensity = state.get("fused_intensity", state.get("intensity", 0.5))
 
     print(f"\n[NODE: TREND_ANALYZER]  Analyzing session trend: {session_id[:20] if session_id else 'UNKNOWN'}...")
+
+    # v14.0: positive_feedback is LLM-classified intent — user explicitly said the session
+    # helped. Override regression: intensity was capped to ≤0.25 by emotion_fusion, so the
+    # slope calculation would produce a misleading "worsening" signal on the next turn.
+    if state.get("gate_route") == "positive_feedback":
+        print("[NODE: TREND_ANALYZER]  positive_feedback route → overriding trend to 'improving'")
+        return {
+            "emotional_trend": "improving",
+            "trend_window": list(state.get("trend_window") or []),
+        }
 
     if not session_id:
         print("[NODE: TREND_ANALYZER]  No session_id  returning stable")

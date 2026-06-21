@@ -3,7 +3,7 @@ from langchain_core.messages import HumanMessage
 
 from mental_health_wellness.nodes.analysis_and_planning import _derive_exam_sleep_cognitive_context
 from mental_health_wellness.nodes.parallel_intake import _gate_calibrated_mood
-from mental_health_wellness.nodes.technique_selector_node import select_technique
+from mental_health_wellness.pipeline.technique_selector_node import select_technique
 
 
 def test_acceptance_message_preserves_prior_exam_sleep_context():

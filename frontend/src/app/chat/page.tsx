@@ -14,7 +14,7 @@ export default async function ChatPage() {
   }
 
   return (
-    <div className="flex h-screen w-full flex-col overflow-hidden bg-slate-50">
+    <div className="flex h-screen w-full flex-col overflow-hidden">
       <CrisisBanner />
       <ChatLayout
         userId={session.user.id}

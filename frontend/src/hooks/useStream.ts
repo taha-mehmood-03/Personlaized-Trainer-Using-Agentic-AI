@@ -359,6 +359,7 @@ export function useStream(userId: string) {
                                                 _showCursor: false,
                                                 crisis_detected: meta.crisis_detected,
                                                 technique: primaryTechnique,
+                                                techniqueOfferedThisTurn: !!primaryTechnique && !!meta.technique_offered_this_turn,
                                                 recommendedTechniquesByCategory,
                                                 alternativeTechniques: normalizedAlternativeTechniques,
                                             }

@@ -32,8 +32,8 @@ from typing import Optional
 
 from .groq_llm import get_llm_manager, message_content_to_text
 from ..utils.turn_signals import (
+    assistant_likely_gave_steps,
     assistant_offered_technique,
-    
     has_negative_feedback_signal,
     has_positive_outcome_signal,
     is_explicit_exercise_request,
@@ -83,6 +83,30 @@ def deterministic_crisis_safety_net(message: str) -> dict:
             "reason": "empty message",
             "source": "deterministic_safety_net",
         }
+
+    # Panic attack phrases are acute anxiety episodes — NEVER suicidal ideation.
+    # Short-circuit before any crisis pattern matching so they cannot be mis-escalated.
+    _panic_patterns = (
+        # fuzzy: panic/pnic/panik/panick/pannick + attack (covers typos)
+        r"\bpa?ni?c?k?\s*att?ack\b",
+        # "im having a pnic/panic/panik..."
+        r"\bim\s+having\s+a\s+pa?ni?c?k?\b",
+        r"\bi('?m| am)\s+having\s+a\s+pa?ni?c?k?\b",
+        r"\bi\s+think\s+i('?m| am)\s+having\s+a\s+pa?ni?c?k?\b",
+        # standalone typo variants
+        r"\bpni[ck]\b",
+        r"\bpani[ck]\b",
+        r"\bpannick?\b",
+    )
+    for _p in _panic_patterns:
+        if re.search(_p, text):
+            return {
+                "crisis_detected": False,
+                "crisis_level": "low",
+                "reason": "panic attack is acute anxiety, not suicidal ideation",
+                "source": "deterministic_safety_net",
+                "immediate_regulation_request": True,
+            }
 
     high_patterns = (
         r"\bi\s+(want|need|plan|intend)\s+to\s+(kill myself|end my life|take my own life|die)\b",
@@ -530,6 +554,18 @@ NON-CRISIS EXAMPLES — crisis_detected=false, level="low"
 "I hate myself sometimes"                               → self-criticism, not suicidal ideation
 "I feel like I'm drowning in responsibilities"          → stress metaphor, not ideation
 "Nobody cares about me anyway"                          → loneliness/distortion, not ideation
+"im having a panic attack"                              → acute anxiety episode, NOT suicidal ideation → low
+"i think im having a panic attack, heart racing"        → physical anxiety symptoms, NOT self-harm → low
+"i cant breathe im shaking"                             → panic/anxiety physical symptoms, NOT ideation → low
+"I was beaten by my classmate in front of the whole class" → interpersonal violence by ANOTHER person (already past); anger/shame, no self-harm intent → low
+"My father will ask me about job and I won't be able to answer" → family/social pressure, fear of judgment, NOT suicidal ideation → low
+"The society judges me if I don't succeed"              → cultural/social pressure, distress, NOT self-harm → low
+"I feel very low and overwhelmed about my future"       → emotional distress + worry, no active desire to die → low
+"I'm scared I'll disappoint my family"                  → fear of failure, NOT self-harm ideation → low
+"I got into a fight at school"                          → interpersonal conflict, not self-directed harm → low
+"I feel humiliated in front of everyone"                → shame/embarrassment, NOT suicidal ideation → low
+"I'm 22 and feel like I've done nothing with my life"   → cognitive distortion / achievement anxiety, NOT ideation → low
+"I'm so stressed about my exams I can barely eat"       → stress + somatic symptoms, NOT self-harm → low
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CRISIS EXAMPLES — crisis_detected=true
@@ -565,6 +601,15 @@ JSON:"""
                 elif parsed.get("crisis_level") in {"medium", "high"}:
                     parsed["crisis_detected"] = True
                 parsed["source"] = "llm"
+                # Post-LLM panic attack guard: re-run deterministic check.
+                # If the message is a panic attack, override any LLM crisis decision.
+                _panic_recheck = deterministic_crisis_safety_net(message)
+                if _panic_recheck.get("immediate_regulation_request") and parsed.get("crisis_detected"):
+                    parsed["crisis_detected"] = False
+                    parsed["crisis_level"] = "low"
+                    parsed["reason"] = "panic attack override: acute anxiety, not suicidal ideation"
+                    parsed["immediate_regulation_request"] = True
+                    print("[CLASSIFIER] panic_attack override — LLM crisis result corrected to low/not-crisis")
                 crisis_icon = "🚨" if parsed["crisis_detected"] else "✅"
                 print(f"[CLASSIFIER] {crisis_icon} CRISIS RESULT  detected={parsed['crisis_detected']}  level={parsed.get('crisis_level','?').upper()}  reason='{parsed.get('reason', '')}'")
                 return parsed
@@ -728,14 +773,17 @@ GAD-7 TOTAL → SEVERITY:
   0-4=MINIMAL  5-9=MILD  10-14=MODERATE  15-21=SEVERE
 
 ━━━ RULES ━━━
-1. Score ONLY items with conversational evidence. No evidence = 0.
-2. If a symptom is clearly present but frequency/duration is unclear, score 1.
-3. Use score 2 or 3 ONLY when the user states frequency/duration or wording strongly implies persistence.
-4. Overall severity = MAX(PHQ-9 severity, GAD-7 severity) for THIS TURN'S evidence only.
-5. List indicators for items scoring >= 2.
-6. If Q9 >= 2 then flag suicidal_ideation regardless of total.
-7. Do not inflate totals to match emotional intensity. Prefer conservative scoring.
-4. If Q9 >= 2 → flag suicidal_ideation regardless of total.
+1. Score ONLY items with DIRECT evidence in the current message or immediately recent context. No evidence = 0.
+2. If a symptom is present but frequency/duration is unstated, score 1 ("several days") — never assume 2 or 3.
+3. Use score 2 ONLY when the user explicitly states "most days", "more than half the days", or clear persistent wording.
+4. Use score 3 ONLY when the user explicitly states "nearly every day" or clearly implies daily occurrence.
+5. Overall severity = MAX(PHQ-9 severity, GAD-7 severity) for THIS TURN'S evidence only.
+6. List indicators ONLY for items scoring >= 2 in this turn.
+7. If Q9 >= 2 → flag suicidal_ideation regardless of total.
+8. NEVER inflate scores to match emotional intensity. Distressed tone without explicit frequency = score 1, not 2/3.
+9. If the user reports a technique helped, feeling better, or calmer, reduce scores for matching symptoms — do not carry prior distress forward.
+10. Recent context is for disambiguation only. Score from THIS message's own explicit content first.
+11. Most single-turn assessments should total 0–10 (PHQ) and 0–9 (GAD). Totals above 15 require explicit multi-day frequency statements from the user.
 
 ━━━ CONTEXT ━━━
 Detected emotion: {emotion} at {intensity:.0%} intensity
@@ -802,7 +850,7 @@ async def llm_intent_check(message: str, recent_context: str = "") -> dict:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Choose EXACTLY ONE intent from this list:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  therapeutic | contextual_followup | technique_request | technique_follow_up | memory_query | advice_seeking | reflection | venting | chitchat | crisis_signal | positive_feedback
+  therapeutic | contextual_followup | technique_request | technique_follow_up | memory_query | advice_seeking | reflection | venting | chitchat | crisis_signal | positive_feedback | technique_not_helpful | technique_partial_helpful | user_initiated_exit
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DEFINITIONS — be strict, read each carefully:
@@ -868,6 +916,35 @@ crisis_signal:
   User implies hopelessness, wishes to disappear, self-harm, or suicidal ideation.
   Key signals: "I want to die", "nobody cares", "disappear", "end it all".
 
+technique_not_helpful:
+  User reports that a technique/exercise did NOT help or made no difference after trying it.
+  This differs from rejection (refusing before trying) — this user TRIED it and it did not work.
+  Key signals: "that didn't help", "didn't work", "still feel the same", "it did nothing",
+               "that wasn't helpful", "i still feel bad", "no change", "made no difference",
+               "felt worse after", "it didn't do anything for me".
+  Context: Always follows a technique offer/delivery. Do NOT use for "I don't want to try it"
+           (that is technique_follow_up/rejection).
+
+technique_partial_helpful:
+  User reports the technique helped PARTIALLY or a little bit, but not fully resolved.
+  This is between positive_feedback (fully helped) and technique_not_helpful (didn't help).
+  Key signals: "helped a little", "kind of helped", "somewhat better", "a bit calmer but still",
+               "slightly better", "it helped but i'm still anxious", "partially worked",
+               "a bit better", "helped somewhat", "not fully but a little better".
+  Context: Improvement is acknowledged but the issue is not fully resolved.
+  IMPORTANT: Do NOT use positive_feedback for partial — only positive_feedback when user is
+             clearly stating it FULLY helped or they feel much better.
+
+user_initiated_exit:
+  User explicitly signals they are ending the session right now — on their own terms,
+  NOT because the issue is resolved. The focus is on leaving, not on outcomes.
+  Key signals: "I have to go", "gotta run", "thanks bye", "I'm done for today",
+               "I need to stop", "goodbye", "talk later", "I'll try again later",
+               "signing off", "I need to leave", "I'll come back another time".
+  IMPORTANT: Only use when the user is LEAVING, not when expressing frustration.
+             "I'm done with this exercise" = technique_not_helpful, NOT user_initiated_exit.
+             "I can't do this" = venting or crisis_signal, NOT user_initiated_exit.
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CRITICAL RULES FOR POSITIVE_FEEDBACK v9.1:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -892,7 +969,18 @@ EXAMPLES — read context carefully:
 
 "I'm so stressed about my exams"                                    → venting
 "It didn't help me" [previous AI had NO technique]                  → venting
-"It didn't help me" [previous AI HAD suggested a technique]         → venting (negative feedback, not positive)
+"It didn't help me" [previous AI HAD suggested a technique]         → technique_not_helpful
+"that exercise did nothing for me"                                  → technique_not_helpful
+"i still feel the same after doing it"                              → technique_not_helpful
+"it helped a little but i'm still anxious"                          → technique_partial_helpful
+"somewhat better, not fully though"                                 → technique_partial_helpful
+"kind of worked but I still feel some stress"                       → technique_partial_helpful
+"I have to go now, thanks"                                          → user_initiated_exit
+"Gotta run, talk later"                                             → user_initiated_exit
+"I'm done for today, bye"                                           → user_initiated_exit
+"Thanks for the help, goodbye"                                      → user_initiated_exit
+"I'll try again another time"                                       → user_initiated_exit
+"I need to stop here, I have things to do"                          → user_initiated_exit
 "What should I do to feel better?" [no specific exercise asked]     → advice_seeking
 "Can you give me a breathing exercise?"                             → technique_request
 "Maybe my anxiety comes from my childhood"                          → reflection
@@ -1070,7 +1158,22 @@ Allowed routes:
 - positive_feedback
 
 Routing rules:
-1. Crisis overrides everything: direct self-harm intent, suicidal intent, recent self-harm, plan, means, or immediate danger -> crisis.
+1. Crisis overrides everything — BUT ONLY for genuine self-harm or suicidal content.
+   Route crisis ONLY when the user expresses:
+     a) An explicit first-person desire or plan to die or end their own life ("I want to kill myself", "I am going to end it")
+     b) Active self-harm they are doing or have just done ("I cut myself tonight", "I already hurt myself")
+     c) A specific method, means, or timeline for suicide ("I have pills ready", "I plan to jump tonight")
+
+   These are NOT crisis — route therapeutic instead:
+     • "I feel worthless" or "I feel like nothing"             → cognitive distortion, not suicidal ideation
+     • Being harassed, bullied, beaten, or discriminated against by others  → harm FROM others, not self-harm
+     • Racism, sexism, or social discrimination                → social harm, not self-harm
+     • "I feel humiliated", "they make me feel like I don't matter"  → shame/distress, not ideation
+     • "I don't know what to do", "I feel hopeless about my situation" → emotional distress without ideation
+     • Any situation where the HARM comes from another person or society, not from the user themselves
+
+   The distinction: crisis = user intends harm TO THEMSELVES. Therapeutic = user is suffering BECAUSE OF others or circumstances.
+
 2. If the message is short and depends on the previous assistant question, route contextual_followup.
 3. If it answers the previous assistant question, route contextual_followup.
 4. If it contains "it", "that", "that one", "that exercise", or "what do you think about it?", use recent context.
@@ -1124,6 +1227,10 @@ Context flag examples:
 - "What was its name?" -> route memory_query, flags ["technique_name_query", "refers_to_previous_technique"]
 - "I have been feeling anxious about exams." -> route therapeutic, flags ["new_emotional_disclosure"]
 - "I want to die." -> route crisis, flags ["self_harm_risk"]
+- "I feel worthless because of the racism I face." -> route therapeutic, flags ["new_emotional_disclosure", "distress_signal"] — worthlessness from discrimination is distress, NOT suicidal ideation
+- "They harass me and make me feel like I am nothing." -> route therapeutic, flags ["new_emotional_disclosure", "distress_signal"] — harm by others, not self-harm
+- "I was beaten and humiliated in front of everyone." -> route therapeutic, flags ["new_emotional_disclosure"] — past assault by another person, no self-harm intent
+- "I feel so low and worthless, I don't know what to do." -> route therapeutic, flags ["new_emotional_disclosure", "distress_signal"] — distress without ideation
 
 Therapeutic pacing:
 - Do not classify first emotional disclosures as technique_request unless the user explicitly asks for a technique/help.
@@ -1240,6 +1347,13 @@ def _normalize_smart_gate_result(parsed: dict, message: str, recent_context: str
             flags = [flag for flag in flags if flag != "accept_technique"]
         if raw_route == "positive_feedback":
             flags = [flag for flag in flags if flag != "accept_technique"]
+        # If the previous response already delivered steps inline, "yes" is not
+        # technique acceptance — strip any LLM-generated accept_technique flag.
+        if assistant_likely_gave_steps(last_ai) and "accept_technique" in flags:
+            flags = [f for f in flags if f != "accept_technique"]
+            if raw_route == "technique_follow_up":
+                raw_route = "contextual_followup"
+                flags.append("technique_following_up")
         if is_explicit_exercise_request(message):
             raw_route = "technique_request"
             flags.extend(["explicit_technique_request", "help_request"])
@@ -1325,7 +1439,7 @@ def _normalize_smart_gate_result(parsed: dict, message: str, recent_context: str
     else:
         act_issue = None
 
-    return {
+    normalized = {
         "route": raw_route,
         "confidence": confidence,
         "reasoning": str(parsed.get("reasoning") or ""),
@@ -1342,6 +1456,16 @@ def _normalize_smart_gate_result(parsed: dict, message: str, recent_context: str
         "suppressed_topic": sup_topic,
         "active_issue_source": act_issue,
     }
+    # If the LLM flagged panic_attack_reported but still returned crisis, correct it.
+    # Panic attacks are acute anxiety — the LLM makes this mistake when prior session
+    # context shows high distress. The flag is a contradiction with crisis route.
+    if normalized["route"] == "crisis" and "panic_attack_reported" in (normalized["context_flags"] or []):
+        normalized["route"] = "therapeutic"
+        normalized["confidence"] = 0.9
+        normalized["reasoning"] = "panic_attack_reported flag set — LLM crisis route overridden to therapeutic"
+        normalized["immediate_regulation_request"] = True
+        print("[GATE] panic_attack_reported override — route corrected crisis→therapeutic")
+    return normalized
 
 async def smart_pipeline_gate(message: str, recent_context: str = "", user_context: str = "", session_context: dict = None) -> dict:
     """
@@ -1522,12 +1646,21 @@ async def smart_pipeline_gate(message: str, recent_context: str = "", user_conte
             "  Key signals: 'i want to die', 'kill myself', 'hurt myself', 'end it all',\n"
             "               'i have a plan', 'i already hurt myself tonight',\n"
             "               'everyone would be better off without me' + hopelessness.\n\n"
+            "  IMPORTANT: Panic attacks are NEVER crisis. A panic attack is an acute anxiety\n"
+            "  episode with physical symptoms (racing heart, can't breathe, shaking). It is\n"
+            "  NOT suicidal ideation. Route panic attacks as therapeutic ALWAYS.\n\n"
+            "  BINDING RULE: If you include 'panic_attack_reported' in context_flags, you MUST\n"
+            "  set route = 'therapeutic'. Setting route = 'crisis' AND panic_attack_reported\n"
+            "  simultaneously is a contradiction. Panic attacks are ALWAYS therapeutic.\n\n"
             "  ✅ MUST be crisis:\n"
             "    'i want to kill myself'                      → crisis\n"
             "    'i have pills ready'                         → crisis\n"
             "    'i dont want to be here anymore'             → crisis\n"
             "    'ive been cutting again'                     → crisis\n\n"
             "  ❌ NOT crisis (these are therapeutic):\n"
+            "    'im having a panic attack'                   → therapeutic (acute anxiety, NOT suicidal ideation)\n"
+            "    'i think im having a panic attack'           → therapeutic (physical anxiety symptoms)\n"
+            "    'my heart is racing i cant breathe'          → therapeutic (panic/anxiety symptoms)\n"
             "    'im so tired of fighting every day'          → therapeutic (figurative language)\n"
             "    'i feel worthless'                           → therapeutic (cognitive distortion)\n"
             "    'i want to disappear from social media'      → therapeutic or chitchat\n"
@@ -1703,12 +1836,22 @@ async def smart_pipeline_gate(message: str, recent_context: str = "", user_conte
             route in {"technique_follow_up", "technique_request"}
             and metadata.get("accepted_technique")
         ):
-            exercise_data = await _get_technique_from_db(metadata["accepted_technique"])
-            if exercise_data:
-                metadata["exercise_data"] = exercise_data
-                print(f"[GATE] Exercise context loaded | name={exercise_data['name']} | category={exercise_data['category']}")
-            else:
-                print(f"[GATE] Exercise not found in DB: {metadata['accepted_technique']}")
+            accepted_tech = metadata["accepted_technique"]
+            
+            # Reject invalid values (boolean "true" from LLM, or string "true"/"false")
+            # If accepted_technique is a boolean or string boolean, skip DB lookup
+            # (technique should already be in state from prior semantic search selection)
+            if isinstance(accepted_tech, bool) or (isinstance(accepted_tech, str) and accepted_tech.lower() in {"true", "false"}):
+                print(f"[GATE] Skipping DB lookup for invalid accepted_technique: {accepted_tech} (type={type(accepted_tech).__name__})")
+                metadata["accepted_technique"] = None
+            elif isinstance(accepted_tech, str):
+                # Valid string technique name — fetch full data from DB
+                exercise_data = await _get_technique_from_db(accepted_tech.strip())
+                if exercise_data:
+                    metadata["exercise_data"] = exercise_data
+                    print(f"[GATE] Exercise context loaded | name={exercise_data['name']} | category={exercise_data['category']}")
+                else:
+                    print(f"[GATE] Exercise not found in DB: {accepted_tech}")
         elif "list_techniques" in flags and metadata.get("technique_category"):
             category_exercises = await _get_techniques_by_category(metadata["technique_category"])
             if category_exercises:

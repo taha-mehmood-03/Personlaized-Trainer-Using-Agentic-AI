@@ -304,14 +304,15 @@ async def _load_previous_session_handoff(user_id: str, current_session_id: str =
         from ..db.client import get_prisma_client
 
         prisma = await get_prisma_client()
+        where: dict = {"userId": user_id}
+        if current_session_id:
+            where["sessionId"] = {"not": current_session_id}
         summaries = await prisma.sessionsummary.find_many(
-            where={"userId": user_id},
+            where=where,
             order={"createdAt": "desc"},
-            take=5,
+            take=1,
         )
         for summary in summaries:
-            if current_session_id and getattr(summary, "sessionId", None) == current_session_id:
-                continue
             return {
                 "session_id": getattr(summary, "sessionId", None),
                 "title": getattr(summary, "title", None),

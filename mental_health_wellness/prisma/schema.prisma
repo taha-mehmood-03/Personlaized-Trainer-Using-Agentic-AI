@@ -221,7 +221,9 @@ model Session {
   retentionUntil DateTime?
   peakIntensity Float?
   peakIntensityTurnType TurnType?
-  
+  emotionalTrend    String?           // "improving" | "worsening" | "stable" — last computed trend this session
+  disclosureComplete Boolean @default(false)  // true once warm_close_and_invite fires (recovery arc done)
+
   startedAt   DateTime      @default(now())
   endedAt     DateTime?
   
@@ -271,10 +273,11 @@ model Message {
   techniqueOfferedThisTurn Boolean @default(false)
   
   // Voice analysis (optional - only when voice input used)
-  voiceEmotion    String?
-  voiceArousal    Float?
-  voiceValence    Float?
-  voiceConfidence Float?
+  voiceEmotion       String?
+  voiceArousal       Float?
+  voiceValence       Float?
+  voiceConfidence    Float?
+  voiceDistressProxy Float?   // Real DSP acoustic distress estimate (librosa/parselmouth, 0-1)
   
   createdAt   DateTime    @default(now())
 
@@ -314,7 +317,9 @@ model MoodLog {
   
   // Analysis metadata
   method    String    @default("distilroberta")
-  
+  emotionalTrend String?   // per-turn trend snapshot: "improving" | "worsening" | "stable"
+  gateRoute      String?   // LLM intent route (e.g. "positive_feedback") — enables filtered regression
+
   createdAt DateTime  @default(now())
 
   @@index([userId])
@@ -678,6 +683,7 @@ model ClinicalAssessmentLog {
   gad7Score        Int               // estimated GAD-7 total (0-21)
   indicators       String[]          // clinical indicators scoring >= 2
   confidence       Float             // 0.0-1.0 confidence in assessment
+  clinicalDelta    Float?            // signed delta from session-start score (negative = improving)
   justification    String?           // LLM reasoning for the severity
   sensitivity      DataSensitivity   @default(PHI)
   retentionUntil   DateTime?
@@ -767,4 +773,18 @@ model DataRetentionPolicy {
 
   @@unique([dataClass, resourceType])
   @@index([isActive])
+}
+
+model ProactiveNotification {
+  id        String   @id @default(cuid())
+  userId    String
+  alertType String
+  payload   String
+  severity  String   @default("medium")
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([alertType])
+  @@index([createdAt])
 }

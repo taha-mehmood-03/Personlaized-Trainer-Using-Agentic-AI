@@ -34,7 +34,7 @@ import re
 from ..agent.state import MentalHealthState
 from ..llm.llm_classifier import llm_intent_check
 from ..techniques.emotion_metadata import EMPATHY_FIRST_SUB_EMOTIONS, NO_TECHNIQUE_BY_DEFAULT_SUB_EMOTIONS
-from ..utils.turn_signals import is_explicit_exercise_request, is_immediate_regulation_request, is_solution_requested, detect_user_goal, has_medical_warning_signal
+from ..utils.turn_signals import is_explicit_exercise_request, is_immediate_regulation_request, is_solution_requested, detect_user_goal, has_medical_warning_signal, is_session_exit
 from .consent_parser import get_suppressed_topic_labels, schedule_medical_risk_write
 
 
@@ -417,6 +417,21 @@ def _context_is_enough(state: dict, emotion: str, intensity: float) -> bool:
         latest_content = getattr(messages[-1], "content", "") or ""
         word_count = len(latest_content.split())
         if word_count >= 30 and has_emotion and has_intensity and has_problem_signal:
+            print(f"[PLANNER] _context_is_enough fast-path 1: word_count={word_count}, returning True")
+            return True
+
+        # Fast-path 2: very rich disclosure (≥40 words) — same intensity floor as fast-path 1
+        # for consistent behaviour across message lengths.
+        if word_count >= 40 and has_emotion and has_intensity and has_problem_signal:
+            print(f"[PLANNER] _context_is_enough fast-path 2 (40w low-intensity): word_count={word_count}, returning True")
+            return True
+
+        # Fast-path 3: multi-clause / multi-sentence disclosure — 3+ distinct clauses with
+        # emotion + problem signal is sufficient regardless of word count or intensity floor.
+        import re as _re
+        sentence_count = len(_re.split(r'(?<=[.!?])\s+|,\s+(?:and|but|because|so)\b', latest_content))
+        if sentence_count >= 3 and has_emotion and has_problem_signal:
+            print(f"[PLANNER] _context_is_enough fast-path 3 (multi-clause): clauses={sentence_count}, returning True")
             return True
 
     return False
@@ -502,6 +517,15 @@ def _stage_from_context(intent: str, state: MentalHealthState, context_updates: 
 
     slots = _count_context_slots({**state, **context_updates})
     has_prior_stage = state.get("conversation_stage") in {"UNDERSTANDING", "INTERVENTION", "FOLLOW_UP", "RECOVERY"}
+    # Preserve RECOVERY: a contextual follow-up that arrives while the user is in an active
+    # recovery arc should NOT collapse back to UNDERSTANDING.  Only a new emotional disclosure
+    # (intent="therapeutic" / flag="new_emotional_disclosure") should restart the arc.
+    if (
+        state.get("conversation_stage") == "RECOVERY"
+        and intent not in {"therapeutic", "technique_request", "advice_seeking"}
+        and "new_emotional_disclosure" not in flags
+    ):
+        return "RECOVERY"
     if intent == "contextual_followup" or any(flag in flags for flag in ("asking_opinion", "answering_previous_question", "duration_answer", "subject_answer", "trigger_answer", "short_followup")):
         return "UNDERSTANDING"
     if slots >= 3 or has_prior_stage:
@@ -539,6 +563,10 @@ def _final_response_task(intent: str, strategy: str, needs_technique: bool, reso
     """Single response contract consumed by the generator."""
     if resolver_task == "acknowledge_and_pause":
         return "acknowledge_and_pause"
+    # Series complement delivery takes priority over the generic accept_technique
+    # mapping (which would otherwise re-deliver the primary via continue_active_technique).
+    if resolver_task == "offer_complement_technique":
+        return "offer_complement_technique"
     if intent == "memory_query":
         return "answer_memory_query"
     if intent == "reject_technique":
@@ -625,6 +653,24 @@ async def _plan_conversation_strategy(state: MentalHealthState) -> dict:
     # ============================================
     _raw_current_message = messages[-1].content if messages else ""
     _imm_reg = is_immediate_regulation_request(current_message)
+    # v13.1: Secondary check using mood analyzer output — catches phrases like
+    # "i'm having breathing difficulty" that don't match the keyword list but
+    # where the LLM already detected panic sub-emotion or acute physical symptoms.
+    # GATED (Fix 6): symptom-inferred override is one-shot per session. Once a
+    # technique has been delivered (active_technique set), persistent panic/body
+    # symptoms must NOT keep forcing start_grounding_now — that re-delivers the same
+    # immediate technique every turn and bypasses the complement/feedback flow.
+    # Explicit keyword requests ("help me calm down now") still re-deliver via _imm_reg above.
+    if not _imm_reg and not state.get("active_technique"):
+        _acute_symptoms = {"shortness_of_breath", "respiratory_distress", "body_tension", "chest_tightness", "hyperventilation"}
+        _detected_symptoms = set(state.get("detected_symptoms") or [])
+        _primary_sub = str(state.get("primary_sub_emotion") or "").lower()
+        if (
+            _primary_sub in ("panic", "acute_anxiety", "hyperventilation")
+            or bool(_detected_symptoms & _acute_symptoms)
+        ) and float(state.get("fused_intensity", state.get("intensity", 0)) or 0) >= 0.7:
+            _imm_reg = True
+            print("[NODE: PLANNER]  v13.1 SYMPTOM-BASED immediate_regulation override (panic symptoms from mood analyzer)")
     _sol_req = (
         is_solution_requested(current_message)
         or "solution_requested" in list(state.get("gate_context_flags") or [])
@@ -679,7 +725,24 @@ async def _plan_conversation_strategy(state: MentalHealthState) -> dict:
     # Help starts immediately in the same turn.
     # ============================================
     if _imm_reg and not crisis_detected:
-        _imm_intent = intent if isinstance(intent, str) else "therapeutic"
+        _imm_intent = (state.get("prefetched_intent") or {}).get("intent") or state.get("gate_route") or "therapeutic"
+        # v13.2: Multi-domain — mood LLM flag OR behavioral/contextual signal fallback.
+        _behaviors = state.get("detected_behaviors") or []
+        _contexts = state.get("detected_contexts") or []
+        _symptoms = state.get("detected_symptoms") or []
+        _multi_domain_signals = (
+            len(_behaviors) >= 2
+            or any(c in _contexts for c in ("family_conflict", "interpersonal_conflict", "work_stress", "academic_stress"))
+            or len(_symptoms) >= 2
+        )
+        _multi_domain = bool(state.get("requires_technique_series", False)) or _multi_domain_signals
+        _plan_mode = "series" if _multi_domain else "single"
+        _tech_area = ["breathing", "grounding", "cbt", "mindfulness"] if _multi_domain else ["breathing", "grounding"]
+        if _multi_domain:
+            if _multi_domain_signals and not state.get("requires_technique_series"):
+                print("[NODE: PLANNER]  v13.2 MULTI-DOMAIN fallback: behavioral/contextual signals → series mode")
+            else:
+                print("[NODE: PLANNER]  v13.2 MULTI-DOMAIN series (mood LLM): physical + cognitive symptoms → 2-exercise plan")
         print("[NODE: PLANNER]  v13.0 IMMEDIATE_REGULATION_REQUEST — start_grounding_now, 0 questions")
         return {
             "conversation_strategy": "suggest_technique",
@@ -695,8 +758,8 @@ async def _plan_conversation_strategy(state: MentalHealthState) -> dict:
             "gate_intensity_hint": float(intensity),
             "latest_referenced_entity": state.get("latest_referenced_entity"),
             "response_task": "start_grounding_now",
-            "technique_area": ["breathing", "grounding"],
-            "technique_plan_mode": "single",
+            "technique_area": _tech_area,
+            "technique_plan_mode": _plan_mode,
             "resolved_user_act": state.get("resolved_user_act"),
             "compact_analysis": state.get("compact_analysis"),
             # v13.0 fields
@@ -863,7 +926,37 @@ async def _plan_conversation_strategy(state: MentalHealthState) -> dict:
         if flag and flag not in context_flags:
             context_flags.append(flag)
 
-    if intent == "technique_follow_up":
+    # Proactive re-offer after rejection explanation, OR immediate pivot on explicit help requests.
+    # Two triggers:
+    #   1. rejection_followup_pending=True: previous turn asked "what felt unhelpful?", this turn is the answer.
+    #   2. User says "suggest me something"/"show me solution" when the last outcome was not_helped.
+    #      Skip the clarifying question entirely and go straight to the alternative.
+    _rejection_followup = state.get("rejection_followup_pending", False)
+    _EXPLICIT_HELP_AFTER_REJECTION = {
+        "suggest me", "suggest something", "show me", "give me something",
+        "something else", "another way", "other option", "can u suggest",
+        "can you suggest", "show me solution", "give me solution",
+        "what can i do", "what should i do", "any other",
+    }
+    _explicit_help_after_rejection = (
+        state.get("last_technique_outcome") == "not_helped"
+        and not crisis_detected
+        and any(p in current_message for p in _EXPLICIT_HELP_AFTER_REJECTION)
+    )
+    if (_rejection_followup or _explicit_help_after_rejection) and not crisis_detected:
+        result["rejection_followup_pending"] = False
+        _trigger = "rejection_followup_pending" if _rejection_followup else "explicit help request after not_helped"
+        print(f"[NODE: PLANNER]  {_trigger} → offer_alternative_technique")
+        response_task = "offer_alternative_technique"
+
+    # Exit check MUST fire before any intent-based elif so that "thanks, it helped, bye"
+    # doesn't get absorbed by technique_follow_up → positive_feedback and ask a reflection Q.
+    if (intent == "user_initiated_exit" or is_session_exit(current_message)) and not crisis_detected:
+        print(f"[NODE: PLANNER]  user_initiated_exit → immediate_close")
+        response_task = "immediate_close"
+        result["session_disclosure_complete"] = True
+        result["conversation_phase"] = "recovery"
+    elif intent == "technique_follow_up":
         if "reject_technique" in context_flags or "technique_rejection" in context_flags:
             intent = "reject_technique"
             response_task = "handle_technique_rejection"
@@ -873,10 +966,76 @@ async def _plan_conversation_strategy(state: MentalHealthState) -> dict:
         elif "positive_feedback" in context_flags:
             intent = "positive_feedback"
             response_task = "positive_feedback"
+            result["conversation_phase"] = "recovery"
+            # Symmetric with technique_partial_helpful below — entering recovery resets the
+            # reflection counter so positive_feedback gets exactly ONE "what changed?" question
+            # before the recovery guard closes (prevents premature/double reflection).
+            result["reflection_questions_since_resolution"] = 0
+    elif intent in ("technique_not_helpful",) or "technique_not_helpful" in context_flags:
+        _rej_count = int(state.get("technique_rejection_count", 0)) + 1
+        result["technique_rejection_count"] = _rej_count
+        result["last_technique_outcome"] = "not_helped"
+        if _rejection_followup or _explicit_help_after_rejection:
+            # Already scheduled to offer an alternative above — don't re-cycle into
+            # handle_technique_rejection, which would ask "what felt unhelpful?" again
+            # and reset rejection_followup_pending, creating an infinite question loop.
+            print(f"[NODE: PLANNER]  technique_not_helpful but rejection_followup already resolved → keeping offer_alternative_technique")
+        else:
+            print(f"[NODE: PLANNER]  technique_not_helpful (count={_rej_count}) → handle_technique_rejection + rejection_followup_pending")
+            response_task = "handle_technique_rejection"
+            result["rejection_followup_pending"] = True
+    elif intent in ("technique_partial_helpful",) or "technique_partial_helpful" in context_flags:
+        result["last_technique_outcome"] = "partial"
+        result["conversation_phase"] = "recovery"
+        result["reflection_questions_since_resolution"] = 0
+        print(f"[NODE: PLANNER]  technique_partial_helpful → acknowledge_partial_progress")
+        response_task = "acknowledge_partial_progress"
     elif intent == "therapeutic":
         # Keep the public high-level label while letting older deterministic
         # planning rules treat it like the former venting category.
         pass
+
+    # ── Series complement reuse ───────────────────────────────────────────────
+    # A complement exercise was queued and offered after the primary one (e.g. a
+    # cognitive exercise alongside immediate breathing). If the user now accepts
+    # it, deliver the QUEUED complement — never re-deliver the primary (the
+    # technique_follow_up branch above would otherwise route 'yes' to
+    # continue_active_technique and repeat the breathing exercise) and never run a
+    # fresh, unrelated selection. The selector promotes pending_complement_technique.
+    _pending_complement = state.get("pending_complement_technique")
+    if (
+        _pending_complement and _pending_complement.get("name")
+        and not crisis_detected
+        and response_task not in {"immediate_close", "handle_technique_rejection", "offer_alternative_technique"}
+    ):
+        _msg_norm = (current_message or "").strip().lower()
+        _accepts_complement = (
+            intent in {"accept_technique", "technique_request"}
+            or "accept_technique" in context_flags
+            or is_explicit_exercise_request(current_message)
+            or bool(re.match(
+                r"^(yes|yeah|yep|sure|ok|okay|please|pls|plz|go for it|share it|"
+                r"do it|let'?s do it|i'?m ready|sounds good|that works)\b",
+                _msg_norm,
+            ))
+        )
+        _rejects = (
+            "reject_technique" in context_flags
+            or "technique_rejection" in context_flags
+            or intent in {"reject_technique", "technique_not_helpful"}
+        )
+        if _accepts_complement and not _rejects:
+            print(
+                f"[NODE: PLANNER]  Complement accepted → deliver queued "
+                f"'{_pending_complement['name']}' (offer_complement_technique)"
+            )
+            response_task = "offer_complement_technique"
+            intent = "accept_technique"
+            result["needs_technique"] = True
+            result["conversation_phase"] = "solution"
+            result["conversation_stage"] = "INTERVENTION"
+            # Guarantee the selector/generator deliver THIS exact technique.
+            result["alternative_techniques"] = [_pending_complement]
 
     # Keep context flags scoped to this turn. Persistent continuity belongs in
     # structured fields such as primary_concern/core_belief, not accumulated
@@ -890,6 +1049,24 @@ async def _plan_conversation_strategy(state: MentalHealthState) -> dict:
         or is_explicit_exercise_request(current_message)
         or any(signal in current_message for signal in _TECHNIQUE_REQUEST_SIGNALS)
     )
+
+    # Mid-exercise guidance guard: "can u guide me", "walk me through step X" during
+    # an already-active technique is a request for help WITH the current exercise,
+    # not a request to START a new one. Without this guard, "can you guide me" (in
+    # _TECHNIQUE_REQUEST_SIGNALS) re-delivers the full exercise every time.
+    _GUIDANCE_PHRASES = {"guide me", "walk me through", "help me with step", "show me how to", "explain step", "how do i do step"}
+    _is_mid_exercise_guidance = (
+        bool(state.get("active_technique"))
+        and explicit_technique_request
+        and any(p in current_message for p in _GUIDANCE_PHRASES)
+        and intent not in {"technique_request"}
+    )
+    if _is_mid_exercise_guidance:
+        _active_name = (state.get("active_technique") or {}).get("name", "?") if isinstance(state.get("active_technique"), dict) else str(state.get("active_technique") or "?")
+        explicit_technique_request = False
+        response_task = "continue_active_technique"
+        print(f"[NODE: PLANNER]  Mid-exercise guidance request (active={_active_name}) → continue_active_technique")
+
     if (
         explicit_technique_request
         and solution_preference == "exercise_requested"
@@ -913,11 +1090,33 @@ async def _plan_conversation_strategy(state: MentalHealthState) -> dict:
     )
     context_state = {**state, **context_updates}
     technique_area = _infer_technique_areas(context_state, current_message)
-    technique_plan_mode = (
-        "series"
-        if len(technique_area) >= 2 and explicit_technique_request and _wants_series_plan(current_message)
-        else "single"
+    # Auto-detect multi-dimensional emotional state → series mode
+    # Count distinct signals across sub-emotions, symptoms, and behaviors.
+    # ≥3 signals means the user has overlapping issues a single technique can't fully address.
+    _sub_emo_signals = [e for e in [
+        context_state.get("primary_sub_emotion"),
+        *list(context_state.get("secondary_sub_emotions") or []),
+    ] if e]
+    _symptom_signals = list(context_state.get("detected_symptoms") or [])
+    _behavior_signals = list(context_state.get("detected_behaviors") or [])
+    _total_signals = len(set(_sub_emo_signals)) + len(_symptom_signals) + len(_behavior_signals)
+
+    _explicit_series = (
+        len(technique_area) >= 2 and explicit_technique_request and _wants_series_plan(current_message)
     )
+    _in_recovery_now = (
+        state.get("conversation_phase") == "recovery"
+        or state.get("conversation_stage") == "RECOVERY"
+    )
+    _auto_series = _total_signals >= 3 and not _in_recovery_now  # suppress in recovery — signals carry forward from disclosure
+
+    technique_plan_mode = "series" if (_explicit_series or _auto_series) else "single"
+    if _auto_series and technique_plan_mode == "series":
+        print(
+            f"[NODE: PLANNER]  AUTO-SERIES MODE — {_total_signals} signals detected "
+            f"({len(set(_sub_emo_signals))} sub-emotions, {len(_symptom_signals)} symptoms, "
+            f"{len(_behavior_signals)} behaviors)"
+        )
     primary_sub_emotion = str(context_state.get("primary_sub_emotion") or "").lower()
     context_slots = _count_context_slots(context_state)
     sufficient_context = context_slots >= 2
@@ -992,24 +1191,48 @@ async def _plan_conversation_strategy(state: MentalHealthState) -> dict:
         and not crisis_detected
         and question_count_since_technique < MAX_SLOW_PACED_CONTEXT_QUESTIONS_BEFORE_ACTION
     )
-    needs_technique = bool(
-        explicit_acceptance
-        or (explicit_technique_request and explicit_request_has_context and not blocked_for_technique)
-        or (
-            therapy_action_ready
-            and not slow_paced_needs_more_exploration
-            and not (
-                primary_sub_emotion in NO_TECHNIQUE_BY_DEFAULT_SUB_EMOTIONS
-                and not (help_requested or explicit_technique_request)
+    # v14.0: RECOVERY guard — block technique selection during recovery unless the user
+    # signals (explicitly or implicitly) that they want a solution.
+    #
+    # BYPASS CONDITIONS — any one of these lets the technique pipeline through:
+    #   1. intent == technique_request / accept_technique (explicit verbal request)
+    #   2. explicit_technique_request == True (signal-based, even after resolver downgrade)
+    #   3. gate_route == technique_request (gate is authoritative; resolver may downgrade wrongly)
+    #   4. gate flag "new_emotional_disclosure" — user disclosed a NEW issue.
+    #      Disclosure = implicit solution request. Anyone who opens SentiMind and keeps
+    #      sharing is here for help, whether or not they say "give me a technique."
+    _gate_route_was_technique = state.get("gate_route") in {"technique_request"}
+    _gate_flags_now = list(state.get("gate_context_flags") or [])
+    _is_new_disclosure = "new_emotional_disclosure" in _gate_flags_now
+    if (
+        state.get("conversation_stage") == "RECOVERY"
+        and intent not in {"technique_request", "accept_technique", "explicit_exercise_request"}
+        and not explicit_acceptance
+        and not explicit_technique_request
+        and not _gate_route_was_technique
+        and not _is_new_disclosure          # new disclosure = implicit request for a solution
+    ):
+        needs_technique = False
+        print("[NODE: PLANNER]  RECOVERY guard: blocked needs_technique (stage=RECOVERY, no implicit/explicit request)")
+    else:
+        needs_technique = bool(
+            explicit_acceptance
+            or (explicit_technique_request and explicit_request_has_context and not blocked_for_technique)
+            or (
+                therapy_action_ready
+                and not slow_paced_needs_more_exploration
+                and not (
+                    primary_sub_emotion in NO_TECHNIQUE_BY_DEFAULT_SUB_EMOTIONS
+                    and not (help_requested or explicit_technique_request)
+                )
+                and (
+                    (help_requested and (sufficient_context or enough_dialogue_for_action))
+                    or (should_stop_context_questions and (sufficient_context or has_formulation or enough_dialogue_for_action))
+                    or earned_intervention
+                )
+                and not blocked_for_technique
             )
-            and (
-                (help_requested and (sufficient_context or enough_dialogue_for_action))
-                or (should_stop_context_questions and (sufficient_context or has_formulation or enough_dialogue_for_action))
-                or earned_intervention
-            )
-            and not blocked_for_technique
         )
-    )
     if explicit_technique_request and not explicit_request_has_context and not crisis_detected:
         needs_technique = False
         if response_task == "offer_one_technique":
@@ -1045,6 +1268,7 @@ async def _plan_conversation_strategy(state: MentalHealthState) -> dict:
         and not technique_offer_deferred
         and not should_stop_context_questions
         and not crisis_detected
+        and not _imm_reg
     ):
         # Not enough context yet — block technique even if therapy_action_ready
         needs_technique = False
@@ -1113,7 +1337,16 @@ async def _plan_conversation_strategy(state: MentalHealthState) -> dict:
         if needs_technique:
             print(f"[NODE: PLANNER]  CONSENT GATE  forcing needs_technique=False (exercise_consent={exercise_consent})")
             needs_technique = False
-        
+            # v14.0: align response_task when needs_technique is forced False so the
+            # response generator never receives a technique delivery task with no technique
+            if response_task in {"offer_one_technique", "continue_active_technique", "start_grounding_now"}:
+                response_task = (
+                    "give_reflective_opinion"
+                    if solution_preference == "advice_allowed"
+                    else "validate_and_empathize"
+                )
+                print(f"[NODE: PLANNER]  CONSENT GATE  response_task realigned to '{response_task}' (listen_only override)")
+
         # v11.0: Dialogue-based Solutions Routing
         # If the user has denied formal exercises but seeks advice, or they have vented enough
         # (context_sufficiency >= 0.6), transition them to conversational solutions / reframings
@@ -1736,7 +1969,17 @@ def _apply_question_budget_policy(state: MentalHealthState, result: dict) -> dic
     intensity = context_state.get("fused_intensity", context_state.get("intensity", 0.5))
     context_enough = _context_is_enough(context_state, emotion, float(intensity or 0.0))
 
-    if q_since >= 1 and not context_enough and not crisis_detected and not immediate_regulation_request:
+    _no_active_thread = (
+        not context_state.get("active_thread_summary")
+        and float(context_state.get("fused_intensity", context_state.get("intensity", 0)) or 0) < 0.3
+    )
+    _non_therapeutic_route = (
+        context_state.get("gate_route", "") in ("chitchat", "contextual_followup")
+        or context_state.get("intent", "") in ("chitchat", "contextual_followup")
+    ) and _no_active_thread
+
+    if q_since >= 1 and not context_enough and not crisis_detected \
+            and not immediate_regulation_request and not _non_therapeutic_route:
         print(
             f"[NODE: PLANNER]  v13.0 QUESTION BUDGET HARD STOP — "
             f"q_since={q_since}, context_enough={context_enough} — forcing give_tiny_first_step"
@@ -1763,6 +2006,125 @@ def _apply_question_budget_policy(state: MentalHealthState, result: dict) -> dic
             result["response_task"] = "acknowledge_medical_and_check"
             result["question_budget"] = 0
 
+    # Re-entry guard: when the emotional arc has been closed (warm_close fired),
+    # treat any new message as a fresh disclosure instead of re-using old state.
+    _closure_done = state.get("session_disclosure_complete", False)
+    if _closure_done and _current_msg_text and not crisis_detected:
+        print("[NODE: PLANNER]  RE-ENTRY after closure — resetting arc for new disclosure")
+        result["session_disclosure_complete"] = False
+        result["reflection_questions_since_resolution"] = 0
+        result["conversation_phase"] = "venting"
+
+    # Recovery-phase reflection loop guard — allow at most 1 reflection question
+    # after a positive outcome has been resolved; after that, close warmly.
+    # Exception: if the user is still actively distressed, re-enter the therapeutic
+    # thread instead of forcing a close (user-led lifecycle).
+    #
+    # _in_recovery is widened: if the current or result phase is "recovery" OR
+    # positive_feedback just fired this turn (phase may lag by one turn).
+    _in_recovery = (
+        state.get("conversation_phase") == "recovery"        # check state directly — result may have been overwritten by stage machine
+        or state.get("conversation_stage") == "RECOVERY"
+        or result.get("conversation_phase") == "recovery"
+        or result.get("response_task") in {"positive_feedback", "warm_close_and_invite"}
+    )
+    _refl_since = int(
+        result.get("reflection_questions_since_resolution",
+                   state.get("reflection_questions_since_resolution", 0)) or 0
+    )
+    _current_task = result.get("response_task", "")
+    _reflection_tasks = {
+        "ask_question",
+        "ask_one_missing_context_question",
+        "ask_next_context_question",
+        "ask_reflection_question",
+        "positive_feedback",  # positive_feedback turn itself asks 1 reflective question
+    }
+
+    # Detect whether the user is still actively distressed so the guard doesn't
+    # force-close when they still have unresolved issues.
+    _emotion_now = str(context_state.get("fused_emotion", context_state.get("emotion", "neutral")) or "neutral").lower()
+    _intensity_now = float(context_state.get("fused_intensity", context_state.get("intensity", 0.0)) or 0.0)
+    _intent_now = str(result.get("intent", state.get("intent", "")) or "")
+    _still_distressed = (
+        _emotion_now in {"anxiety", "fear", "sadness", "anger", "disgust"} and _intensity_now >= 0.40
+    ) or _intent_now in {"therapeutic", "venting", "technique_not_helpful", "technique_partial_helpful"}
+
+    if _in_recovery and not crisis_detected and not immediate_regulation_request:
+        # Close if counter >= 1 (normal path) OR if conversation_stage was already
+        # RECOVERY at the start of this turn (robust fallback when in-memory counter
+        # is lost due to server restart / multi-worker deployment).
+        _stage_already_recovery = state.get("conversation_stage") == "RECOVERY"
+        if (_refl_since >= 1 or _stage_already_recovery) and _current_task in _reflection_tasks:
+            if _still_distressed:
+                # User still has unresolved distress — re-enter therapeutic exploration.
+                # If the gate identified this as an explicit technique_request, skip the
+                # exploration question and go straight to technique delivery — the user
+                # told us exactly what they need.
+                if _gate_route_was_technique or explicit_technique_request:
+                    print(
+                        f"[NODE: PLANNER]  RECOVERY GUARD — still distressed BUT gate=technique_request "
+                        f"→ reopen + immediate technique delivery"
+                    )
+                    result["response_task"] = "offer_one_technique"
+                    result["conversation_phase"] = "solution"
+                    result["conversation_stage"] = "INTERVENTION"
+                    result["needs_technique"] = True
+                    result["reflection_questions_since_resolution"] = 0
+                else:
+                    print(
+                        f"[NODE: PLANNER]  RECOVERY GUARD — still distressed "
+                        f"(emotion={_emotion_now}, intent={_intent_now}) → reopen_therapeutic_thread"
+                    )
+                    result["response_task"] = "reopen_therapeutic_thread"
+                    result["conversation_phase"] = "venting"
+                    # Reset to UNDERSTANDING so the RECOVERY guard does NOT fire on the
+                    # very next turn — that turn must be free to gather context and then
+                    # offer a technique without being blocked again.
+                    result["conversation_stage"] = "UNDERSTANDING"
+                    result["reflection_questions_since_resolution"] = 0
+                    # Clear the previous technique — new disclosure starts a clean cycle.
+                    # Keeping active_technique from the prior exercise would block v13.1
+                    # symptom override and misdirect the mid-exercise guidance guard.
+                    result["active_technique"] = None
+                    # One context question is enough in an ongoing session — user has
+                    # already established trust and shared context. Cap the budget so
+                    # the system moves to technique offer on the very next answer.
+                    result["question_budget"] = 1
+            else:
+                # Check if a complement technique is queued — if so, offer it instead of closing
+                _has_alt = bool(
+                    result.get("alternative_techniques") or state.get("alternative_techniques")
+                )
+                if _has_alt:
+                    print(
+                        f"[NODE: PLANNER]  RECOVERY LOOP GUARD — refl_since={_refl_since}, "
+                        f"overriding {_current_task} → offer_complement_technique, question_budget=0"
+                    )
+                    result["response_task"] = "offer_complement_technique"
+                    result["question_budget"] = 0
+                    # Clear alternatives so it isn't re-offered on the next turn
+                    result["alternative_techniques"] = []
+                else:
+                    # Use compassionate_close when techniques didn't help; otherwise warm_close
+                    _close_task = (
+                        "compassionate_close"
+                        if state.get("last_technique_outcome") == "not_helped"
+                        else "warm_close_and_invite"
+                    )
+                    print(
+                        f"[NODE: PLANNER]  RECOVERY LOOP GUARD — refl_since={_refl_since}, "
+                        f"overriding {_current_task} → {_close_task}, question_budget=0"
+                    )
+                    result["response_task"] = _close_task
+                    result["question_budget"] = 0
+                    result["session_disclosure_complete"] = True
+        elif _current_task in _reflection_tasks:
+            # Counter increments each time a reflection task fires in recovery.
+            # NOTE: no reset block below — the old reset block cancelled this increment
+            # because it read the pre-block _refl_since value (Bug fix).
+            result["reflection_questions_since_resolution"] = _refl_since + 1
+
     result["question_count_since_disclosure"] = q_since
     result.setdefault("question_budget", 1)
     result.setdefault("solution_requested", False)
@@ -1771,6 +2133,7 @@ def _apply_question_budget_policy(state: MentalHealthState, result: dict) -> dic
     result.setdefault("latest_user_need", None)
     result.setdefault("user_goal", state.get("user_goal"))
     result.setdefault("context_missing_reason", None)
+    result.setdefault("reflection_questions_since_resolution", _refl_since)
     return result
 
 
