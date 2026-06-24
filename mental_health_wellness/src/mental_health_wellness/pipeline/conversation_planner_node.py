@@ -208,6 +208,38 @@ def _derive_context_updates(intent: str, current_message: str, state: MentalHeal
     elif not updates["primary_concern"] and any(k in lower for k in ("lonely", "loneliness", "alone", "isolated", "left out", "disconnected")):
         updates["primary_concern"] = "loneliness"
 
+    # Fallback: derive primary_concern from the mood analyzer's already-detected
+    # contexts / sub-emotion when the academic keyword list above doesn't match.
+    # Without this, interpersonal/social/family distress (e.g. "my friend laughed
+    # at me", "my brother insulted me") never fills a slot, so context_sufficiency
+    # stays at 0 and a technique is never offered.
+    if not updates["primary_concern"]:
+        _detected_contexts = [str(c).lower() for c in (state.get("detected_contexts") or [])]
+        _CONTEXT_TO_CONCERN = {
+            "social_humiliation": "social humiliation",
+            "social_rejection": "social rejection",
+            "interpersonal_conflict": "interpersonal conflict",
+            "family_conflict": "family conflict",
+            "relationship_conflict": "relationship conflict",
+            "friendship_conflict": "friendship conflict",
+            "bullying": "bullying",
+            "workplace_conflict": "workplace conflict",
+            "academic_pressure": "academic pressure",
+            "work_stress": "work stress",
+            "grief": "grief",
+            "breakup": "relationship loss",
+        }
+        for _ctx in _detected_contexts:
+            if _ctx in _CONTEXT_TO_CONCERN:
+                updates["primary_concern"] = _CONTEXT_TO_CONCERN[_ctx]
+                break
+        # Last resort: use the primary sub-emotion as the concern label so a
+        # genuine distress disclosure always fills this slot.
+        if not updates["primary_concern"]:
+            _sub = str(state.get("primary_sub_emotion") or "").strip().lower()
+            if _sub and _sub not in ("neutral", ""):
+                updates["primary_concern"] = _sub.replace("_", " ")
+
     clean = re.sub(r"[^\w\s]", "", lower).strip()
 
     if intent == "duration_answer" or re.search(r"\b(about\s+)?\d+\s*(day|days|week|weeks|month|months|year|years)\b", lower):
@@ -215,6 +247,20 @@ def _derive_context_updates(intent: str, current_message: str, state: MentalHeal
     elif intent == "subject_answer" or clean in {"math", "maths", "mathematics", "english", "physics", "chemistry", "biology", "history", "computer science", "cs"}:
         updates["triggering_subject"] = text
     elif intent == "trigger_answer" or any(sig in lower for sig in ("at night", "before studying", "during studying", "during the exam", "before the exam", "final demonstration", "demo", "presentation", "viva", "defense", "defence", "teacher", "teachers", "panel", "asking questions", "supervisor", "supervisors")):
+        updates["triggering_context"] = text
+
+    # Fallback: when the user narrates an interpersonal/social incident, the
+    # message itself IS the triggering context. Detect via people/event words so
+    # social-conflict disclosures fill this slot like academic ones do.
+    if not updates["triggering_context"] and any(
+        sig in lower for sig in (
+            "friend", "brother", "sister", "father", "mother", "mom", "dad",
+            "family", "colleague", "boss", "classmate", "roommate", "partner",
+            "insult", "insulted", "laughed at", "humiliat", "made fun", "mocked",
+            "disrespect", "shouted", "yelled", "ignored", "rejected", "betrayed",
+            "in front of",
+        )
+    ):
         updates["triggering_context"] = text
 
     if any(sig in lower for sig in ("can't focus", "cant focus", "blank", "forget", "panic", "avoid", "not studying", "shut down", "nothing gets done", "wasting time", "drained", "tired")):
@@ -631,6 +677,29 @@ async def _plan_conversation_strategy(state: MentalHealthState) -> dict:
     # ============================================
     exercise_consent = state.get("exercise_consent", "unknown")
     solution_preference = state.get("solution_preference", "unknown")
+
+    # A listen_only preference that was INFERRED by the gate LLM (exercise_consent
+    # still "unknown" — the user never EXPLICITLY refused) must not hard-lock the
+    # whole session. Distressed users vent by default; venting is not a refusal of
+    # help. When the user is actively disclosing distress, clear the soft/inferred
+    # preference so the normal flow can still OFFER a technique (politely, via
+    # ask-permission). Explicit denials set exercise_consent to denied_soft/
+    # denied_hard and are always respected here.
+    _gate_inferred_listen_only = (
+        solution_preference == "listen_only"
+        and exercise_consent == "unknown"
+    )
+    _active_disclosure = (
+        "new_emotional_disclosure" in list(state.get("gate_context_flags") or [])
+        or str(state.get("intent") or "").lower() == "therapeutic"
+    )
+    if _gate_inferred_listen_only and _active_disclosure and not crisis_detected:
+        print(
+            "[NODE: PLANNER]  Soft (gate-inferred) listen_only cleared — active emotional "
+            "disclosure with consent still unknown; venting is not a refusal of help"
+        )
+        solution_preference = "unknown"
+
     _listen_only_mode = (
         (exercise_consent in ("denied_soft", "denied_hard") or solution_preference == "listen_only")
         and not crisis_detected
@@ -662,15 +731,32 @@ async def _plan_conversation_strategy(state: MentalHealthState) -> dict:
     # immediate technique every turn and bypasses the complement/feedback flow.
     # Explicit keyword requests ("help me calm down now") still re-deliver via _imm_reg above.
     if not _imm_reg and not state.get("active_technique"):
-        _acute_symptoms = {"shortness_of_breath", "respiratory_distress", "body_tension", "chest_tightness", "hyperventilation"}
+        # Acute panic markers — physiological AND psychomotor/cognitive-flooding
+        # signals, since panic doesn't always present with breathing symptoms
+        # ("racing thoughts, can't sit still" is acute panic too).
+        _acute_symptoms = {
+            "shortness_of_breath", "respiratory_distress", "body_tension", "chest_tightness",
+            "hyperventilation", "racing_thoughts", "restlessness", "motor_restlessness",
+            "psychomotor_agitation", "trembling", "palpitations", "heart_racing", "dizziness",
+        }
         _detected_symptoms = set(state.get("detected_symptoms") or [])
         _primary_sub = str(state.get("primary_sub_emotion") or "").lower()
+        # Substring match — the mood LLM returns variants like "panic_now",
+        # "panic_attack", "acute_panic"; an exact-tuple check missed all of them.
+        _is_panic_sub = (
+            "panic" in _primary_sub
+            or "hyperventilat" in _primary_sub
+            or _primary_sub in ("acute_anxiety", "acute_stress")
+        )
         if (
-            _primary_sub in ("panic", "acute_anxiety", "hyperventilation")
+            _is_panic_sub
             or bool(_detected_symptoms & _acute_symptoms)
         ) and float(state.get("fused_intensity", state.get("intensity", 0)) or 0) >= 0.7:
             _imm_reg = True
-            print("[NODE: PLANNER]  v13.1 SYMPTOM-BASED immediate_regulation override (panic symptoms from mood analyzer)")
+            print(
+                f"[NODE: PLANNER]  v15.3 SYMPTOM-BASED immediate_regulation override "
+                f"(panic_sub={_is_panic_sub}, acute_symptoms={sorted(_detected_symptoms & _acute_symptoms)})"
+            )
     _sol_req = (
         is_solution_requested(current_message)
         or "solution_requested" in list(state.get("gate_context_flags") or [])
@@ -726,24 +812,63 @@ async def _plan_conversation_strategy(state: MentalHealthState) -> dict:
     # ============================================
     if _imm_reg and not crisis_detected:
         _imm_intent = (state.get("prefetched_intent") or {}).get("intent") or state.get("gate_route") or "therapeutic"
-        # v13.2: Multi-domain — mood LLM flag OR behavioral/contextual signal fallback.
+        # v15.1: A complement (2nd, cognitive/behavioural exercise) is only justified
+        # when we genuinely understand the UNDERLYING ISSUE — i.e. there is real
+        # SITUATIONAL or COGNITIVE context a deeper exercise can target: a primary
+        # concern, a trigger, an established thread, a cognitive distortion, or a
+        # named situational context (family/work/social/…).
+        #
+        # Deliberately EXCLUDED as complement-context:
+        #   • Acute BODY symptoms (racing_thoughts, body_tension, hyperventilation…)
+        #     — these ARE the acute-regulation signal, not knowledge of the issue.
+        #   • `requires_technique_series` (mood LLM "symptoms span physical+cognitive
+        #     domains") — symptom-domain spread ≠ understanding what the user is about.
+        #   • Behaviour counts — patterns, not situational context.
+        #   • `primary_concern` — it is auto-populated from the sub-emotion/raw message
+        #     by _derive_context_updates (e.g. a bare "I'm panicking" yields
+        #     primary_concern="panic"), so it is NOT a reliable "we understand the
+        #     issue" signal and must not gate the complement.
+        #   • Acute/physiological detected_contexts (acute_worry, acute_pressure,
+        #     nervous_system_regulation) — these describe the panic state, not a situation.
+        #
+        #   • Enough context  → series: deliver regulation now, queue the complement
+        #                        as pending, and ASK CONSENT for it after the exercise.
+        #   • No context      → single: deliver regulation ONLY, then ask a gentle
+        #                        FOLLOW-UP to gather context for the next exercise.
         _behaviors = state.get("detected_behaviors") or []
         _contexts = state.get("detected_contexts") or []
         _symptoms = state.get("detected_symptoms") or []
-        _multi_domain_signals = (
-            len(_behaviors) >= 2
-            or any(c in _contexts for c in ("family_conflict", "interpersonal_conflict", "work_stress", "academic_stress"))
-            or len(_symptoms) >= 2
+        _SITUATIONAL_CONTEXTS = (
+            "family_conflict", "interpersonal_conflict", "work_stress", "academic_stress",
+            "social_humiliation", "academic_pressure", "relationship_conflict",
+            "financial_stress", "health_anxiety", "grief", "bullying",
         )
-        _multi_domain = bool(state.get("requires_technique_series", False)) or _multi_domain_signals
-        _plan_mode = "series" if _multi_domain else "single"
-        _tech_area = ["breathing", "grounding", "cbt", "mindfulness"] if _multi_domain else ["breathing", "grounding"]
-        if _multi_domain:
-            if _multi_domain_signals and not state.get("requires_technique_series"):
-                print("[NODE: PLANNER]  v13.2 MULTI-DOMAIN fallback: behavioral/contextual signals → series mode")
-            else:
-                print("[NODE: PLANNER]  v13.2 MULTI-DOMAIN series (mood LLM): physical + cognitive symptoms → 2-exercise plan")
-        print("[NODE: PLANNER]  v13.0 IMMEDIATE_REGULATION_REQUEST — start_grounding_now, 0 questions")
+        # Only a FRESH, per-turn situational/cognitive signal about the underlying
+        # issue justifies a complement: a situational context tag detected THIS turn
+        # by the mood analyzer, or a cognitive distortion detected THIS turn.
+        #
+        # triggering_context and active_thread_summary are DELIBERATELY excluded:
+        # both persist across turns (_SESSION_CONTEXT_KEYS) and can be injected by
+        # the cross-session handoff, so they fire even on a brand-new cold panic
+        # open ("im having the panic attack") that has no current-conversation
+        # context — which is exactly the false-positive we keep seeing.
+        _situational_now = [c for c in _contexts if c in _SITUATIONAL_CONTEXTS]
+        _has_complement_context = bool(_situational_now or state.get("distortion_type"))
+        _plan_mode = "series" if _has_complement_context else "single"
+        _tech_area = ["breathing", "grounding", "cbt", "mindfulness"] if _has_complement_context else ["breathing", "grounding"]
+        # When there is no deeper context, the regulation response must end with a
+        # gentle follow-up so the next turn can gather context for a fitted exercise.
+        _reg_followup = not _has_complement_context
+        if _has_complement_context:
+            print(
+                f"[NODE: PLANNER]  v15.3 IMMEDIATE_REGULATION + complement context → series "
+                f"(situational={_situational_now}, distortion={state.get('distortion_type')})"
+            )
+        else:
+            print(
+                f"[NODE: PLANNER]  v15.3 IMMEDIATE_REGULATION, no complement context → single "
+                f"(contexts={_contexts}, distortion={state.get('distortion_type')}) → regulation + follow-up"
+            )
         return {
             "conversation_strategy": "suggest_technique",
             "conversation_phase": "venting",
@@ -773,6 +898,7 @@ async def _plan_conversation_strategy(state: MentalHealthState) -> dict:
             "question_budget": 0,
             "question_count_since_disclosure": 0,
             "context_missing_reason": None,
+            "regulation_followup_pending": _reg_followup,
         }
 
     # ============================================
@@ -1253,14 +1379,39 @@ async def _plan_conversation_strategy(state: MentalHealthState) -> dict:
     # v11.0: CONTEXT SUFFICIENCY SCORING
     # Blocks technique if we don't have enough formulation yet.
     # Gate: context_sufficiency < 0.6 unless user explicitly requested.
-    # slots_found = primary_concern + concern_duration + triggering_context
+    #
+    # v15.0: Trust the LLM. The mood analyzer (Gemini) already understands the
+    # situation semantically — primary_sub_emotion, detected_contexts, symptoms,
+    # behaviors. We score sufficiency from BOTH the keyword/derived slots AND the
+    # LLM's semantic signals, then take the stronger of the two. This stops
+    # non-academic disclosures (social humiliation, family conflict, grief, etc.)
+    # from being blocked forever just because the keyword slot-filler — which is
+    # academic-biased — couldn't pattern-match them.
     # ============================================
     _slots_found = sum(
         1
         for key in ("primary_concern", "concern_duration", "triggering_context")
         if context_updates.get(key) or state.get(key)
     )
-    context_sufficiency = min(1.0, round(_slots_found / 3.0, 2))
+    _slot_sufficiency = min(1.0, round(_slots_found / 3.0, 2))
+
+    # LLM-semantic understanding: what Gemini already extracted this turn.
+    #   concern  : a specific (non-neutral) primary sub-emotion = we know WHAT
+    #   trigger  : at least one detected situational context     = we know WHY/WHERE
+    #   clinical : any symptom or behavior signal                = depth of picture
+    _llm_concern = str(state.get("primary_sub_emotion") or "").strip().lower() not in ("", "neutral")
+    _llm_trigger = bool(state.get("detected_contexts"))
+    _llm_clinical = bool(state.get("detected_symptoms") or state.get("detected_behaviors"))
+    _llm_signal_count = sum((_llm_concern, _llm_trigger, _llm_clinical))
+    _llm_sufficiency = min(1.0, round(_llm_signal_count / 3.0, 2))
+
+    context_sufficiency = max(_slot_sufficiency, _llm_sufficiency)
+    if _llm_sufficiency > _slot_sufficiency:
+        print(
+            f"[NODE: PLANNER]  context_sufficiency from LLM signals="
+            f"{_llm_sufficiency:.2f} (concern={_llm_concern}, trigger={_llm_trigger}, "
+            f"clinical={_llm_clinical}) > keyword slots={_slot_sufficiency:.2f}"
+        )
     if (
         context_sufficiency < 0.6
         and not explicit_acceptance
@@ -2050,6 +2201,17 @@ def _apply_question_budget_policy(state: MentalHealthState, result: dict) -> dic
         _emotion_now in {"anxiety", "fear", "sadness", "anger", "disgust"} and _intensity_now >= 0.40
     ) or _intent_now in {"therapeutic", "venting", "technique_not_helpful", "technique_partial_helpful"}
 
+    # Reconstruct technique-request signals locally — these are computed in
+    # _plan_conversation_strategy but needed again here for the RECOVERY reopen branch.
+    _gate_route_was_technique = state.get("gate_route") in {"technique_request"}
+    _intent_budget = str(result.get("intent", state.get("intent", "")) or "")
+    _flags_budget = list(result.get("context_flags") or state.get("gate_context_flags") or [])
+    explicit_technique_request = (
+        _intent_budget == "technique_request"
+        or "explicit_technique_request" in _flags_budget
+        or is_explicit_exercise_request(_current_msg_text)
+    )
+
     if _in_recovery and not crisis_detected and not immediate_regulation_request:
         # Close if counter >= 1 (normal path) OR if conversation_stage was already
         # RECOVERY at the start of this turn (robust fallback when in-memory counter
@@ -2091,6 +2253,10 @@ def _apply_question_budget_policy(state: MentalHealthState, result: dict) -> dic
                     # already established trust and shared context. Cap the budget so
                     # the system moves to technique offer on the very next answer.
                     result["question_budget"] = 1
+                    # Pre-seed counter so earned_intervention fires after just 1 more
+                    # follow-up answer — the user already shared context in this session
+                    # and shouldn't be stuck in an extended context-gathering loop.
+                    result["question_count_since_technique"] = 1
             else:
                 # Check if a complement technique is queued — if so, offer it instead of closing
                 _has_alt = bool(

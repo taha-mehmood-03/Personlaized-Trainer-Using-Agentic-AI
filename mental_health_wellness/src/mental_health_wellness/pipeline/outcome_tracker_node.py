@@ -196,6 +196,82 @@ async def _resolve_pending_outcome(state: MentalHealthState) -> dict:
         return {}
 
 
+_CLOSURE_RESPONSE_TASKS = {"warm_close_and_invite", "compassionate_close"}
+
+
+async def _resolve_pending_on_session_close(state: MentalHealthState) -> dict:
+    """Fallback resolver for the abandonment gap.
+
+    The strict resolver (`_resolve_pending_outcome`) only fires on a distinct
+    reaction turn WITH new emotional content. A user who accepts a technique and
+    then leaves — or simply closes warmly ("thanks, bye") with no fresh emotional
+    content — would otherwise leave the outcome permanently pending
+    (intensityAfter=None), so the technique's effectiveness never counts.
+
+    When the session reaches a natural close, resolve any still-pending outcome
+    for THIS session using the last known intensity. Confidence is modest because
+    the user gave no explicit post-technique reaction.
+    """
+    session_id = state.get("session_id", "")
+    if not session_id:
+        return {}
+
+    response_task = str(state.get("response_task") or "")
+    is_close = (
+        response_task in _CLOSURE_RESPONSE_TASKS
+        or bool(state.get("session_disclosure_complete"))
+    )
+    if not is_close:
+        return {}
+
+    try:
+        from ..db.client import get_prisma_client
+
+        prisma = await get_prisma_client()
+        pending = await prisma.techniqueoutcome.find_first(
+            where={"sessionId": session_id, "intensityAfter": None},
+            order={"createdAt": "desc"},
+        )
+        if not pending:
+            return {}
+
+        current_emotion = state.get("fused_emotion", state.get("emotion", "neutral"))
+        current_intensity = float(state.get("fused_intensity", state.get("intensity", 0.5)) or 0.5)
+        effectiveness = _effectiveness(
+            float(getattr(pending, "intensityBefore", 0.0) or 0.0), current_intensity
+        )
+        # Inferred at close — no explicit reaction turn, so keep confidence modest.
+        confidence = 0.4
+        follow_through = _follow_through_from_behaviors(state.get("detected_behaviors") or [])
+
+        await prisma.techniqueoutcome.update(
+            where={"id": pending.id},
+            data={
+                "emotionAfter": _db_emotion(current_emotion),
+                "subEmotionAfter": state.get("primary_sub_emotion"),
+                "symptomsAfter": state.get("detected_symptoms") or [],
+                "behaviorsAfter": state.get("detected_behaviors") or [],
+                "intensityAfter": current_intensity,
+                "effectiveness": effectiveness,
+                "followThrough": follow_through,
+                "confidence": confidence,
+                "interventionType": "session_close_inferred",
+            },
+        )
+        print(
+            "[NODE: OUTCOME_TRACKER] Pending TechniqueOutcome resolved at SESSION CLOSE "
+            f"id={pending.id} effectiveness={effectiveness:+.0%} confidence={confidence:.0%}"
+        )
+        return {
+            "resolved_outcome_id": pending.id,
+            "resolved_outcome_effectiveness": effectiveness,
+            "resolved_outcome_confidence": confidence,
+        }
+    except Exception as e:
+        print(f"[NODE: OUTCOME_TRACKER] Session-close resolution failed: {str(e)[:100]}")
+        return {}
+
+
 async def _infer_previous_technique_baseline(session_id: str) -> dict | None:
     """
     Find the most recent assistant technique in this same session and use the
@@ -320,7 +396,14 @@ async def record_explicit_technique_feedback(state: MentalHealthState) -> dict:
         return {}
 
     messages = state.get("messages") or []
-    user_message = getattr(messages[-1], "content", "") if messages else ""
+    # Use the last HUMAN message — on bypass routes messages[-1] is the assistant
+    # reply (which would otherwise be stored as the user's "feedback" text).
+    user_message = ""
+    for _m in reversed(messages):
+        _t = (getattr(_m, "type", "") or getattr(_m, "role", "") or "").lower()
+        if _t in ("human", "user") or _m.__class__.__name__ == "HumanMessage":
+            user_message = getattr(_m, "content", "") or ""
+            break
     feedback = (user_message or "User said this technique helped.").strip()[:500]
     rating = 5
 
@@ -491,6 +574,12 @@ async def track_outcome(state: MentalHealthState) -> dict:
     resolved_updates = await _resolve_pending_outcome(state)
     if resolved_updates:
         return {**feedback_updates, **resolved_updates}
+
+    # Abandonment fallback: if the session is closing and a pending outcome was
+    # never resolved by a reaction turn, resolve it now from the last known state.
+    close_updates = await _resolve_pending_on_session_close(state)
+    if close_updates:
+        return {**feedback_updates, **close_updates}
 
     technique_delivery_emotion = state.get("technique_delivery_emotion")
     technique_delivery_intensity = state.get("technique_delivery_intensity")

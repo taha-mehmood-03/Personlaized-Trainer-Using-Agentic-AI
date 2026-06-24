@@ -898,16 +898,28 @@ def _build_clinical_trend(logs: list) -> list:
         session_obj = getattr(last, "session", None) or getattr(first, "session", None)
         title = getattr(session_obj, "title", None) or f"Session {i + 1}"
 
-        # Use the PEAK score within the session as the "before therapy" baseline.
-        # The first log frequently has a low score because the user hasn't fully
-        # disclosed their symptoms yet (background assessment had less context).
-        # Taking the peak gives a clinically meaningful pre-intervention reference.
+        # Phase-aware before/after (no turn_type column required — inferred from
+        # the score timeline within the session):
+        #   BEFORE = disclosure-phase PEAK — the worst moment, which is the
+        #            pre-intervention reference (the first log is often low because
+        #            the user hasn't fully disclosed yet).
+        #   AFTER  = the best state RECOVERED after that peak (intervention +
+        #            feedback + recovery turns). Using the post-peak minimum instead
+        #            of the literal last log means a trailing NEW disclosure cannot
+        #            masquerade as "worsening" — it measures the recovery the session
+        #            actually achieved.
         all_phq9 = [_float(getattr(l, "phq9Score", 0), 0.0) for l in slogs]
         all_gad7 = [_float(getattr(l, "gad7Score", 0), 0.0) for l in slogs]
-        start_phq9 = max(all_phq9) if len(all_phq9) > 1 else all_phq9[0]
-        start_gad7 = max(all_gad7) if len(all_gad7) > 1 else all_gad7[0]
-        end_phq9   = _float(getattr(last, "phq9Score", 0), 0.0)
-        end_gad7   = _float(getattr(last, "gad7Score", 0), 0.0)
+        if len(slogs) > 1:
+            _ppeak = max(range(len(all_phq9)), key=lambda k: all_phq9[k])
+            start_phq9 = all_phq9[_ppeak]
+            end_phq9   = min(all_phq9[_ppeak:])
+            _gpeak = max(range(len(all_gad7)), key=lambda k: all_gad7[k])
+            start_gad7 = all_gad7[_gpeak]
+            end_gad7   = min(all_gad7[_gpeak:])
+        else:
+            start_phq9 = end_phq9 = all_phq9[0]
+            start_gad7 = end_gad7 = all_gad7[0]
 
         all_indicators = sorted({
             ind
@@ -1160,8 +1172,14 @@ async def build_user_dashboard(user_id: str, days: int = 30) -> dict:
     # only when multiple logs exist (otherwise both start and end are the same number).
     _cross_delta: float | None = None
     if len(_clinical_trend) >= 2:
-        _cross_delta = round(_clinical_trend[-1]["end_phq9"] - _clinical_trend[0]["start_phq9"], 1)
+        # Two-level model — LONGITUDINAL improvement compares LIKE WITH LIKE:
+        # each session's pre-intervention BASELINE (disclosure-phase peak). A user
+        # who arrives less distressed over weeks is genuinely improving. (The old
+        # metric compared the latest session's post-therapy END against the first
+        # session's START — mixing phases, so it almost always looked rosy.)
+        _cross_delta = round(_clinical_trend[-1]["start_phq9"] - _clinical_trend[0]["start_phq9"], 1)
     elif len(_clinical_trend) == 1 and _clinical_trend[0]["log_count"] > 1:
+        # Single session: fall back to within-session change (peak → recovery).
         _cross_delta = _clinical_trend[0]["within_phq9_delta"]
     clinical_section = {
         "has_data": bool(_window_clinical),

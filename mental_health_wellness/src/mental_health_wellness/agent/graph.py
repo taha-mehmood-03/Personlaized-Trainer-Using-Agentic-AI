@@ -164,6 +164,7 @@ _SESSION_CONTEXT_KEYS = (
     "technique_delivery_sub_emotion",
     "technique_delivery_symptoms",
     "technique_delivery_behaviors",
+    "techniques_displayed_ids",  # anti-repetition: IDs of techniques already shown this session
     "peak_distress_intensity",   # highest confirmed distress this session (anchor for follow-ups)
     "followup_turn_count",       # consecutive contextual follow-up turns since last disclosure
     "raw_emotion_label",
@@ -918,6 +919,13 @@ def _protect_contextual_followup_gate(
     """
     route = str((gate_result or {}).get("route") or "therapeutic").lower()
     if route != "therapeutic":
+        return gate_result
+
+    # If the gate explicitly flagged a NEW emotional disclosure, do NOT correct
+    # to contextual_followup — the user is sharing something genuinely new,
+    # not answering the previous question.
+    gate_flags = list((gate_result or {}).get("context_flags") or [])
+    if "new_emotional_disclosure" in gate_flags:
         return gate_result
 
     if not session_context_state:

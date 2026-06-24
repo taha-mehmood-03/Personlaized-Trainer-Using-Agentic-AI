@@ -65,44 +65,65 @@ CONTEXT_TAGS = {
 
 
 _VOICE_BASE_PROMPT = """\
-You are a mental-health support emotion analyst specializing in speech emotion recognition.
+You are analyzing the VOCAL DELIVERY of an audio recording for a mental-health support system.
+
+YOUR MOST IMPORTANT INSTRUCTION:
+Classify based on HOW the person sounds, not what their words mean.
+If what the voice sounds like CONTRADICTS what the words mean, classify based on the VOICE.
 
 You will receive:
 1. CONVERSATION HISTORY - the last few turns of this support session, when available
 2. AUDIO - the user's voice message to classify now
 
-Analyze the audio using BOTH:
-- The spoken words (transcribed content)
-- Vocal delivery cues: tone, pace, pauses, hesitation, energy, and strain
+VOICE-FIRST ANALYSIS:
+Listen specifically for these vocal signals BEFORE reading the words:
+  - Pitch: Is it elevated (emotional activation) or flat (depression)?
+  - Tremor: Is the voice shaking or unstable (crying, anxiety)?
+  - Breathiness: Is there crying breathiness or sighing present?
+  - Pauses: More silence than normal speech (hesitancy, avoidance)?
+  - Energy: Does the vocal energy match the words being said?
+  - Strain: Is the voice tight, constricted, or breaking?
+
+COMMON MASKING PATTERNS YOU MUST DETECT:
+  - Crying/trembling voice + positive words ("I'm fine", "I'm happy")
+    -> classify as sadness/distress, set voice_text_conflict=true
+  - Laughing/light tone + sad words ("I'm so sad", "I want to die")
+    -> classify as joy/amusement, set voice_text_conflict=true
+  - Flat/exhausted delivery + excited words ("I'm doing great!")
+    -> classify as fatigue/low_mood, set voice_text_conflict=true
+  - Trembling/breaking voice + calm words ("everything is okay")
+    -> classify as anxiety/distress, set voice_text_conflict=true
 
 IMPORTANT: The audio may be a short follow-up reply (e.g. "mostly around my family").
 Use the conversation history to understand the full emotional picture before classifying.
-Do not diagnose. Only infer emotional state, sub-emotions, likely contexts, and visible
-support signals from the available evidence.
+Do not diagnose. Only infer emotional state from the available evidence.
 
 Return a JSON object with EXACTLY these fields:
 
 {
   "transcription": <verbatim transcript of the audio, or empty string if unintelligible>,
-  "emotion": <one of: anger|disgust|fear|joy|neutral|sadness|surprise|anxiety>,
+  "emotion": <one of: anger|disgust|fear|joy|neutral|sadness|surprise|anxiety — based on VOICE tone, NOT word meaning>,
   "primary_sub_emotion": <one canonical sub-emotion from the allowed taxonomy>,
   "secondary_sub_emotions": [<up to 3 additional canonical sub-emotions>],
-  "sentiment": <one of: positive|negative|neutral>,
+  "sentiment": <one of: positive|negative|neutral — based on VOICE tone>,
   "intensity": <float 0.0-1.0 reflecting overall distress level across the conversation>,
   "confidence": <float 0.0-1.0, your confidence in this classification>,
   "arousal": <float 0.0-1.0, vocal activation/energy: 0=very calm, 1=highly activated>,
-  "valence": <float 0.0-1.0, emotional positivity: 0=very negative, 1=very positive>,
-  "distress_index": <float 0.0-1.0, clinical composite vocal distress: 0=low, 1=high>,
+  "valence": <float 0.0-1.0, emotional positivity of the VOICE: 0=very negative, 1=very positive>,
+  "distress_index": <float 0.0-1.0, clinical composite vocal distress: 0=low, 1=high — based on vocal strain, NOT word content>,
   "pause_density": <float 0.0-1.0, hesitancy/silence proportion: 0=fluent, 1=very hesitant>,
+  "voice_text_conflict": <true if vocal delivery contradicts word meaning, false otherwise>,
+  "conflict_description": <describe the conflict if voice_text_conflict is true, else null>,
   "detected_symptoms": [<physical/cognitive signals from the allowed taxonomy>],
   "detected_behaviors": [<behavioral patterns from the allowed taxonomy>],
   "detected_contexts": [<situational contexts from the allowed taxonomy>],
   "emotion_scores": {"anger": 0.0, "disgust": 0.0, "fear": 0.0, "joy": 0.0, "neutral": 0.0, "sadness": 0.0, "surprise": 0.0, "anxiety": 0.0},
-  "reasoning": <one sentence explaining your classification using BOTH spoken content AND vocal delivery cues>
+  "reasoning": <one sentence explaining your classification — when voice and words conflict, explain WHY you chose the voice signal>
 }
 
 Rules:
 - emotion MUST be one of the 8 core emotions exactly as listed.
+- CRITICAL: emotion must reflect the VOICE, not the words. A crying voice saying "I'm happy" = sadness.
 - primary_sub_emotion MUST be exactly one value from ALLOWED PRIMARY/SUB-EMOTIONS.
 - Prefer the most specific sub-emotion supported by evidence (for example performance_anxiety,
   rejection, shame, burnout, bedtime_rumination) instead of a generic label when possible.
@@ -112,11 +133,11 @@ Rules:
   labels from the taxonomy below.
 - Do not invent symptoms, behaviors, or contexts. Include them only when clearly supported
   by transcript, conversation history, or vocal delivery.
-- Use spoken meaning as primary evidence. Use vocal delivery as supporting evidence, or as
-  an override only when it clearly reveals masked distress.
+- distress_index MUST reflect vocal strain signals (tremor, breathiness, pitch instability,
+  pauses). Do NOT lower distress_index just because the words sound positive.
 - intensity for neutral/joy must be <= 0.45. For negative emotions usually use 0.50-0.95.
 - If the user is masking distress with positive language OR a calm tone, detect the underlying emotion.
-- If words and tone disagree, choose the clinically safer (higher distress) emotion and explain the masking in reasoning.
+- If words and tone disagree, ALWAYS choose the voice signal and set voice_text_conflict=true.
 - Respond ONLY with valid JSON. No markdown, no explanation outside the JSON.
 """
 
@@ -393,6 +414,8 @@ def _validate_gemini_voice(parsed: dict[str, Any]) -> dict[str, Any]:
         "detected_contexts": detected_contexts,
         "sentiment": sentiment,
         "intensity": round(intensity, 3),
+        "voice_text_conflict": bool(parsed.get("voice_text_conflict", False)),
+        "conflict_description": str(parsed.get("conflict_description") or "") or None,
         "emotion_reasoning": f"Gemini audio: {str(parsed.get('reasoning', ''))[:160]}",
         "extraction_method": "gemini_audio",
         "transcription": str(parsed.get("transcription", "") or "").strip(),

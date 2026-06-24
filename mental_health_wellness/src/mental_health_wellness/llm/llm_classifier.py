@@ -1204,10 +1204,10 @@ You MUST analyze if the user's latest message contains a change or expression of
    - "unknown": Default if no clear consent or denial is expressed in this turn.
 
 2. Solution Preference (`solution_preference`):
-   - "listen_only": User explicitly states they just want to talk, vent, be heard, or don't want advice/solutions/exercises. E.g., "just listen to me", "just need to vent".
+   - "listen_only": ONLY when the user EXPLICITLY refuses help/advice/exercises or explicitly says they want nothing but to be heard. E.g., "just listen, don't give me advice", "I don't want any exercises, I only want to vent". CRITICAL: Do NOT use "listen_only" merely because the user is venting, sharing emotional distress, or describing a painful situation. Emotional sharing is the NORMAL mode of this app and is NOT a refusal of help. A user describing how hurt/anxious/angry they feel is disclosing, not declining support. When in doubt, use "unknown".
    - "advice_allowed": User asks for general advice, suggestions, or what to do, without explicitly asking for a clinical exercise/technique. E.g., "what should I do?", "any suggestions?".
    - "exercise_requested": User explicitly asks for an exercise, technique, breathing drill, or accepts an offered one.
-   - "unknown": Default if no preference is expressed in this turn.
+   - "unknown": Default when no explicit solution preference is expressed in this turn. This is the correct choice for ordinary emotional disclosures and venting.
 
 3. Topic Suppression & Corrections (`suppressed_topics` and `active_issue_source`):
    - If the user explicitly corrects a past topic or reason (e.g., "that has nothing to do with my teacher", "stop talking about my brother", "I already told you that's not the reason"):

@@ -523,16 +523,27 @@ async def select_technique(state: MentalHealthState) -> dict:
             latest = state.get("active_technique") or state.get("latest_recommended_technique") or {}
             latest_name = (latest.get("name") or "").strip().lower() if isinstance(latest, dict) else ""
             rejected_name = (rejected.get("name") or "").strip().lower() if isinstance(rejected, dict) else ""
+            latest_id = (latest.get("id") or latest.get("technique_id") or "") if isinstance(latest, dict) else ""
+            displayed_ids = set(state.get("techniques_displayed_ids") or [])
+
             if latest_name and latest_name != rejected_name:
-                cat_name = latest.get("category", "Recommended")
-                print(f"[TECHNIQUE] Reusing in-session technique: {latest.get('name')}")
-                return {
-                    "recommended_technique": latest,
-                    "recommended_techniques_by_category": {cat_name: latest},
-                    "alternative_techniques": [],
-                    "latest_recommended_technique": latest,
-                    **_selection_fields(),
-                }
+                _active_live = bool(state.get("active_technique"))
+                _already_displayed = bool(latest_id and latest_id in displayed_ids)
+                if _active_live or not _already_displayed:
+                    cat_name = latest.get("category", "Recommended")
+                    print(f"[TECHNIQUE] Reusing in-session technique: {latest.get('name')}")
+                    return {
+                        "recommended_technique": latest,
+                        "recommended_techniques_by_category": {cat_name: latest},
+                        "alternative_techniques": [],
+                        "latest_recommended_technique": latest,
+                        **_selection_fields(),
+                    }
+                else:
+                    print(
+                        f"[TECHNIQUE] Suppressing reuse of '{latest_name}' — "
+                        f"already displayed this session (new disclosure arc)"
+                    )
 
         skip_strategies = {"validate_only", "ask_question", "encourage_reflection", "no_action"}
         if strategy in skip_strategies:
@@ -619,6 +630,27 @@ async def select_technique(state: MentalHealthState) -> dict:
         if not filtered:
             print(f"[TECHNIQUE] All candidates rejected ({rejected_name})")
             return _empty
+
+        # Anti-repetition: filter out techniques already displayed this session
+        displayed_ids = set(state.get("techniques_displayed_ids") or [])
+        if displayed_ids:
+            pre_dedup_count = len(filtered)
+            filtered = [
+                t for t in filtered
+                if (t.get("id") or "") not in displayed_ids
+            ]
+            deduped = pre_dedup_count - len(filtered)
+            if deduped:
+                print(f"[TECHNIQUE] Anti-repetition: removed {deduped} already-displayed technique(s)")
+            if not filtered:
+                displayed_technique = state.get("latest_recommended_technique") or {}
+                displayed_name = displayed_technique.get("name", "")
+                print(f"[TECHNIQUE] Same technique '{displayed_name}' applies again — flagging for acknowledgment")
+                return {
+                    **_empty,
+                    "technique_repetition_same": True,
+                    "technique_repetition_name": displayed_name,
+                }
 
         # v11.0: Filter out techniques that match suppressed topic labels
         from .consent_parser import get_suppressed_topic_labels

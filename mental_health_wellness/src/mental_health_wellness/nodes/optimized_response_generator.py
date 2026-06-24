@@ -738,12 +738,40 @@ EMERGENCY SAFETY CLAUSE: If the user expresses ANY sudden sadness, fear, self-ha
                 )
 
             if is_immediate:
+                # After the acute exercise, choose ONE closing move:
+                #  A) a complement is queued (we have context) → ask CONSENT for it
+                #     (do not deliver its steps yet)
+                #  B) no context yet → ask ONE gentle follow-up to gather context for
+                #     the next exercise
+                #  C) otherwise → no question (acute moment, nothing to add)
+                _pending_complement = state.get("pending_complement_technique") or {}
+                _complement_name = (
+                    _pending_complement.get("name") if isinstance(_pending_complement, dict) else ""
+                ) or ""
+                _complement_signal = state.get("pending_complement_signal") or "the underlying issue"
+                _reg_followup = bool(state.get("regulation_followup_pending"))
+                if _complement_name:
+                    _imm_step3 = (
+                        f"  3. After the steps, once their body has something to anchor on, GENTLY offer a "
+                        f"SECOND exercise as a CONSENT question — do NOT deliver its steps now: e.g. "
+                        f"\"Once you feel a little steadier, would you like to also try '{_complement_name}' "
+                        f"to work on {_complement_signal}?\" Ask only this single consent question."
+                    )
+                elif _reg_followup:
+                    _imm_step3 = (
+                        f"  3. After the steps, ask ONE gentle, open follow-up question so you can understand "
+                        f"what triggered this and help further — e.g. \"When you feel a bit calmer, can you "
+                        f"tell me a little about what set this off?\" Keep it to a single soft question; do "
+                        f"NOT offer another exercise yet."
+                    )
+                else:
+                    _imm_step3 = "  3. Do NOT ask any follow-up questions at all (question budget is 0)."
                 delivery_instruction = (
                     f"\n\n=== CRITICAL CONTEXT - IMMEDIATE REGULATION REQUEST ===\n"
                     f"The user has requested immediate help to calm down. "
                     f"You MUST:\n"
                     f"  1. Start with 1-2 validating, warm sentences (e.g. 'I hear you, let's take a slow breath together.').\n"
-                    f"  2. Present the breathing/grounding exercise {_tech_label} inline immediately. Do not ask for permission, and do not ask any questions at the end of the response.\n"
+                    f"  2. Present the breathing/grounding exercise {_tech_label} inline immediately. Do not ask for permission.\n"
                     f"     Since the database steps provided below are general, you MUST translate and convert each step to target the user's current specific physiological distress (e.g. rapid breathing, shaking, racing heart).\n"
                     f"     Use this exact style:\n"
                     f"     ### Exercise: <Technique Name>\n"
@@ -755,7 +783,7 @@ EMERGENCY SAFETY CLAUSE: If the user expresses ANY sudden sadness, fear, self-ha
                     f"     **Steps:**\n"
                     f"     (Use these general base steps but translate/rewrite them to be problem-specific to the user's situation):\n"
                     f"{_steps_block}\n"
-                    f"  3. Do NOT ask any follow-up questions at all (question budget is 0)."
+                    f"{_imm_step3}"
                 )
             else:
                 delivery_instruction = (
@@ -824,6 +852,21 @@ EMERGENCY SAFETY CLAUSE: If the user expresses ANY sudden sadness, fear, self-ha
             except Exception as fe:
                 print(f"[NODE:RESPONSE] Force-fetch failed: {fe}")
 
+
+        # Technique repetition acknowledgment: same exercise applies to new disclosure
+        if state.get("technique_repetition_same"):
+            _rep_name = state.get("technique_repetition_name", "the exercise")
+            repetition_block = (
+                f"\n\nTECHNIQUE RELEVANCE NOTE:\n"
+                f"The user's new disclosure still maps to the same exercise: '{_rep_name}'.\n"
+                f"- Acknowledge this explicitly — tell them that '{_rep_name}' is also relevant for this issue\n"
+                f"- Do NOT re-display the full steps (they already have them)\n"
+                f"- Say something like: 'What you're describing also connects to {_rep_name} — "
+                f"the same exercise we looked at earlier can help with this too.'\n"
+                f"- Then continue with empathetic follow-up or ask if they'd like to try it for this context\n"
+            )
+            system_prompt += repetition_block
+            print(f"[NODE:RESPONSE] Technique repetition acknowledgment injected: '{_rep_name}'")
 
         # ============================================
         # BUILD STRUCTURED INPUT CONTEXT
@@ -1294,14 +1337,44 @@ def _build_optimized_system_prompt(
 
     # CRISIS OVERRIDE
     if crisis_detected:
-        return """You are SentiMind, a mental health companion in CRISIS MODE.
+        # Inject the REAL Pakistan emergency/crisis numbers from the single source
+        # of truth (crisis_tools). Without this the LLM invents generic/US numbers
+        # like 988 / "Text HOME to 741741", which are useless to a Pakistani user.
+        try:
+            from ..tools.crisis_tools import get_crisis_resources, DEFAULT_CRISIS_COUNTRY
+            _res = get_crisis_resources(DEFAULT_CRISIS_COUNTRY)
+
+            def _hl(d):
+                if not isinstance(d, dict):
+                    return None
+                name, num = d.get("name"), d.get("number")
+                return f"  • {name}: {num}" if name and num else None
+
+            _nums = [
+                _hl(_res.get(k))
+                for k in ("primary_hotline", "secondary_hotline", "tertiary_hotline", "emergency_service")
+            ]
+            _numbers_block = "\n".join(x for x in _nums if x)
+        except Exception:
+            _numbers_block = ""
+        if not _numbers_block:
+            _numbers_block = (
+                "  • Umang Pakistan Mental Health Helpline: +92-311-7786264\n"
+                "  • Rescue / Ambulance: 1122\n"
+                "  • Police Emergency: 15\n"
+                "  • Edhi Ambulance: 115"
+            )
+
+        return f"""You are SentiMind, a mental health companion in CRISIS MODE.
 
 YOUR ONLY JOB RIGHT NOW:
 - Keep the user alive and connected through the next few minutes.
 - Be warm, direct, steady, and serious. Do not sound casual or generic.
 - Start by naming that you are really glad they told you and that their life matters right now.
 - Ask them to make one immediate safety move: put distance between themselves and anything they could use to hurt themselves, or move near another person.
-- Encourage real-world support: ask them to contact a trusted person nearby or local emergency services now if they might act on the urge.
+- Encourage real-world support: ask them to contact a trusted person nearby or to call one of these PAKISTAN emergency/crisis numbers now if they might act on the urge:
+{_numbers_block}
+- CRITICAL: Use ONLY the Pakistan numbers listed above. NEVER give US/international numbers like 988 or "Text HOME to 741741" — they do not work in Pakistan. Do NOT invent, guess, or modify any number; quote the ones above exactly.
 - Ask ONE direct safety question: "Are you in immediate danger right now?" or "Can you move away from the thing you might use to hurt yourself?"
 - Keep them engaged: invite a short reply like "just send me one word: safe or not safe."
 - Do NOT suggest normal wellness techniques, exercises, productivity advice, or generic coping lists.
@@ -1311,7 +1384,7 @@ YOUR ONLY JOB RIGHT NOW:
 
 Response shape:
 1. 1-2 sentences of serious validation and connection.
-2. 1-2 sentences asking for immediate safety action and real-world support.
+2. 1-2 sentences asking for immediate safety action and real-world support, including at least one Pakistan number from the list above.
 3. One direct safety question or one-word check-in.
 
 Tone: Deeply human, calm, protective, and present. The goal is not therapy; the goal is helping them not act on the urge right now."""
@@ -1387,14 +1460,30 @@ Tone: Deeply human, calm, protective, and present. The goal is not therapy; the 
                 confidence_text = f" Fusion confidence: {max(0.0, min(1.0, float(fusion_confidence))):.0%}."
             except (TypeError, ValueError):
                 confidence_text = ""
-        masking_block = (
-            "\n\nPOSSIBLE EMOTION MISMATCH:\n"
-            "- The user's words and nonverbal/context signals may not fully match."
-            f"{confidence_text}\n"
-            "- Do not assert that the user feels differently than they said.\n"
-            "- Use gentle uncertainty: 'part of this sounds...', 'I might be wrong, but...', or 'there may be more under this.'\n"
-            "- Validate what they stated first, then make room for hidden strain without over-interpreting."
-        )
+        if possible_masking:
+            masking_block = (
+                "\n\nVOICE ANALYSIS NOTE — POSSIBLE MASKING:\n"
+                "The acoustic analysis of the user's voice suggests their emotional state "
+                "may differ from what their words convey. Their vocal delivery showed signs of "
+                "distress that the words themselves did not express."
+                f"{confidence_text}\n\n"
+                "Instructions:\n"
+                "- Do NOT mirror or enthusiastically match their stated positive emotion\n"
+                "- Do NOT say things like 'that's wonderful' or 'I'm so glad you're happy'\n"
+                "- DO acknowledge what they said warmly but gently create space for what might be underneath\n"
+                "- A good approach: briefly acknowledge their words, then softly check in\n"
+                "- Example: 'It's good to hear you say that — how are you really doing today?'\n"
+                "- Stay warm, non-alarming, and leave space without forcing the issue\n"
+            )
+        else:
+            masking_block = (
+                "\n\nPOSSIBLE EMOTION MISMATCH:\n"
+                "- The user's words and nonverbal/context signals may not fully match."
+                f"{confidence_text}\n"
+                "- Do not assert that the user feels differently than they said.\n"
+                "- Use gentle uncertainty: 'part of this sounds...', 'I might be wrong, but...', or 'there may be more under this.'\n"
+                "- Validate what they stated first, then make room for hidden strain without over-interpreting."
+            )
 
     # ROLE INSTRUCTIONS
     role_instructions = {
@@ -2794,6 +2883,21 @@ EMERGENCY SAFETY CLAUSE: If the user expresses ANY sudden sadness, fear, self-ha
             closure_current_emotion=state.get("last_detected_emotion", ""),
             closure_trend=state.get("emotional_trend", "stable"),
         )
+
+        # Technique repetition acknowledgment (streaming path)
+        if state.get("technique_repetition_same"):
+            _rep_name = state.get("technique_repetition_name", "the exercise")
+            repetition_block = (
+                f"\n\nTECHNIQUE RELEVANCE NOTE:\n"
+                f"The user's new disclosure still maps to the same exercise: '{_rep_name}'.\n"
+                f"- Acknowledge this explicitly — tell them that '{_rep_name}' is also relevant for this issue\n"
+                f"- Do NOT re-display the full steps (they already have them)\n"
+                f"- Say something like: 'What you're describing also connects to {_rep_name} — "
+                f"the same exercise we looked at earlier can help with this too.'\n"
+                f"- Then continue with empathetic follow-up or ask if they'd like to try it for this context\n"
+            )
+            system_prompt += repetition_block
+            print(f"[NODE:RESPONSE-STREAM] Technique repetition acknowledgment injected: '{_rep_name}'")
 
         # PREPARE LLM MESSAGES
         llm_messages = [SystemMessage(content=system_prompt)]

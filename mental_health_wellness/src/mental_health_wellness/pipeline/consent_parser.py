@@ -56,17 +56,13 @@ _EXERCISE_DENIAL_PHRASES = {
     "skip the exercises", "skip exercises",
     "no exercise please", "not today for exercises",
     "pass on the exercises", "pass on exercises",
-    # Just want to talk / vent
-    "just want to talk", "just wanna talk",
-    "just want to vent", "just wanna vent",
-    "just want to be heard", "just wanna be heard",
+    # Explicit listen-only / advice refusals (firm — fire even without an offer)
     "just listen", "just listen to me",
-    "just want you to listen", "just wanna hear",
+    "just want you to listen",
     "don't give me advice", "dont give me advice",
     "no advice", "not looking for advice",
     "i'm not looking for solutions", "im not looking for solutions",
     "don't want solutions", "dont want solutions",
-    "i just need to talk", "i just need someone to listen",
     "not ready for exercises", "not ready for techniques",
     "don't push me", "dont push me",
 }
@@ -118,17 +114,28 @@ _EXERCISE_ACCEPTANCE_PHRASES = {
 # LISTEN-ONLY / ADVICE SIGNALS
 # ============================================
 _LISTEN_ONLY_PHRASES = {
-    "just listen", "just want to talk", "just wanna talk",
+    "just listen",
     "only want to talk", "i only want to talk",
-    "just want to vent", "just wanna vent",
-    "just need to talk", "just need someone to listen",
-    "just want to be heard", "just wanna be heard",
     "only want you to listen", "i only want you to listen",
     "please just listen",
     "don't give me advice", "dont give me advice",
     "no advice please", "not looking for advice",
     "don't need advice", "dont need advice",
     "i don't need solutions", "i dont need solutions",
+}
+
+# Ambiguous venting openers — "just want to talk about X" is a natural way to
+# start sharing, NOT a refusal of help. Treat as listen-only ONLY when a
+# technique was actually offered or the message explicitly references
+# exercises/advice; otherwise a distressed user gets permanently locked out of
+# ever being offered a technique for the whole session.
+_VENT_OPENER_PHRASES = {
+    "just want to talk", "just wanna talk",
+    "just want to vent", "just wanna vent",
+    "just want to be heard", "just wanna be heard",
+    "just need to talk", "i just need to talk",
+    "just need someone to listen", "i just need someone to listen",
+    "just wanna hear",
 }
 
 _ADVICE_ALLOWED_PHRASES = {
@@ -347,6 +354,17 @@ def parse_consent_and_suppression(state: MentalHealthState) -> dict:
             if exercise_consent == "unknown":
                 updates["exercise_consent"] = "denied_soft"
             print(f"[CONSENT_PARSER]  Listen-only signal detected → solution_preference=listen_only")
+
+        # Ambiguous venting opener: only a refusal when a technique was on the
+        # table (offered) or the message itself references exercises/advice.
+        # A bare "i just want to talk about my brother" must NOT lock the session.
+        elif _contains_any(plain_lower, _VENT_OPENER_PHRASES) and (
+            technique_was_offered or _has_exercise_context(plain_lower)
+        ):
+            updates["solution_preference"] = "listen_only"
+            if exercise_consent == "unknown":
+                updates["exercise_consent"] = "denied_soft"
+            print(f"[CONSENT_PARSER]  Vent-opener after offer/exercise-context → solution_preference=listen_only")
 
         elif _contains_any(plain_lower, _ADVICE_ALLOWED_PHRASES):
             if solution_preference == "unknown":

@@ -254,6 +254,7 @@ class TwilioWhatsAppCrisisService:
         user_details: Optional[Dict[str, Any]] = None,
         recipient: Optional[str] = None,
         sms_recipient: Optional[str] = None,
+        user_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Send automated voice message via WhatsApp when crisis detected
@@ -319,7 +320,7 @@ class TwilioWhatsAppCrisisService:
                     " URGENT CRISIS ALERT \n\n"
                     "A user in our SentiMind mental health app is showing signs of IMMEDIATE self-harm risk.\n\n"
                     "CRISIS LEVEL: HIGH \n"
-                    "USER ID:       {user_id}\n"
+                    "USER:          {user_label}\n"
                     "DETECTED VIA:  {source}\n"
                     "TIME:          {timestamp}\n\n"
                     " EMOTIONAL ANALYSIS:\n"
@@ -333,7 +334,7 @@ class TwilioWhatsAppCrisisService:
                     " MENTAL HEALTH CRISIS ALERT\n\n"
                     "A user in our SentiMind mental health app is showing signs of psychological distress with self-harm ideation.\n\n"
                     "CRISIS LEVEL: MEDIUM \n"
-                    "USER ID:       {user_id}\n"
+                    "USER:          {user_label}\n"
                     "DETECTED VIA:  {source}\n"
                     "TIME:          {timestamp}\n\n"
                     " EMOTIONAL ANALYSIS:\n"
@@ -358,8 +359,12 @@ class TwilioWhatsAppCrisisService:
                     print(f"[TWILIO-WHATSAPP]  Error encoding user details: {e}")
                     details_text = "- [Details encoding error]\n"
 
+            # Prefer the person's name; fall back to the user_id only if no name is known.
+            user_label = (user_name or "").strip() or (
+                str(user_details.get("user_name")).strip() if user_details and user_details.get("user_name") else ""
+            ) or user_id
             final_message = message_body.format(
-                user_id=user_id,
+                user_label=user_label,
                 source=source_tag,
                 timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 details=details_text or "N/A",

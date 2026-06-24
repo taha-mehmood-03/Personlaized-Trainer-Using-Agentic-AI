@@ -93,7 +93,11 @@ class MentalHealthState(TypedDict):
     technique_plan_mode: str                  # "single" by default, "series" when a multi-exercise plan is intentional
 
     technique_series: list[dict]              # Ordered techniques for series mode; first item is the active technique
-    
+
+    techniques_displayed_ids: list[str]       # IDs of techniques already shown to user this session (anti-repetition)
+    technique_repetition_same: bool           # True when re-selection yields already-shown technique
+    technique_repetition_name: str            # Name of the repeated technique for response acknowledgment
+
     # ============================================
     # RESPONSE (from optimized_response_generator)
     # ============================================
@@ -356,6 +360,7 @@ class MentalHealthState(TypedDict):
     # ============================================
     solution_requested: bool
     immediate_regulation_request: bool
+    regulation_followup_pending: bool   # imm-regulation delivered with no context → ask follow-up after the exercise
     exercises_reopened: bool
     latest_user_need: Optional[str]
     user_goal: Optional[str]
@@ -421,7 +426,11 @@ def get_initial_state() -> MentalHealthState:
 
         llm_selected_technique_id=None,
         technique_formatted="",
-        
+
+        techniques_displayed_ids=[],
+        technique_repetition_same=False,
+        technique_repetition_name="",
+
         # Response
         final_response="",
         
@@ -598,6 +607,7 @@ def get_initial_state() -> MentalHealthState:
         # v13.0: Solution request lifecycle
         solution_requested=False,
         immediate_regulation_request=False,
+        regulation_followup_pending=False,
         exercises_reopened=False,
         latest_user_need=None,
         user_goal=None,

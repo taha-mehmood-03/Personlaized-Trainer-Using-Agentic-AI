@@ -120,7 +120,6 @@ async def aggregate_clinical_assessment(
     weighted_phq = current_phq * 1.0
     weighted_gad = current_gad * 1.0
     total_weight = 1.0
-    max_severity = _normalize_severity(current.get("severity", "minimal"))
     confidences = [current_conf] if current_conf else []
 
     for idx, row in enumerate(history):
@@ -129,7 +128,6 @@ async def aggregate_clinical_assessment(
         weight = 0.75 * (0.85 ** idx)
         phq = int(getattr(row, "phq9Score", 0) or 0)
         gad = int(getattr(row, "gad7Score", 0) or 0)
-        sev = _normalize_severity(getattr(row, "severity", "minimal"))
         indicators = set(getattr(row, "indicators", []) or [])
         conf = float(getattr(row, "confidence", 0.0) or 0.0)
 
@@ -141,9 +139,6 @@ async def aggregate_clinical_assessment(
         if idx < 4:
             indicator_union.update(indicators)
         confidences.append(conf)
-
-        if _SEVERITY_ORDER[sev] > _SEVERITY_ORDER[max_severity]:
-            max_severity = sev
 
     avg_phq = round(weighted_phq / total_weight) if total_weight else current_phq
     avg_gad = round(weighted_gad / total_weight) if total_weight else current_gad
@@ -159,13 +154,13 @@ async def aggregate_clinical_assessment(
     aggregated_phq = min(27, max(avg_phq, phq_floor))
     aggregated_gad = min(21, max(avg_gad, gad_floor))
 
-    score_severity = _severity_from_scores(aggregated_phq, aggregated_gad)
-    # Severity uses the higher of score-derived or weighted-history max, but
-    # not a permanent lock — max_severity already decays via the weighted avg.
-    final_severity = max(
-        (score_severity, max_severity),
-        key=lambda sev: _SEVERITY_ORDER[sev],
-    )
+    # Severity is ALWAYS a deterministic function of the scores we are about to
+    # report. It must never drift from the numbers shown on the dashboard. The
+    # smoothing already lives on the scores (weighted average + indicator floor);
+    # the label simply reads those scores against the standard PHQ-9/GAD-7 cutoffs.
+    # (The previous code blended in a sticky, non-decaying MAX severity over the
+    # last 12 logs, which produced "SEVERE" badges next to PHQ=1/GAD=2 scores.)
+    final_severity = _severity_from_scores(aggregated_phq, aggregated_gad)
 
     confidence = max(confidences) if confidences else 0.0
     if history and confidence:

@@ -193,22 +193,6 @@ export function ClinicalValidityCard({ assessment }: { assessment: ClinicalAsses
                 </div>
             </div>
 
-            {/* Indicators */}
-            {session.indicators.length > 0 && (
-                <div className="rounded-lg border border-slate-100 bg-slate-50 px-4 py-3">
-                    <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400">
-                        Clinical Indicators — this session
-                    </p>
-                    <div className="flex flex-wrap gap-1.5">
-                        {session.indicators.map(ind => (
-                            <span key={ind} className="rounded-full border border-slate-100 bg-white px-2.5 py-1 text-[10px] font-medium capitalize text-slate-600 shadow-sm">
-                                {ind.replaceAll('_', ' ')}
-                            </span>
-                        ))}
-                    </div>
-                </div>
-            )}
-
             <p className="mt-3 text-[10px] text-slate-400">
                 Scores are inferred from natural conversation using PHQ-9 and GAD-7 rubrics. "Before" = first assessment in session; "After" = latest assessment after therapy was provided. Negative delta = symptom reduction.
             </p>

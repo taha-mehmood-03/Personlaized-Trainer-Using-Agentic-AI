@@ -394,6 +394,11 @@ def _detect_user_act(
     if lower in subject_answers:
         return "answering_previous_question", "contextual_followup", flags + ["answering_previous_question", "subject_answer"], "last_assistant_question", "ask_next_context_question"
 
+    # If the gate explicitly flagged a NEW emotional disclosure, trust it —
+    # the user is sharing something genuinely new, not just answering a question.
+    if "new_emotional_disclosure" in gate_flags:
+        return "new_disclosure", "therapeutic", flags + ["new_emotional_disclosure"], "active_concern", "ask_next_context_question"
+
     if has_prior_assistant_question and not text.strip().endswith("?"):
         answer_flag = f"{expected_answer_type}_answer" if expected_answer_type else "answering_previous_question"
         answer_flags = ["answering_previous_question", answer_flag]
@@ -668,6 +673,17 @@ def commit_conversation_context(state: dict, previous_context: Optional[dict] = 
         updates["active_technique"] = offered
         updates["question_count_since_technique"] = 0
         updates["dialogue_solution_turn_count"] = 0
+        # Anti-repetition: accumulate displayed technique IDs
+        tech_id = technique.get("id") or technique.get("technique_id") or ""
+        if tech_id:
+            prev_displayed = list(
+                (previous_context or {}).get("techniques_displayed_ids")
+                or state.get("techniques_displayed_ids")
+                or []
+            )
+            if tech_id not in prev_displayed:
+                prev_displayed.append(tech_id)
+            updates["techniques_displayed_ids"] = prev_displayed
     elif latest and latest.get("name"):
         updates["latest_recommended_technique"] = latest
 

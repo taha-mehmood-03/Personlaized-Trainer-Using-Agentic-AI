@@ -46,6 +46,23 @@ async def _get_saved_emergency_contacts(user_id: str) -> list[dict]:
         return []
 
 
+async def _get_user_display_name(user_id: str) -> str:
+    """Fetch the user's name for crisis alerts (so contacts see a name, not a raw ID)."""
+    try:
+        prisma = await get_prisma_client()
+        user = await prisma.user.find_unique(where={"id": user_id})
+        if user:
+            name = (getattr(user, "name", None) or "").strip()
+            if name:
+                return name
+            email = (getattr(user, "email", None) or "").strip()
+            if email:
+                return email.split("@")[0]  # readable handle, not the raw id
+    except Exception as exc:
+        print(f"[NODE: CRISIS_HANDLER]  Could not load user name: {str(exc)[:120]}")
+    return ""
+
+
 async def get_location_from_ip_async(ip_address: str = None) -> dict:
     """Get location from IP address asynchronously"""
     try:
@@ -214,6 +231,7 @@ async def handle_crisis(state: MentalHealthState) -> dict:
 
                 
                 saved_contacts = await _get_saved_emergency_contacts(user_id)
+                alert_user_name = await _get_user_display_name(user_id)
                 alert_results = []
 
                 if saved_contacts:
@@ -227,6 +245,7 @@ async def handle_crisis(state: MentalHealthState) -> dict:
                             user_details=user_details,
                             recipient=recipient,
                             sms_recipient=phone.replace("whatsapp:", ""),
+                            user_name=alert_user_name,
                         )
                         result["contact_name"] = contact.get("name")
                         alert_results.append(result)
@@ -246,7 +265,8 @@ async def handle_crisis(state: MentalHealthState) -> dict:
                         whatsapp_service.send_crisis_alert_voice_message(
                             user_id=user_id,
                             crisis_level=final_crisis_level,
-                            user_details=user_details
+                            user_details=user_details,
+                            user_name=alert_user_name,
                         )
                     )
 

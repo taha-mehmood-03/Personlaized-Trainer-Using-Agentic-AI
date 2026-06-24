@@ -406,6 +406,58 @@ def _apply_acoustic_overrides(
     return fused_emotion, fused_intensity, override_applied, override_reason
 
 
+# ============================================
+# GAP-BASED ACOUSTIC MASKING DETECTION
+# ============================================
+
+def _check_acoustic_masking(state: dict) -> tuple:
+    """
+    Detects emotional masking from the gap between Gemini's reading and DSP's reading.
+    Uses existing DSP features as ground truth signal — no model upgrade needed.
+
+    Returns:
+        (masking_detected: bool, reason: str)
+    """
+    gemini_distress = float(state.get("voice_distress_index", 0) or
+                            (state.get("voice_features") or {}).get("distress_index", 0) or 0)
+    acoustic_distress = float(state.get("acoustic_distress_proxy", 0) or
+                              (state.get("voice_features") or {}).get("acoustic_distress_proxy", 0) or 0)
+    pause_density = float(state.get("voice_pause_density", 0) or
+                          (state.get("voice_features") or {}).get("pause_density", 0) or 0)
+    text_emotion = (
+        state.get("fused_emotion") or state.get("emotion") or "neutral"
+    ).lower()
+
+    gap = acoustic_distress - gemini_distress
+    positive_text = text_emotion in ("joy", "neutral", "surprise")
+
+    # Rule 1: Large gap between DSP and Gemini with positive text emotion
+    # Catches: crying + "I am feeling so happy" when Gemini trusts the words
+    if gap > 0.30 and positive_text:
+        return True, (
+            f"DSP distress ({acoustic_distress:.2f}) far exceeds Gemini reading "
+            f"({gemini_distress:.2f}) — voice contradicts stated emotion"
+        )
+
+    # Rule 2: High pause density + claimed joy
+    # Happy people don't speak with 45%+ silence
+    if pause_density > 0.45 and text_emotion == "joy" and acoustic_distress > 0.35:
+        return True, (
+            f"Pause density {pause_density:.2f} too high for genuine joy "
+            f"— likely suppressed distress"
+        )
+
+    # Rule 3: Elevated acoustic distress + Gemini gave near-zero + positive text
+    # Catches when Gemini was completely fooled by word content
+    if acoustic_distress > 0.40 and gemini_distress < 0.15 and positive_text:
+        return True, (
+            f"Gemini distress ({gemini_distress:.2f}) implausibly low given "
+            f"acoustic signal ({acoustic_distress:.2f}) — Gemini likely dominated by word content"
+        )
+
+    return False, ""
+
+
 def _fusion_metadata(
     *,
     state: MentalHealthState,
@@ -622,6 +674,38 @@ def fuse_emotions(state: MentalHealthState) -> dict:
             if anchored_emotion != fused_emotion and fused_intensity >= 0.5:
                 fused_emotion = anchored_emotion
 
+        # Gemini-detected voice-text conflict (from updated prompt)
+        gemini_conflict = bool(voice_features.get("voice_text_conflict", False))
+        if gemini_conflict and not override_applied:
+            conflict_desc = voice_features.get("conflict_description") or "voice contradicts words"
+            print(
+                f"[EMOTION_FUSION]  GEMINI VOICE-TEXT CONFLICT: {conflict_desc}"
+            )
+            override_applied = True
+
+        # Gap-based acoustic masking check (catches Gemini being fooled by words)
+        masking_state = {
+            "voice_features": voice_features,
+            "voice_distress_index": float(voice_features.get("distress_index", 0.0)),
+            "acoustic_distress_proxy": float(voice_features.get("acoustic_distress_proxy", 0) or 0),
+            "voice_pause_density": float(voice_features.get("pause_density", 0.25)),
+            "fused_emotion": fused_emotion,
+            "emotion": text_emotion,
+        }
+        gap_masking_detected, gap_masking_reason = _check_acoustic_masking(masking_state)
+        if gap_masking_detected:
+            override_applied = True
+            acoustic_distress_val = float(voice_features.get("acoustic_distress_proxy", 0) or 0)
+            fused_intensity = max(fused_intensity, acoustic_distress_val * 0.80)
+            print(
+                f"[MASKING DETECTED] {gap_masking_reason} | "
+                f"intensity boosted to {fused_intensity:.2f}"
+            )
+        # Also flag masking if Gemini itself detected the conflict
+        if gemini_conflict and not gap_masking_detected:
+            gap_masking_detected = True
+            gap_masking_reason = voice_features.get("conflict_description") or "Gemini detected voice-text conflict"
+
         print(
             f"[NODE: EMOTION_FUSION]  Fused (therapeutic voice): {fused_emotion.upper()} | "
             f"Intensity: {fused_intensity:.0%}"
@@ -636,6 +720,11 @@ def fuse_emotions(state: MentalHealthState) -> dict:
             distress_index=float(voice_features.get("distress_index", 0.0)),
             override_applied=override_applied,
         )
+
+        # Merge gap masking into metadata
+        if gap_masking_detected:
+            metadata["possible_masking"] = True
+            metadata["masking_reason"] = gap_masking_reason
 
         return {
             "emotion":                 fused_emotion,
@@ -832,6 +921,25 @@ def fuse_emotions(state: MentalHealthState) -> dict:
         if voice_secondary_subs:
             secondary_sub_emotions = voice_secondary_subs
 
+    # Gap-based acoustic masking check (CASE 2)
+    masking_state_c2 = {
+        "voice_features": voice_features,
+        "voice_distress_index": distress_index,
+        "acoustic_distress_proxy": float(voice_features.get("acoustic_distress_proxy", 0) or 0),
+        "voice_pause_density": float(voice_features.get("pause_density", 0.25)),
+        "fused_emotion": fused_emotion,
+        "emotion": text_emotion,
+    }
+    gap_masking_detected, gap_masking_reason = _check_acoustic_masking(masking_state_c2)
+    if gap_masking_detected:
+        override_applied = True
+        acoustic_distress_val = float(voice_features.get("acoustic_distress_proxy", 0) or 0)
+        fused_intensity = max(fused_intensity, acoustic_distress_val * 0.80)
+        print(
+            f"[MASKING DETECTED] {gap_masking_reason} | "
+            f"intensity boosted to {fused_intensity:.2f}"
+        )
+
     print(f"[NODE: EMOTION_FUSION]  Fused: {fused_emotion.upper()} | "
           f"Intensity: {fused_intensity:.0%} | Mode: {mode}")
     metadata = _fusion_metadata(
@@ -844,6 +952,11 @@ def fuse_emotions(state: MentalHealthState) -> dict:
         distress_index=distress_index,
         override_applied=override_applied,
     )
+
+    # Merge gap masking into metadata (CASE 2)
+    if gap_masking_detected:
+        metadata["possible_masking"] = True
+        metadata["masking_reason"] = gap_masking_reason
 
     return {
         "emotion":         fused_emotion,

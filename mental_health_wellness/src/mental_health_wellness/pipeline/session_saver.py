@@ -333,7 +333,24 @@ async def save_session(state: MentalHealthState) -> dict:
                 "save_errors": ["No messages in state"]
             }
         
-        user_message = messages[-1].content if messages else ""
+        # Use the last HUMAN message as the user message — NOT messages[-1].
+        # Bypass routes (positive_feedback, technique_follow_up, …) append BOTH the
+        # user turn AND the assistant reply to `messages` before persisting, so
+        # messages[-1] is the AIMessage. Taking it blindly stored the assistant's
+        # text in the USER row (user content overwritten by the assistant reply).
+        def _is_human(m) -> bool:
+            t = (getattr(m, "type", "") or getattr(m, "role", "") or "").lower()
+            return t in ("human", "user") or m.__class__.__name__ == "HumanMessage"
+
+        user_message = ""
+        for _m in reversed(messages):
+            if _is_human(_m):
+                user_message = getattr(_m, "content", "") or ""
+                break
+        if not user_message and messages:
+            # Fallback: last message that is NOT the assistant's final_response.
+            _last = getattr(messages[-1], "content", "") or ""
+            user_message = "" if _last == final_response else _last
         tools_used = state.get("tools_used", [])
         
         saved_session_id = None
@@ -617,6 +634,7 @@ async def save_session(state: MentalHealthState) -> dict:
                 # ============================================
                 clinical_severity = state.get("clinical_severity", "minimal")
                 _SEVERITY_MAP = {
+                    "minimal": "MINIMAL",
                     "mild": "MILD",
                     "moderate": "MODERATE",
                     "moderately_severe": "MODERATELY_SEVERE",
@@ -638,8 +656,16 @@ async def save_session(state: MentalHealthState) -> dict:
                 _raw_gad7 = state.get("clinical_raw_gad7") or state.get("clinical_gad7_score", 0)
                 _start_score = state.get("session_start_clinical_score")
 
+                # The severity stored in a log row MUST match the PHQ-9/GAD-7 scores
+                # stored in that SAME row. Derive it from the raw scores we are about
+                # to persist — never from the longitudinal/aggregated label, which can
+                # legitimately differ from this single turn's numbers and otherwise
+                # produces rows like "SEVERE (PHQ-9=2)" that look broken on the dashboard.
+                from ..services.clinical_aggregator import _severity_from_scores as _sev_from_scores
+                _score_severity = _sev_from_scores(int(_raw_phq9 or 0), int(_raw_gad7 or 0))
+
                 _should_write_normal = (
-                    clinical_severity and clinical_severity != "minimal"
+                    _score_severity != "minimal"
                     and not _skipped_this_turn
                     and session_id
                 )
@@ -656,7 +682,7 @@ async def save_session(state: MentalHealthState) -> dict:
 
                 if (_should_write_normal or _should_write_closing) and session_id:
                     try:
-                        db_severity = _SEVERITY_MAP.get(clinical_severity, "MILD") if clinical_severity and clinical_severity != "minimal" else "MILD"
+                        db_severity = _SEVERITY_MAP.get(_score_severity, "MILD")
                         # Within-session delta: raw current score vs session-start baseline
                         _within_delta = round(_raw_phq9 - _start_score, 1) if _start_score is not None else state.get("clinical_delta")
                         await prisma.clinicalassessmentlog.create(data={
