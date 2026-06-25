@@ -1,0 +1,74 @@
+name: Sync backend to Hugging Face Space
+
+# Auto-mirrors the FastAPI backend (mental_health_wellness/) to a Hugging Face
+# Docker Space on every push to main. HF then rebuilds the Space automatically.
+# You only ever work in GitHub — the Space stays in sync.
+#
+# ── ONE-TIME SETUP (all in GitHub, nothing to edit in this file) ──────────────
+# GitHub repo → Settings → Secrets and variables → Actions:
+#
+#   Variables tab → New variable:
+#       HF_USERNAME = your Hugging Face username
+#       HF_SPACE    = your Space name (e.g. sentimind-backend)
+#
+#   Secrets tab → New repository secret:
+#       HF_TOKEN    = a Hugging Face WRITE token (huggingface.co/settings/tokens)
+# ──────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'mental_health_wellness/**'
+      - '.github/workflows/sync-to-hf-space.yml'
+  workflow_dispatch:        # allow manual runs from the Actions tab
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify configuration
+        env:
+          HF_USERNAME: ${{ vars.HF_USERNAME }}
+          HF_SPACE: ${{ vars.HF_SPACE }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          missing=""
+          [ -z "$HF_USERNAME" ] && missing="$missing HF_USERNAME(variable)"
+          [ -z "$HF_SPACE" ]    && missing="$missing HF_SPACE(variable)"
+          [ -z "$HF_TOKEN" ]    && missing="$missing HF_TOKEN(secret)"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing required config:$missing"
+            echo "Set them in: GitHub repo → Settings → Secrets and variables → Actions"
+            exit 1
+          fi
+          echo "Config OK → will sync to spaces/$HF_USERNAME/$HF_SPACE"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Push backend subfolder to the HF Space
+        env:
+          HF_USERNAME: ${{ vars.HF_USERNAME }}
+          HF_SPACE: ${{ vars.HF_SPACE }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -e
+          cd mental_health_wellness
+
+          # Safety: never publish local secrets or cruft to the public Space
+          rm -f .env .env.*
+          rm -rf .venv venv logs __pycache__ tests
+
+          # Build a clean one-commit repo from the subfolder and force-push it
+          # to the Space's main branch (the Space is a deploy mirror of this folder).
+          git init -q
+          git checkout -q -b main
+          git add .
+          git -c user.email="ci@github" -c user.name="github-actions" \
+              commit -q -m "Sync from GitHub: ${GITHUB_SHA::7}"
+          git push -q --force \
+            "https://${HF_USERNAME}:${HF_TOKEN}@huggingface.co/spaces/${HF_USERNAME}/${HF_SPACE}" \
+            main
+
+          echo "✅ Synced to https://huggingface.co/spaces/${HF_USERNAME}/${HF_SPACE} — HF is rebuilding now."
