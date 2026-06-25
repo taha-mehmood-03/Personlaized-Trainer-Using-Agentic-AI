@@ -5,14 +5,11 @@ name: Sync backend to Hugging Face Space
 # You only ever work in GitHub — the Space stays in sync.
 #
 # ── ONE-TIME SETUP (all in GitHub, nothing to edit in this file) ──────────────
-# GitHub repo → Settings → Secrets and variables → Actions:
-#
-#   Variables tab → New variable:
-#       HF_USERNAME = your Hugging Face username
-#       HF_SPACE    = your Space name (e.g. sentimind-backend)
-#
-#   Secrets tab → New repository secret:
-#       HF_TOKEN    = a Hugging Face WRITE token (huggingface.co/settings/tokens)
+# GitHub repo → Settings → Secrets and variables → Actions → Secrets tab,
+# add three repository secrets:
+#       HF_USERNAME = your Hugging Face username   (e.g. tahamehmood)
+#       HF_SPACE    = your Space name              (e.g. sentimind-backend)
+#       HF_TOKEN    = a Hugging Face WRITE token   (huggingface.co/settings/tokens)
 # ──────────────────────────────────────────────────────────────────────────────
 
 on:
@@ -29,17 +26,17 @@ jobs:
     steps:
       - name: Verify configuration
         env:
-          HF_USERNAME: ${{ vars.HF_USERNAME }}
-          HF_SPACE: ${{ vars.HF_SPACE }}
+          HF_USERNAME: ${{ secrets.HF_USERNAME }}
+          HF_SPACE: ${{ secrets.HF_SPACE }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           missing=""
-          [ -z "$HF_USERNAME" ] && missing="$missing HF_USERNAME(variable)"
-          [ -z "$HF_SPACE" ]    && missing="$missing HF_SPACE(variable)"
-          [ -z "$HF_TOKEN" ]    && missing="$missing HF_TOKEN(secret)"
+          [ -z "$HF_USERNAME" ] && missing="$missing HF_USERNAME"
+          [ -z "$HF_SPACE" ]    && missing="$missing HF_SPACE"
+          [ -z "$HF_TOKEN" ]    && missing="$missing HF_TOKEN"
           if [ -n "$missing" ]; then
-            echo "::error::Missing required config:$missing"
-            echo "Set them in: GitHub repo → Settings → Secrets and variables → Actions"
+            echo "::error::Missing required repository secrets:$missing"
+            echo "Add them in: GitHub repo → Settings → Secrets and variables → Actions → Secrets tab"
             exit 1
           fi
           echo "Config OK → will sync to spaces/$HF_USERNAME/$HF_SPACE"
@@ -49,8 +46,8 @@ jobs:
 
       - name: Push backend subfolder to the HF Space
         env:
-          HF_USERNAME: ${{ vars.HF_USERNAME }}
-          HF_SPACE: ${{ vars.HF_SPACE }}
+          HF_USERNAME: ${{ secrets.HF_USERNAME }}
+          HF_SPACE: ${{ secrets.HF_SPACE }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -e
