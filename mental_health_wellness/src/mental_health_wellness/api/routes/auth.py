@@ -43,7 +43,7 @@ async def create_user(request: UserCreateRequest):
 
 
 @router.post("/api/auth/signup")
-@limiter.limit("10/minute")
+ 
 async def auth_signup(request: UserLoginRequest, http_request: Request):
     """Sign up a new user with email and password."""
     import bcrypt
@@ -116,7 +116,7 @@ async def auth_signup(request: UserLoginRequest, http_request: Request):
 
 
 @router.post("/api/auth/login")
-@limiter.limit("10/minute")
+ 
 async def auth_login(request: UserLoginRequest, http_request: Request):
     """Log in with email and password."""
     import bcrypt
