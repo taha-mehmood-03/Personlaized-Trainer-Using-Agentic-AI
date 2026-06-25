@@ -51,6 +51,13 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -e
+
+          # Strip any stray whitespace/newlines that often sneak into pasted
+          # secrets — they corrupt the auth URL ("Malformed input to a URL function").
+          HF_USERNAME="$(printf '%s' "$HF_USERNAME" | tr -d '[:space:]')"
+          HF_SPACE="$(printf '%s' "$HF_SPACE" | tr -d '[:space:]')"
+          HF_TOKEN="$(printf '%s' "$HF_TOKEN" | tr -d '[:space:]')"
+
           cd mental_health_wellness
 
           # Safety: never publish local secrets or cruft to the public Space
@@ -64,8 +71,11 @@ jobs:
           git add .
           git -c user.email="ci@github" -c user.name="github-actions" \
               commit -q -m "Sync from GitHub: ${GITHUB_SHA::7}"
+
+          # Use a token-only credential (x-access-token) — avoids putting the
+          # username in the URL, which removes one more source of malformed input.
           git push -q --force \
-            "https://${HF_USERNAME}:${HF_TOKEN}@huggingface.co/spaces/${HF_USERNAME}/${HF_SPACE}" \
+            "https://x-access-token:${HF_TOKEN}@huggingface.co/spaces/${HF_USERNAME}/${HF_SPACE}" \
             main
 
           echo "✅ Synced to https://huggingface.co/spaces/${HF_USERNAME}/${HF_SPACE} — HF is rebuilding now."
