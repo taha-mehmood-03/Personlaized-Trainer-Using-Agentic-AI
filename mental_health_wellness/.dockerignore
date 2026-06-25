@@ -1,0 +1,36 @@
+# Never bake secrets or local cruft into the image
+.env
+.env.*
+*.env
+
+# Virtual envs / caches
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local data, logs, scratch
+logs/
+*.log
+*.out.log
+*.err.log
+scratchpad/
+tmp/
+temp/
+
+# VCS / editor
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# Node (not part of the backend image)
+node_modules/
+
+# Tests & docs not needed at runtime
+tests/
+*.md
