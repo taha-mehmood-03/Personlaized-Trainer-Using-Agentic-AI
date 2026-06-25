@@ -21,7 +21,7 @@ load_dotenv()
 DEFAULT_MODEL_GATE = "gemini-3.1-flash-lite"
 DEFAULT_MODEL_MOOD = "gemini-3.1-flash-lite"
 DEFAULT_MODEL_BYPASS = "gemini-3.1-flash-lite"
-DEFAULT_MODEL_RESPONSE = "gemini-3.5-flash"
+DEFAULT_MODEL_RESPONSE = "gemini-3.1-flash-lite"
 DEFAULT_MODEL_CRISIS = "gemini-3.1-flash-lite"
 DEFAULT_MODEL_FALLBACK = "gemini-3.1-flash-lite"
 DEFAULT_MODEL_ALT = "gemini-3.1-flash-lite"
@@ -90,7 +90,7 @@ class GeminiLLMManager:
 
     Model tiers:
       - gate/mood/background JSON: gemini-3.1-flash-lite
-      - final responses:           gemini-3.5-flash
+      - final responses:           gemini-3.1-flash-lite
       - crisis/fallback JSON:      gemini-3.1-flash-lite
     """
 
@@ -117,6 +117,12 @@ class GeminiLLMManager:
         self.model_fallback = _env_gemini_model("MODEL_FALLBACK", DEFAULT_MODEL_FALLBACK)
         self.model_alt = _env_gemini_model("MODEL_ALT", DEFAULT_MODEL_ALT)
         self.model = model if _is_gemini_model(model) else self.model_response
+        for attr in ("model_gate", "model_mood", "model_bypass", "model_response", "model_crisis", "model_fallback", "model_alt", "model"):
+            value = getattr(self, attr, None)
+            if value and not _is_gemini_model(value):
+                setattr(self, attr, DEFAULT_MODEL_RESPONSE)
+            elif value and value != DEFAULT_MODEL_RESPONSE and attr in {"model_gate", "model_mood", "model_bypass", "model_response", "model_crisis", "model_fallback", "model_alt", "model"}:
+                setattr(self, attr, DEFAULT_MODEL_RESPONSE)
         self.model_fast = os.getenv("GEMINI_MODEL_FAST") or os.getenv("MODEL_FAST") or self.model_mood
         if not _is_gemini_model(self.model_fast):
             self.model_fast = self.model_mood

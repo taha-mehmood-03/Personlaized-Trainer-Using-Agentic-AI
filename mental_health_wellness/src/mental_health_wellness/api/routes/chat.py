@@ -116,7 +116,6 @@ async def _preprocess_voice(
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("/api/chat", response_model=ChatResponse)
-@limiter.limit("60/minute")
 async def chat(request: ChatRequest, http_request: Request):
     """Main chat endpoint using the deterministic graph pipeline."""
     request_start = time.time()
