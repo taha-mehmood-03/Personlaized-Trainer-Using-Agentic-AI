@@ -32,6 +32,12 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 COPY prisma/ ./prisma/
 RUN python -m prisma generate
 
+# 2b) Pre-download the sentence-transformers embedding model into the image cache.
+# HF Spaces sandboxes outbound network at RUNTIME, so downloading it then fails
+# ("couldn't connect to huggingface.co"). Baking it in at build time (build has
+# internet) means semantic memory works at runtime with no network needed.
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
+
 # 3) Copy the rest of the application
 COPY . .
 
